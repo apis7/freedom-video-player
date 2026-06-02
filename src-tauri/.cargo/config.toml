@@ -1,0 +1,4 @@
+# Point libmpv2's build.rs at our vendored libmpv binaries.
+# Path is relative to the manifest dir (src-tauri/).
+[env]
+MPV_SOURCE = { value = "vendor/libmpv", relative = true }

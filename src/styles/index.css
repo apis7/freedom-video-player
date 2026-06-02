@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  color: #e6e8ee;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+/* Focus rings — user_experience.md #57 */
+*:focus-visible {
+  outline: 2px solid #4f8cff;
+  outline-offset: 1px;
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Sweeping highlight bar used by the Subs row while embedded subtitles are
+   being extracted. Pairs with the pulsing background to make the "working"
+   state unmistakable. */
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+.animate-\[slide_1\.4s_ease-in-out_infinite\] {
+  animation: slide 1.4s ease-in-out infinite;
+}

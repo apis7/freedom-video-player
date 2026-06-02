@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Tauri / Rust
+src-tauri/target/
+# Cargo.lock is intentionally tracked for the binary crate — reproducible builds.
+# (was previously ignored; un-ignored for first GitHub push)
+
+# libmpv binary (~113 MB) — exceeds GitHub's 100 MB single-file limit.
+# Fetch separately; see vendor/libmpv/README.md for instructions.
+src-tauri/vendor/libmpv/libmpv-2.dll
+src-tauri/vendor/libmpv/libmpv.dll.a
+src-tauri/vendor/libmpv/mpv.def
+src-tauri/vendor/libmpv/mpv.exp
+src-tauri/vendor/libmpv/mpv.lib
+# The /include subdir is tiny header files — keep tracked.
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# UI mockup is reference-only; keep it but don't bundle
+UI_mockup/FPV/
+!UI_mockup/FPV.zip
+Freedom Video Player.lnk
+
+# Private project docs — kept locally, not pushed
+CLAUDE.md
+WORDLISTS.md
+md_files/
+
+# TMDb read-access token — embedded into the binary via include_str!
+# but not committed to the public repo.
+src-tauri/.tmdb_token

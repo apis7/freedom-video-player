@@ -1,0 +1,52 @@
+[package]
+name = "fvp"
+version = "0.1.0"
+description = "Freedom Video Player"
+authors = ["FVP"]
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "fvp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libmpv2 = "4"
+libmpv2-sys = "4"
+notify = "6"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+parking_lot = "0.12"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+# Synchronous HTTP client for TMDb lookups. Sync + rustls keeps the
+# tree small and dodges the cmake/OpenSSL dance reqwest would pull in.
+ureq = { version = "2", features = ["json", "tls"], default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
+
+# Crates committed in tech_stack.md but deferred until first needed:
+#   tokio (async runtime)
+#   tracing, tracing-subscriber (logging)
+#   thiserror, anyhow (errors)
+#   directories-next (config paths)
+#   toml (settings persistence)
+#   notify (folder watch — chapter 3)
+#   blake3 (hashing)
+#   ed25519-dalek (.free signing)
+#   img_hash (perceptual frame hash)
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

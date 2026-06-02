@@ -1,0 +1,82 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Freedom Video Player",
+  "version": "0.1.0",
+  "identifier": "com.fvp.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Freedom Video Player",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 500,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "category": "Video",
+    "copyright": "Copyright © 2026 Freedom Video Player",
+    "shortDescription": "Profile-based video filtering for family viewing.",
+    "longDescription": "Freedom Video Player — A cross-platform video player with profile-based filtering. Create or share .free profiles to automate modified playback of your video files without modifying them.",
+    "resources": {
+      "vendor/libmpv/libmpv-2.dll": "libmpv-2.dll"
+    },
+    "fileAssociations": [
+      {
+        "ext": [
+          "mkv",
+          "mp4",
+          "avi",
+          "mov",
+          "m4v",
+          "webm",
+          "wmv",
+          "flv",
+          "mpg",
+          "mpeg",
+          "ts",
+          "m2ts"
+        ],
+        "name": "Video file",
+        "description": "Video file (Freedom Video Player)",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["free"],
+        "name": "FVP Profile",
+        "description": "Freedom Video Player Profile",
+        "role": "Editor"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "languages": ["English"],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

@@ -591,22 +591,31 @@ function ComparisonCard({
             void libraryIpc
               .trashFiles([f.id])
               .then((result) => {
-                const ok = result.removed + result.trashed;
-                if (ok > 0) {
-                  // Closing the dialog so we don't try to operate on a
-                  // file that no longer exists. Caller's onResolved
-                  // refreshes pairs + items.
-                  onResolved();
-                }
+                // Always advance — even when nothing was removable
+                // (file already gone, permissions, etc.) the pair is
+                // resolved enough that staying here would just trap
+                // the user. Show a toast for the failure mode so it's
+                // not silent.
                 if (result.failed.length > 0) {
                   showToast(
                     `Couldn't delete: ${result.failed[0]}`,
-                    "error",
+                    "warn",
                     4000,
                   );
+                } else if (result.removed + result.trashed > 0) {
+                  showToast(
+                    `Deleted "${fileName}".`,
+                    "info",
+                    2500,
+                  );
                 }
+                onResolved();
               })
-              .catch((err) => showToast(`Delete failed: ${err}`, "error"));
+              .catch((err) => {
+                showToast(`Delete failed: ${err}`, "error");
+                // Still advance so the user isn't stuck.
+                onResolved();
+              });
           }}
           className="flex-1 px-2 py-1 bg-fvp-bg border border-fvp-err/40 text-fvp-err hover:bg-fvp-err/10 rounded"
           title="Move this video to the OS Recycle Bin and remove it from the library."

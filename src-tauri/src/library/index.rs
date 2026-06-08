@@ -42,15 +42,16 @@ fn walk(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<std::path::Pat
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // Skip recycle-bin / trash containers. Synology NAS keeps
-            // "deleted" files inside `#recycle`; Windows uses
-            // `$RECYCLE.BIN`; macOS/Linux use `.Trash` / `.Trash-1000`.
-            // These ARE technically still on the filesystem but the
-            // user has explicitly told the OS they're deleted — we
-            // should not treat them as library content.
-            if is_recycle_bin_dir(&path) {
-                continue;
-            }
+            // Earlier versions skipped `#recycle` / `$RECYCLE.BIN` /
+            // `.Trash*` subdirs — assumption: anything in them was
+            // deleted-by-the-user content. That broke NAS users
+            // (Synology) who keep real library content inside a folder
+            // literally named `#recycle`: those files were never
+            // re-enumerated, so `mark_folder_files_missing` permanently
+            // flagged them as broken on every rescan. Walk every
+            // directory now; the reconciliation pass still uses
+            // `path_is_in_recycle_bin` to suppress probable-pair
+            // suggestions for things that look like junk.
             walk(&path, depth + 1, max_depth, out);
             continue;
         }
@@ -66,6 +67,7 @@ fn walk(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<std::path::Pat
 /// container. Matches by leaf folder name only — caller decides
 /// whether to recurse into it. Cross-platform: Synology `#recycle`,
 /// Windows `$RECYCLE.BIN`, macOS / Linux `.Trash*`.
+#[allow(dead_code)]
 fn is_recycle_bin_dir(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;

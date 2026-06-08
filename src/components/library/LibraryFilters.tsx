@@ -58,6 +58,13 @@ export interface LibraryFilterState {
    *  flagged is_missing (so the user can pull up everything that needs
    *  rescue). "no" hides them. */
   broken: PresenceFilter;
+  /** Duplicates filter — "yes" surfaces every file row whose identity
+   *  has 2+ file rows (i.e. the same fingerprinted bytes indexed under
+   *  more than one path). "no" hides anything that has duplicates. The
+   *  duplicate-set computation happens in the parent (Library.tsx)
+   *  because applyFilters() runs per-row and doesn't see the full row
+   *  list; the set is precomputed and passed in via filter context. */
+  duplicates: PresenceFilter;
 }
 
 export const EMPTY_FILTERS: LibraryFilterState = {
@@ -81,6 +88,7 @@ export const EMPTY_FILTERS: LibraryFilterState = {
   seriesFilter: "any",
   is3d: "any",
   broken: "any",
+  duplicates: "any",
 };
 
 function presenceTest(value: boolean, filter: PresenceFilter): boolean {
@@ -142,6 +150,24 @@ export function applyFilters(
   familyViewOn: boolean,
 ): LibraryRow[] {
   const needle = filters.searchText.trim().toLowerCase();
+  // Identity-ids that show up in 2+ file rows in the input. Computed
+  // once per call so the per-row .filter() can do an O(1) lookup
+  // instead of an O(N²) sweep. Empty when the duplicates filter is
+  // "any" — saves the work on the common path.
+  const dupSet: Set<number> | null =
+    filters.duplicates === "any"
+      ? null
+      : (() => {
+          const counts = new Map<number, number>();
+          for (const r of rows) {
+            counts.set(r.identity.id, (counts.get(r.identity.id) ?? 0) + 1);
+          }
+          const s = new Set<number>();
+          for (const [id, c] of counts) {
+            if (c > 1) s.add(id);
+          }
+          return s;
+        })();
   return rows.filter((row) => {
     // Family View — hard mask. Takes precedence over the per-filter setting.
     if (familyViewOn && row.identity.non_family_friendly) return false;
@@ -271,6 +297,11 @@ export function applyFilters(
       if (!presenceTest(row.file.is_missing, filters.broken)) return false;
     }
 
+    if (dupSet) {
+      const isDup = dupSet.has(row.identity.id);
+      if (!presenceTest(isDup, filters.duplicates)) return false;
+    }
+
     return true;
   });
 }
@@ -341,7 +372,8 @@ export function LibraryFilters({
     filters.sizeFilter !== "any" ||
     filters.seriesFilter !== "any" ||
     filters.is3d !== "any" ||
-    filters.broken !== "any";
+    filters.broken !== "any" ||
+    filters.duplicates !== "any";
 
   return (
     <aside className="bg-fvp-surface text-xs flex flex-col">
@@ -564,6 +596,11 @@ export function LibraryFilters({
               label="Broken path"
               value={filters.broken}
               onChange={(v) => onChange({ ...filters, broken: v })}
+            />
+            <PresenceMini
+              label="Duplicates"
+              value={filters.duplicates}
+              onChange={(v) => onChange({ ...filters, duplicates: v })}
             />
           </div>
         </Section>

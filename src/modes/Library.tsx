@@ -208,10 +208,13 @@ export function LibraryMode() {
 
   const refreshProbablePairs = useCallback(async () => {
     try {
-      setProbablePairs(await libraryIpc.findProbablePairs());
+      const fresh = await libraryIpc.findProbablePairs();
+      setProbablePairs(fresh);
+      return fresh;
     } catch {
       // Non-fatal — engine might fail on a malformed identity; we just
       // skip the badge instead of showing an error toast.
+      return null;
     }
   }, []);
 
@@ -1825,18 +1828,17 @@ export function LibraryMode() {
         <ReconciliationDialog
           pair={probablePairs[activePairIdx]!}
           onResolved={() => {
-            // Pull a fresh list (dismissal / transfer may have removed
-            // this pair from rotation). If more pairs remain, advance
-            // to the next; otherwise close.
-            void refreshProbablePairs().then(() => {
-              setActivePairIdx((current) => {
-                if (current === null) return null;
-                const nextIdx = current; // refreshed list is shorter
-                // After refresh, the array is regenerated; just go to
-                // index 0 if there's still anything to review.
-                if (nextIdx >= probablePairs.length - 1) return null;
-                return 0;
-              });
+            // Pull a fresh list and advance to its first entry. Using
+            // the returned `fresh` rather than the closure's stale
+            // `probablePairs` reference avoids a bug where the user
+            // would get stuck on a single pair (stale length always
+            // looked the same → loop never advanced).
+            void refreshProbablePairs().then((fresh) => {
+              if (!fresh || fresh.length === 0) {
+                setActivePairIdx(null);
+              } else {
+                setActivePairIdx(0);
+              }
             });
             void refreshItems();
           }}
@@ -1937,7 +1939,7 @@ function LibraryToolsMenu({
           className="absolute right-0 top-full mt-1 z-30 w-72 bg-fvp-surface border border-fvp-border rounded shadow-2xl divide-y divide-fvp-border/60"
           onClick={(e) => e.stopPropagation()}
         >
-          {item("🔍 Find duplicates", "Files that share identical content (same strong fingerprint)", onRunDuplicates)}
+          {item("🧹 Clean duplicates", "Files that share identical content (same strong fingerprint) — review and delete the extra copies", onRunDuplicates)}
           {item("⬆ Look for upgrades", "Re-scan for likely higher-quality copies of existing titles", onRunUpgrades)}
           {item("📺 Detect series", "Scan folders and propose series groupings", onOpenDetectSeries)}
           {item("📊 Analytics", "Watch patterns by tag, time window, and movie", onOpenAnalytics)}

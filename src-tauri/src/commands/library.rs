@@ -1272,6 +1272,22 @@ pub fn library_trash_files(
     };
     let mut to_remove: Vec<i64> = Vec::new();
     for (id, path) in &paths {
+        // If the file is already gone from disk, treat the trash op as
+        // a success — the user's intent ("get rid of this") is satisfied
+        // and the library row is now meaningless. Skips the noisy "file
+        // not found" error that previously bubbled up to the UI. We
+        // check via fs::metadata BEFORE handing off to trash::delete
+        // because the trash crate's error mapping for "missing" varies
+        // by OS / shell version and isn't programmatically reliable.
+        if !std::path::Path::new(path).exists() {
+            crate::log!(
+                "library",
+                "trash_files: {path} already absent on disk — silently removing row"
+            );
+            summary.trashed += 1;
+            to_remove.push(*id);
+            continue;
+        }
         match trash::delete(path) {
             Ok(()) => {
                 summary.trashed += 1;
@@ -1279,11 +1295,22 @@ pub fn library_trash_files(
                 crate::log!("library", "trash_files: trashed {path}");
             }
             Err(e) => {
-                crate::log!(
-                    "library",
-                    "trash_files: FAILED to trash {path}: {e}"
-                );
-                summary.failed.push(format!("{path}: {e}"));
+                // Race window: file vanished between our exists() check
+                // and the trash call. Still treat as success.
+                if !std::path::Path::new(path).exists() {
+                    crate::log!(
+                        "library",
+                        "trash_files: {path} disappeared during trash (race) — silently removing row"
+                    );
+                    summary.trashed += 1;
+                    to_remove.push(*id);
+                } else {
+                    crate::log!(
+                        "library",
+                        "trash_files: FAILED to trash {path}: {e}"
+                    );
+                    summary.failed.push(format!("{path}: {e}"));
+                }
             }
         }
     }

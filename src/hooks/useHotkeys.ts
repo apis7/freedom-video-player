@@ -98,6 +98,69 @@ export function useHotkeys() {
         return;
       }
 
+      // Ctrl+S — Save (Creator only). Silently overwrites the last save
+      // path when one exists, otherwise opens the Save modal pre-filled
+      // with the video stem. Ctrl+Shift+S — Save As: always opens the
+      // modal so you can pick a new filename (versioning).
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        (e.key === "s" || e.key === "S") &&
+        !e.altKey
+      ) {
+        if (state.mode !== "creator" || !state.currentFile) return;
+        e.preventDefault();
+        const evt = e.shiftKey ? "fvp:request-export-as" : "fvp:request-export";
+        window.dispatchEvent(new CustomEvent(evt));
+        return;
+      }
+
+      // Ctrl+Tab / Ctrl+Shift+Tab — Creator-only. Jump between snips that
+      // still need a category. Wraps around at the ends. Mirrors the
+      // hotkey advertised by the "uncategorized snips" save-blocker modal.
+      if ((e.ctrlKey || e.metaKey) && e.key === "Tab" && !e.altKey) {
+        if (state.mode !== "creator") return;
+        const uncategorized = state.snips
+          .filter((s) => s.categories.length === 0)
+          .sort((a, b) => a.start_ms - b.start_ms);
+        if (uncategorized.length === 0) {
+          state.showToast("No uncategorized snips remaining.", "info", 2000);
+          e.preventDefault();
+          return;
+        }
+        e.preventDefault();
+        const currentId = state.selectedSnipId;
+        const currentIdx = currentId
+          ? uncategorized.findIndex((s) => s.id === currentId)
+          : -1;
+        let nextIdx: number;
+        if (e.shiftKey) {
+          // Previous: if not currently on an uncategorized snip, jump to the
+          // LAST uncategorized snip before the playhead (else last overall).
+          if (currentIdx < 0) {
+            const posMs = state.position * 1000;
+            const before = [...uncategorized].reverse().find((s) => s.start_ms < posMs);
+            nextIdx = before
+              ? uncategorized.findIndex((s) => s.id === before.id)
+              : uncategorized.length - 1;
+          } else {
+            nextIdx = (currentIdx - 1 + uncategorized.length) % uncategorized.length;
+          }
+        } else {
+          if (currentIdx < 0) {
+            const posMs = state.position * 1000;
+            const after = uncategorized.find((s) => s.start_ms > posMs);
+            nextIdx = after ? uncategorized.findIndex((s) => s.id === after.id) : 0;
+          } else {
+            nextIdx = (currentIdx + 1) % uncategorized.length;
+          }
+        }
+        const target = uncategorized[nextIdx]!;
+        state.selectSnip(target.id);
+        markUserNavigation();
+        void playback.seek(target.start_ms / 1000);
+        return;
+      }
+
       // ── Undo / Redo (global where applicable) ──
       const isUndo =
         (e.ctrlKey || e.metaKey) &&

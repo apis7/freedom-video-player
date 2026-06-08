@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[tauri::command]
 pub async fn compute_fingerprint(path: String) -> Result<Fingerprint, String> {
-    eprintln!("[fvp:profile] compute_fingerprint: {path}");
+    crate::log!("profile", "compute_fingerprint: {path}");
     let started = std::time::Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
         fingerprint::compute_for_file(Path::new(&path))
@@ -15,15 +15,20 @@ pub async fn compute_fingerprint(path: String) -> Result<Fingerprint, String> {
     .await
     .map_err(|e| format!("join: {e}"))?;
     match &result {
-        Ok(fp) => eprintln!(
-            "[fvp:profile] fingerprint OK in {:?} (duration_ms={}, container={}, codec={}, phash_samples={})",
+        Ok(fp) => crate::log!(
+            "profile",
+            "fingerprint OK in {:?} (duration_ms={}, container={}, codec={}, phash_samples={})",
             started.elapsed(),
             fp.duration_ms,
             fp.container,
             fp.codec,
-            fp.phash_samples.len(),
+            fp.phash_samples.len()
         ),
-        Err(e) => eprintln!("[fvp:profile] fingerprint FAILED in {:?}: {e}", started.elapsed()),
+        Err(e) => crate::log!(
+            "profile",
+            "fingerprint FAILED in {:?}: {e}",
+            started.elapsed()
+        ),
     }
     result
 }
@@ -32,7 +37,7 @@ pub async fn compute_fingerprint(path: String) -> Result<Fingerprint, String> {
 pub async fn scan_folder_for_profiles(
     video_path: String,
 ) -> Result<Vec<fingerprint::MatchResult>, String> {
-    eprintln!("[fvp:profile] scan_folder_for_profiles for: {video_path}");
+    crate::log!("profile", "scan_folder_for_profiles for: {video_path}");
     let started = std::time::Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(&video_path);
@@ -46,57 +51,145 @@ pub async fn scan_folder_for_profiles(
     .map_err(|e| format!("join: {e}"))?;
     match &result {
         Ok(matches) => {
-            eprintln!(
-                "[fvp:profile] scan complete in {:?} — {} match candidate(s)",
+            crate::log!(
+                "profile",
+                "scan complete in {:?} — {} match candidate(s)",
                 started.elapsed(),
-                matches.len(),
+                matches.len()
             );
             for m in matches {
-                eprintln!(
-                    "[fvp:profile]   - {} (quality={:?}, snips={}, reasons={:?})",
+                crate::log!(
+                    "profile",
+                    "  - {} (quality={:?}, snips={}, reasons={:?})",
                     m.path,
                     m.score.quality,
                     m.profile.payload.snips.len(),
-                    m.score.reasons,
+                    m.score.reasons
                 );
             }
         }
-        Err(e) => eprintln!("[fvp:profile] scan FAILED in {:?}: {e}", started.elapsed()),
+        Err(e) => crate::log!(
+            "profile",
+            "scan FAILED in {:?}: {e}",
+            started.elapsed()
+        ),
     }
     result
 }
 
 #[tauri::command]
 pub fn load_profile(path: String) -> Result<FreeFile, String> {
-    eprintln!("[fvp:profile] load_profile: {path}");
+    crate::log!("profile", "load_profile: {path}");
     let result = io::load(Path::new(&path)).map_err(|e| e.to_string());
     match &result {
-        Ok(p) => eprintln!(
-            "[fvp:profile] loaded {} (schema={}, snips={}, signed={})",
+        Ok(p) => crate::log!(
+            "profile",
+            "loaded {} (schema={}, snips={}, signed={})",
             p.payload.metadata.name,
             p.schema,
             p.payload.snips.len(),
-            p.signature.is_some(),
+            p.signature.is_some()
         ),
-        Err(e) => eprintln!("[fvp:profile] load FAILED: {e}"),
+        Err(e) => crate::log!("profile", "load FAILED: {e}"),
     }
     result
 }
 
 #[tauri::command]
 pub fn save_profile(path: String, profile: FreeFile) -> Result<(), String> {
-    eprintln!(
-        "[fvp:profile] save_profile: {path} ({} snips, signed={})",
+    crate::log!(
+        "profile",
+        "save_profile: {path} ({} snips, signed={})",
         profile.payload.snips.len(),
-        profile.signature.is_some(),
+        profile.signature.is_some()
     );
-    let r = io::save(Path::new(&path), &profile).map_err(|e| e.to_string());
+    let target = Path::new(&path);
+    if let Err(e) = rotate_backups_if_needed(target) {
+        // Backups are a safety net — failure to rotate must not block the
+        // real save. Log loudly so a broken filesystem still gets seen.
+        crate::log!("profile", "backup rotation FAILED (continuing): {e}");
+    }
+    let r = io::save(target, &profile).map_err(|e| e.to_string());
     if let Err(e) = &r {
-        eprintln!("[fvp:profile] save FAILED: {e}");
+        crate::log!("profile", "save FAILED: {e}");
     } else {
-        eprintln!("[fvp:profile] save OK");
+        crate::log!("profile", "save OK");
     }
     r
+}
+
+/// Rolling daily backup rotation. Keeps up to three `.bakN` siblings of the
+/// current `.free`:
+///   .bak1 = most-recent previous editing day
+///   .bak2 = day before that
+///   .bak3 = three editing days back
+///
+/// On every save we check `.bak1`'s mtime: if it's on a different LOCAL
+/// calendar day than today (or .bak1 doesn't exist yet but a .free does),
+/// we rotate down (.bak2 → .bak3, .bak1 → .bak2) and copy the current
+/// pre-save .free into .bak1. Same-day re-saves leave the backups alone —
+/// so .bak1 always captures the *last save of a previous editing day*,
+/// not the previous save of today.
+///
+/// First save of a brand-new .free: nothing exists yet, so no rotation.
+fn rotate_backups_if_needed(free_path: &Path) -> Result<(), String> {
+    if !free_path.exists() {
+        return Ok(());
+    }
+    let bak1 = bak_path(free_path, 1);
+    let bak2 = bak_path(free_path, 2);
+    let bak3 = bak_path(free_path, 3);
+
+    let today = chrono::Local::now().date_naive();
+    let bak1_date = if bak1.exists() {
+        local_date_of_file(&bak1)?
+    } else {
+        None
+    };
+    let should_rotate = match bak1_date {
+        // bak1 was last touched on an earlier local day → start a new ring slot
+        Some(d) => d != today,
+        // .free exists but no .bak1 yet → seed the chain
+        None => true,
+    };
+    if !should_rotate {
+        return Ok(());
+    }
+    crate::log!(
+        "profile",
+        "rotating backups for {} (bak1 date={:?}, today={today})",
+        free_path.display(),
+        bak1_date,
+    );
+    if bak3.exists() {
+        std::fs::remove_file(&bak3).map_err(|e| format!("remove .bak3: {e}"))?;
+    }
+    if bak2.exists() {
+        std::fs::rename(&bak2, &bak3).map_err(|e| format!("rename .bak2→.bak3: {e}"))?;
+    }
+    if bak1.exists() {
+        std::fs::rename(&bak1, &bak2).map_err(|e| format!("rename .bak1→.bak2: {e}"))?;
+    }
+    std::fs::copy(free_path, &bak1).map_err(|e| format!("copy .free→.bak1: {e}"))?;
+    Ok(())
+}
+
+fn bak_path(free_path: &Path, n: u8) -> PathBuf {
+    // .free → .free.bak1 / .free.bak2 / .free.bak3
+    let mut s = free_path.as_os_str().to_owned();
+    s.push(format!(".bak{n}"));
+    PathBuf::from(s)
+}
+
+fn local_date_of_file(p: &Path) -> Result<Option<chrono::NaiveDate>, String> {
+    let md = match std::fs::metadata(p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("stat {}: {e}", p.display())),
+    };
+    let modified = md.modified().map_err(|e| format!("mtime: {e}"))?;
+    let dt: chrono::DateTime<chrono::Local> = modified.into();
+    Ok(Some(dt.date_naive()))
 }
 
 #[tauri::command]

@@ -1,6 +1,9 @@
+use crate::playback::audio_filter::{
+    build as build_effect_overlay, EffectGraph, EffectInputs,
+};
 use crate::playback::audio_replace::{build as build_overlay, OverlayGraph, OverlayInputs};
 use crate::playback::{AudioDevice, MpvPlayer, PlayerState, SubtitleTrack};
-use crate::profile::format::Snip;
+use crate::profile::format::{Snip, SnipAction};
 use tauri::State;
 
 #[tauri::command]
@@ -190,58 +193,112 @@ pub fn apply_audio_overlay(
 ) -> Result<bool, String> {
     let ar_count = snips
         .iter()
-        .filter(|s| matches!(s.action, crate::profile::format::SnipAction::AudioReplace { .. }))
+        .filter(|s| matches!(s.action, SnipAction::AudioReplace { .. }))
         .count();
-    eprintln!(
-        "[fvp:overlay] apply_audio_overlay called: total_snips={} audio_replace={} duration_ms={}",
+    let eff_count = snips
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.action,
+                SnipAction::MuteDialogue { .. } | SnipAction::AudioBlur { .. }
+            )
+        })
+        .count();
+    crate::log!(
+        "overlay",
+        "apply_audio_overlay called: total_snips={} audio_replace={} effect_filters={} duration_ms={}",
         snips.len(),
         ar_count,
-        file_duration_ms,
+        eff_count,
+        file_duration_ms
     );
 
     let path = player.current_path().ok_or_else(|| {
-        eprintln!("[fvp:overlay] ERROR: no file currently loaded");
+        crate::log!("overlay", "ERROR: no file currently loaded");
         "no file currently loaded".to_string()
     })?;
-    eprintln!("[fvp:overlay] target file: {path}");
+    crate::log!("overlay", "target file: {path}");
 
-    let graph = build_overlay(OverlayInputs {
-        file_path: &path,
-        file_duration_ms,
-        snips: &snips,
-    });
-
-    match graph {
-        OverlayGraph::Graph(g) => {
-            eprintln!("[fvp:overlay] graph built ({} bytes) — applying", g.len());
-            player.apply_lavfi_complex(&g)?;
-            eprintln!("[fvp:overlay] apply_audio_overlay OK (overlay engaged)");
-            Ok(true)
-        }
-        OverlayGraph::None => {
-            eprintln!(
-                "[fvp:overlay] no usable audio_replace snips after validation \
-                 (all dropped — boundary or invalid) — clearing overlay"
-            );
-            player.apply_lavfi_complex("")?;
-            Ok(false)
-        }
+    // Per the directive: audio_replace wins when both kinds are present
+    // in a profile. The effect-filter path only runs when there are no
+    // audio_replace snips. Documented as a v1 limitation — a future
+    // unified builder can integrate both, but mixing types in a single
+    // profile is rare in practice.
+    if ar_count > 0 {
+        let graph = build_overlay(OverlayInputs {
+            file_path: &path,
+            file_duration_ms,
+            snips: &snips,
+        });
+        return match graph {
+            OverlayGraph::Graph(g) => {
+                crate::log!(
+                    "overlay",
+                    "audio_replace graph built ({} bytes) — applying",
+                    g.len()
+                );
+                player.apply_lavfi_complex(&g)?;
+                crate::log!("overlay", "apply_audio_overlay OK (audio_replace overlay engaged)");
+                Ok(true)
+            }
+            OverlayGraph::None => {
+                crate::log!(
+                    "overlay",
+                    "no usable audio_replace snips after validation — clearing overlay"
+                );
+                player.apply_lavfi_complex("")?;
+                Ok(false)
+            }
+        };
     }
+
+    // No audio_replace snips — try the effect-filter graph (mute_dialogue
+    // and/or audio_blur).
+    if eff_count > 0 {
+        let g = build_effect_overlay(EffectInputs {
+            file_duration_ms,
+            snips: &snips,
+        });
+        return match g {
+            EffectGraph::Graph(s) => {
+                crate::log!(
+                    "overlay",
+                    "effect-filter graph built ({} bytes) — applying",
+                    s.len()
+                );
+                player.apply_lavfi_complex(&s)?;
+                crate::log!("overlay", "apply_audio_overlay OK (effect-filter overlay engaged)");
+                Ok(true)
+            }
+            EffectGraph::None => {
+                crate::log!(
+                    "overlay",
+                    "no usable effect-filter snips after validation — clearing overlay"
+                );
+                player.apply_lavfi_complex("")?;
+                Ok(false)
+            }
+        };
+    }
+
+    crate::log!("overlay", "no overlay-needing snips at all — clearing overlay");
+    player.apply_lavfi_complex("")?;
+    Ok(false)
 }
 
 /// Clear the audio-replace overlay without rebuilding it from snips. Calls
 /// the same reload path with an empty filter graph.
 #[tauri::command]
 pub fn clear_audio_overlay(player: State<'_, MpvPlayer>) -> Result<(), String> {
-    eprintln!("[fvp:overlay] clear_audio_overlay called");
+    crate::log!("overlay", "clear_audio_overlay called");
     if player.current_path().is_none() {
-        eprintln!("[fvp:overlay] no file loaded — nothing to clear");
+        crate::log!("overlay", "no file loaded — nothing to clear");
         return Ok(());
     }
     let r = player.apply_lavfi_complex("");
     match &r {
-        Ok(()) => eprintln!("[fvp:overlay] clear_audio_overlay OK"),
-        Err(e) => eprintln!("[fvp:overlay] clear_audio_overlay FAILED: {e}"),
+        Ok(()) => crate::log!("overlay", "clear_audio_overlay OK"),
+        Err(e) => crate::log!("overlay", "clear_audio_overlay FAILED: {e}"),
     }
     r
 }

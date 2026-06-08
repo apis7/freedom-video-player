@@ -110,9 +110,10 @@ pub fn build(inputs: OverlayInputs) -> OverlayGraph {
         };
 
         if snip.end_ms <= snip.start_ms {
-            eprintln!(
-                "[fvp:overlay] DROP snip {} — invalid (end {} <= start {})",
-                snip.id, snip.end_ms, snip.start_ms,
+            crate::log!(
+                "overlay",
+                "DROP snip {} — invalid (end {} <= start {})",
+                snip.id, snip.end_ms, snip.start_ms
             );
             dropped_invalid += 1;
             continue;
@@ -120,11 +121,10 @@ pub fn build(inputs: OverlayInputs) -> OverlayGraph {
         let duration_ms = snip.end_ms - snip.start_ms;
 
         if duration_ms > MAX_AUDIO_REPLACE_DURATION_MS {
-            eprintln!(
-                "[fvp:overlay] DROP snip {} — duration {duration_ms}ms exceeds \
-                 audio-replace cap {MAX_AUDIO_REPLACE_DURATION_MS}ms; falling back to Skip. \
-                 (Use Silence or Skip for longer cuts.)",
-                snip.id,
+            crate::log!(
+                "overlay",
+                "DROP snip {} — duration {duration_ms}ms exceeds cap {MAX_AUDIO_REPLACE_DURATION_MS}ms; falling back to Skip",
+                snip.id
             );
             dropped_too_long += 1;
             continue;
@@ -163,13 +163,11 @@ pub fn build(inputs: OverlayInputs) -> OverlayGraph {
             || src_end_ms_signed > inputs.file_duration_ms as i64
             || play_start_signed < 0
         {
-            eprintln!(
-                "[fvp:overlay] DROP snip {} (from_before={from_before}, offset={offset_ms}ms, \
-                 xfade={xfade_ms}ms) — source range [{src_start_ms_signed}, {src_end_ms_signed}]ms \
-                 or play_start {play_start_signed}ms hits file boundary \
-                 [0, {}]ms; falling back to Skip",
+            crate::log!(
+                "overlay",
+                "DROP snip {} (from_before={from_before}, offset={offset_ms}ms, xfade={xfade_ms}ms) — source range [{src_start_ms_signed}, {src_end_ms_signed}]ms or play_start {play_start_signed}ms hits file boundary [0, {}]ms; falling back to Skip",
                 snip.id,
-                inputs.file_duration_ms,
+                inputs.file_duration_ms
             );
             dropped_boundary += 1;
             continue;
@@ -185,15 +183,15 @@ pub fn build(inputs: OverlayInputs) -> OverlayGraph {
         });
     }
 
-    eprintln!(
-        "[fvp:overlay] build summary: in={} non_replace={} kept={} \
-         dropped_boundary={} dropped_invalid={} dropped_too_long={}",
+    crate::log!(
+        "overlay",
+        "build summary: in={} non_replace={} kept={} dropped_boundary={} dropped_invalid={} dropped_too_long={}",
         inputs.snips.len(),
         skipped_non_replace,
         planned.len(),
         dropped_boundary,
         dropped_invalid,
-        dropped_too_long,
+        dropped_too_long
     );
 
     if planned.is_empty() {
@@ -205,24 +203,25 @@ pub fn build(inputs: OverlayInputs) -> OverlayGraph {
 
     // Detailed per-snip plan — paste-friendly when debugging audio bugs.
     for (i, p) in planned.iter().enumerate() {
-        eprintln!(
-            "[fvp:overlay] PLAN snip{}: \
-             main fade-out [{}..{}]ms | snip muted [{}..{}]ms | main fade-in [{}..{}]ms",
+        crate::log!(
+            "overlay",
+            "PLAN snip{}: main fade-out [{}..{}]ms | snip muted [{}..{}]ms | main fade-in [{}..{}]ms",
             i + 1,
             p.play_start_ms,
             p.start_ms,
             p.start_ms,
             p.end_ms,
             p.end_ms,
-            p.end_ms + p.xfade_ms,
+            p.end_ms + p.xfade_ms
         );
-        eprintln!(
-            "[fvp:overlay]            src content from file [{}..{}]ms ({}ms long) → plays at global [{}..{}]ms",
+        crate::log!(
+            "overlay",
+            "           src content from file [{}..{}]ms ({}ms long) → plays at global [{}..{}]ms",
             p.src_start_ms,
             p.src_start_ms + p.src_play_length_ms,
             p.src_play_length_ms,
             p.play_start_ms,
-            p.play_start_ms + p.src_play_length_ms,
+            p.play_start_ms + p.src_play_length_ms
         );
     }
 

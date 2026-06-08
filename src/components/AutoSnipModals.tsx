@@ -56,9 +56,17 @@ export function AutoSnipNoSubsModal({ videoPath, onClose }: NoSubsProps) {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("open_external_url", { url: searchUrl });
-    } catch (err) {
-      // Surface failure; user can copy the URL manually.
+    } catch {
       alert(`Couldn't open browser. URL:\n${searchUrl}`);
+    }
+    onClose();
+  };
+  const pickSrt = async () => {
+    try {
+      const { addSubtitleFlow } = await import("../utils/addSubtitleFlow");
+      await addSubtitleFlow();
+    } catch (err) {
+      alert(`Couldn't open file picker: ${err}`);
     }
     onClose();
   };
@@ -68,17 +76,23 @@ export function AutoSnipNoSubsModal({ videoPath, onClose }: NoSubsProps) {
       onClick={onClose}
     >
       <div
-        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl p-5 min-w-[440px] max-w-[560px]"
+        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl p-5 min-w-[480px] max-w-[600px]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="text-sm font-semibold text-fvp-text mb-2">No subtitles found</div>
-        <div className="text-[12px] text-fvp-muted mb-4">
-          AutoSnip needs a <span className="font-mono">.srt</span> file next to the video to
-          scan. None was found for <span className="font-mono">{filename}</span>.
-          {"\n"}Search OpenSubtitles for a matching subtitle file, download it to the
-          same folder as the video, then run AutoSnip again.
+        <div className="text-sm font-semibold text-fvp-text mb-2">
+          No subtitles loaded
         </div>
-        <div className="flex justify-end gap-2 text-xs">
+        <div className="text-[12px] text-fvp-muted mb-2 leading-relaxed">
+          AutoSnip needs subtitles to scan. Would you like to select a{" "}
+          <span className="font-mono">.srt</span> file?
+        </div>
+        <div className="text-[11px] text-fvp-muted mb-4 leading-relaxed">
+          If you don&apos;t have one,{" "}
+          <span className="text-fvp-text">opensubtitles.com</span> is a good
+          place to find a matching subtitle file for{" "}
+          <span className="font-mono">{filename}</span>.
+        </div>
+        <div className="flex justify-end gap-2 text-xs flex-wrap">
           <button
             onClick={onClose}
             className="px-3 py-1.5 text-fvp-text hover:bg-fvp-surface2 rounded"
@@ -87,9 +101,15 @@ export function AutoSnipNoSubsModal({ videoPath, onClose }: NoSubsProps) {
           </button>
           <button
             onClick={() => void openSearch()}
+            className="px-3 py-1.5 bg-fvp-bg border border-fvp-border text-fvp-text rounded hover:border-fvp-muted cursor-pointer"
+          >
+            Search OpenSubtitles ↗
+          </button>
+          <button
+            onClick={() => void pickSrt()}
             className="px-3 py-1.5 bg-fvp-accent text-white rounded cursor-pointer"
           >
-            Open OpenSubtitles ↗
+            Choose .srt file…
           </button>
         </div>
       </div>

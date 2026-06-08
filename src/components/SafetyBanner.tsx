@@ -49,13 +49,18 @@ export function SafetyBanner() {
     <>
       <div
         className={clsx(
-          // Top-right fixed; below the menubar (~32px) + some breathing room.
-          "fixed top-12 right-4 z-50 max-w-[360px] rounded-lg border-2 shadow-2xl px-4 py-3",
+          // Top-right, pushed BELOW the ProfileChip (which lives at
+          // top-3 of the video area, absolute Y ~70-100 px). At top-28
+          // (112 px) the banner clears the chip with breathing room.
+          // Solid surface background instead of the previous translucent
+          // /20 — the chip and banner used to blend into each other in
+          // the overlap area; opaque card kills that bleed entirely.
+          "fixed top-28 right-4 z-50 w-[340px] rounded-lg border-2 shadow-2xl bg-fvp-surface",
           "transition-opacity duration-[5000ms] ease-linear cursor-pointer select-none",
           "hover:brightness-110",
           isInactive
-            ? "bg-fvp-err/20 border-fvp-err text-fvp-err"
-            : "bg-fvp-warn/20 border-fvp-warn text-fvp-warn",
+            ? "border-fvp-err text-fvp-err"
+            : "border-fvp-warn text-fvp-warn",
           fading ? "opacity-0" : "opacity-100",
         )}
         onClick={handleBannerClick}
@@ -66,38 +71,44 @@ export function SafetyBanner() {
             : "Click for options."
         }
       >
-        <div className="flex items-start gap-2">
-          <span className="text-base leading-none mt-0.5">
-            {isInactive ? "⚠" : "ⓘ"}
-          </span>
-          <div className="flex-1 text-xs leading-snug">
-            {isInactive ? (
-              <>
-                <strong className="block mb-0.5">Profile is not active</strong>
-                A profile was found for this video but isn't filtering
-                playback. <span className="underline">Click to activate.</span>
-              </>
-            ) : (
-              <>
-                <strong className="block mb-0.5">No profile for this video</strong>
-                Playback isn't being filtered. <span className="underline">
-                  Click here
-                </span>{" "}
-                to create one.
-              </>
-            )}
+        {/* Header row: title + X dismiss. Separate from the body so they
+            can't collide regardless of how the title wraps. */}
+        <div className="flex items-start justify-between gap-2 px-3 pt-2.5 pb-1">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-sm leading-none shrink-0">
+              {isInactive ? "⚠" : "ⓘ"}
+            </span>
+            <strong className="text-xs leading-tight">
+              {isInactive
+                ? "Profile is not active"
+                : "No profile for this video"}
+            </strong>
           </div>
           <button
             onClick={(e) => {
               e.stopPropagation();
               dismissSafetyBanner();
             }}
-            className="text-current opacity-60 hover:opacity-100 text-sm leading-none -mt-0.5"
+            className="text-current opacity-60 hover:opacity-100 text-sm leading-none shrink-0 -mt-0.5 px-1"
             title="Dismiss"
             aria-label="Dismiss banner"
           >
             ✕
           </button>
+        </div>
+        {/* Body — own row, full width inside padding, can wrap cleanly. */}
+        <div className="text-[11px] leading-relaxed px-3 pb-2.5">
+          {isInactive ? (
+            <>
+              A profile was found for this video but isn&apos;t filtering
+              playback. <span className="underline">Click to activate.</span>
+            </>
+          ) : (
+            <>
+              Playback isn&apos;t being filtered.{" "}
+              <span className="underline">Click here</span> to create one.
+            </>
+          )}
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import { useAppStore } from "../state/appStore";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { playerController } from "../controller/playerController";
 import { openFileFlow } from "../utils/openFileFlow";
+import { actlog } from "../utils/actlog";
 import { addSubtitleFlow, refreshSubtitleTracks, refreshTracks } from "../utils/addSubtitleFlow";
 import { subtitlesIpc, tracksIpc, playback } from "../ipc";
 import { ASPECT_RATIO_PRESETS } from "../ipc/types";
@@ -127,6 +128,27 @@ function buildItemsFor(menu: string): MenuItem[] {
         });
       }
       items.push({ kind: "separator" });
+      // Creator-only save entries. Both fire the same event channel
+      // Creator listens on; "Save As" passes a different event so Creator
+      // knows to always open the filename dialog (versioning).
+      if (mode === "creator") {
+        items.push({
+          kind: "item",
+          label: "Save .free profile",
+          hotkey: "Ctrl+S",
+          disabled: !hasFile,
+          onClick: () =>
+            window.dispatchEvent(new CustomEvent("fvp:request-export")),
+        });
+        items.push({
+          kind: "item",
+          label: "Save profile as…",
+          hotkey: "Ctrl+Shift+S",
+          disabled: !hasFile,
+          onClick: () =>
+            window.dispatchEvent(new CustomEvent("fvp:request-export-as")),
+        });
+      }
       items.push({
         kind: "item",
         label: "Save Now Playing as .m3u…",
@@ -401,13 +423,19 @@ function buildItemsFor(menu: string): MenuItem[] {
           kind: "item",
           label: "Player Mode",
           disabled: mode === "player",
-          onClick: () => useAppStore.setState({ mode: "player" }),
+          onClick: () => {
+            actlog("mode", `switch ${mode} → player`);
+            useAppStore.setState({ mode: "player" });
+          },
         },
         {
           kind: "item",
           label: "Profile Creator",
           disabled: mode === "creator",
-          onClick: () => useAppStore.setState({ mode: "creator" }),
+          onClick: () => {
+            actlog("mode", `switch ${mode} → creator`);
+            useAppStore.setState({ mode: "creator" });
+          },
         },
         {
           kind: "item",
@@ -416,7 +444,10 @@ function buildItemsFor(menu: string): MenuItem[] {
           title: state.libraryEnabled
             ? undefined
             : "Library mode is off — enable in Settings",
-          onClick: () => useAppStore.setState({ mode: "library" }),
+          onClick: () => {
+            actlog("mode", `switch ${mode} → library`);
+            useAppStore.setState({ mode: "library" });
+          },
         },
         { kind: "separator" },
         {

@@ -1,3 +1,4 @@
+pub mod audio_filter;
 pub mod audio_replace;
 
 use libmpv2::{
@@ -170,22 +171,46 @@ impl MpvPlayer {
         // that genuinely must precede mpv_initialize (they decide which
         // video output backend libmpv picks). Everything else is a runtime
         // property and set after.
-        eprintln!("[fvp] init: wid={:?}", wid);
+        crate::log!("playback", "init: wid={wid:?}");
         let mut mpv = Mpv::with_initializer(|init| {
             if let Some(h) = wid {
                 init.set_option("wid", h)?;
+                // Force vo=gpu instead of letting libmpv default to gpu-next
+                // (libplacebo). gpu-next has known issues with embedded child
+                // HWNDs on Windows: it initializes, the decoder produces
+                // frames, but the swap-chain never makes them visible inside
+                // the parent webview window — symptom is "audio plays, video
+                // is black, no error in logs". vo=gpu is the older Direct3D11
+                // path that has worked reliably with `wid` since mpv 0.31.
+                init.set_option("vo", "gpu")?;
+                init.set_option("gpu-context", "d3d11")?;
             } else {
                 init.set_option("vo", "null")?;
             }
             Ok(())
         })
         .map_err(|e| format!("libmpv init failed: {e:?}"))?;
-        eprintln!("[fvp] mpv initialized");
+        crate::log!("playback", "mpv initialized");
 
         mpv.set_property("keep-open", "yes")
             .map_err(|e| format!("set keep-open failed: {e:?}"))?;
-        mpv.set_property("msg-level", "all=warn")
+        // msg-level: get vo/decoder-level info so we can SEE when the
+        // render pipeline silently rejects frames (which presents as
+        // "audio plays, video is black"). Was "warn" — bumping to
+        // "info" for the vo + ffmpeg modules specifically so the
+        // signal-to-noise stays reasonable.
+        mpv.set_property("msg-level", "all=warn,vo=info,vd=info,ffmpeg=info")
             .map_err(|e| format!("set msg-level failed: {e:?}"))?;
+        // Hardware decoding: auto-safe tries DXVA2 / D3D11VA first and
+        // FALLS BACK to software when the codec/profile combination
+        // isn't supported by the driver. Without this set, mpv defaults
+        // to `no` (always software) on some builds — which is safe but
+        // slow — or to `auto` on others — which can silently fail to
+        // render frames when the chosen accelerator rejects the file.
+        // auto-safe is the documented "use hardware when it'll work,
+        // software when it won't" mode.
+        mpv.set_property("hwdec", "auto-safe")
+            .map_err(|e| format!("set hwdec failed: {e:?}"))?;
         mpv.set_property("osd-level", 0i64)
             .map_err(|e| format!("set osd-level=0 failed: {e:?}"))?;
         mpv.set_property("osd-bar", "no")
@@ -257,7 +282,7 @@ impl MpvPlayer {
                         // Print libmpv's internal log messages so we can see
                         // demuxer/codec/init errors when loadfile fails.
                         if let Event::LogMessage { prefix, level, text, .. } = &ev {
-                            eprintln!("[mpv:{level}] {prefix}: {}", text.trim_end());
+                            crate::log!("mpv", "{level} {prefix}: {}", text.trim_end());
                         }
                         if matches!(ev, Event::Shutdown) {
                             break;
@@ -267,7 +292,7 @@ impl MpvPlayer {
                         }
                     }
                     Some(Err(e)) => {
-                        eprintln!("libmpv event error: {e:?}");
+                        crate::log!("mpv", "event error: {e:?}");
                     }
                     None => {}
                 }
@@ -282,7 +307,7 @@ impl MpvPlayer {
     }
 
     pub fn load_file(&self, path: &str) -> Result<(), String> {
-        eprintln!("[fvp] loadfile: {path}");
+        crate::log!("playback", "loadfile: {path}");
         if !std::path::Path::new(path).exists() {
             return Err(format!(
                 "The file does not exist on disk:\n  {path}\n\
@@ -291,7 +316,12 @@ impl MpvPlayer {
         }
         let metadata = std::fs::metadata(path)
             .map_err(|e| format!("Couldn't read file metadata for {path}: {e}"))?;
-        eprintln!("[fvp] file exists, size={} bytes", metadata.len());
+        crate::log!("playback", "file exists, size={} bytes", metadata.len());
+        // Mute the library's notify watchers while libmpv has a file
+        // open — SMB reads otherwise trigger Modify::Data events that
+        // would re-fire the watched-folder scan we just finished and
+        // steal bandwidth from the active playback.
+        crate::library::orchestrator::set_playback_holds_file(true);
         {
             let mpv = self.mpv.lock();
             mpv_command_array(mpv.ctx.as_ptr(), &["loadfile", path]).map_err(|e| {
@@ -309,18 +339,82 @@ impl MpvPlayer {
             std::thread::sleep(std::time::Duration::from_millis(120));
             video_subclass::ensure_subclassed();
         });
+        // Post-load video-state diagnostic. First sample at 1.5s (gives
+        // libmpv time to demux, pick a decoder, and report dimensions),
+        // second sample at 4s after playback has had a chance to advance
+        // so we can see whether frames are actually being PRESENTED
+        // (not just decoded).
+        let mpv_arc = self.mpv.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            {
+                let mpv = mpv_arc.lock();
+                let w: i64 = mpv.get_property("dwidth").unwrap_or(-1);
+                let h: i64 = mpv.get_property("dheight").unwrap_or(-1);
+                let codec: String = mpv
+                    .get_property::<String>("video-codec")
+                    .unwrap_or_else(|_| "<none>".into());
+                let hwdec_current: String = mpv
+                    .get_property::<String>("hwdec-current")
+                    .unwrap_or_else(|_| "<none>".into());
+                let vo: String = mpv
+                    .get_property::<String>("current-vo")
+                    .unwrap_or_else(|_| "<none>".into());
+                crate::log!(
+                    "playback",
+                    "post-load video state @1.5s: {w}x{h} codec={codec:?} hwdec={hwdec_current:?} vo={vo:?}"
+                );
+                #[cfg(target_os = "windows")]
+                video_subclass::dump_hwnd_geometry("@1.5s");
+            }
+            // Sample again at 4s — if dropped-vo-frame-count is climbing
+            // or frames-presented (vo-passes proxy) is 0, frames are being
+            // produced but not displayed (render-surface problem).
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            {
+                let mpv = mpv_arc.lock();
+                let pos: f64 = mpv.get_property("time-pos").unwrap_or(-1.0);
+                let frame_drops: i64 = mpv
+                    .get_property("frame-drop-count")
+                    .unwrap_or(-1);
+                let decoder_drops: i64 = mpv
+                    .get_property("decoder-frame-drop-count")
+                    .unwrap_or(-1);
+                let est_vf_fps: f64 = mpv
+                    .get_property("estimated-vf-fps")
+                    .unwrap_or(-1.0);
+                let est_display_fps: f64 = mpv
+                    .get_property("estimated-display-fps")
+                    .unwrap_or(-1.0);
+                let paused: bool = mpv.get_property("pause").unwrap_or(true);
+                crate::log!(
+                    "playback",
+                    "post-load presentation @4s: time-pos={pos:.2} paused={paused} \
+                     decoder_drops={decoder_drops} vo_drops={frame_drops} \
+                     est_vf_fps={est_vf_fps:.1} est_display_fps={est_display_fps:.1}"
+                );
+                if pos > 0.2 && est_display_fps <= 0.0 {
+                    crate::log!(
+                        "playback",
+                        "WARN: time advancing but display_fps=0 — decoder is producing frames but the VO is NOT presenting them (HWND/swap-chain issue)."
+                    );
+                }
+                #[cfg(target_os = "windows")]
+                video_subclass::dump_hwnd_geometry("@4s");
+            }
+        });
         Ok(())
     }
 
     pub fn play(&self) -> Result<(), String> {
-        eprintln!("[fvp] play");
+        crate::log!("playback", "play");
         let mpv = self.mpv.lock();
         mpv.set_property("pause", false)
             .map_err(|e| format!("play failed: {e:?}"))
     }
 
     pub fn pause(&self) -> Result<(), String> {
-        eprintln!("[fvp] pause");
+        crate::log!("playback", "pause");
         let mpv = self.mpv.lock();
         mpv.set_property("pause", true)
             .map_err(|e| format!("pause failed: {e:?}"))
@@ -332,7 +426,7 @@ impl MpvPlayer {
     /// for short scrubbing-style review in Creator mode rather than long
     /// sustained playback.
     pub fn set_play_direction(&self, direction: &str) -> Result<(), String> {
-        eprintln!("[fvp] set_play_direction: {direction}");
+        crate::log!("playback", "set_play_direction: {direction}");
         let mpv = self.mpv.lock();
         mpv_command_array(mpv.ctx.as_ptr(), &["set", "play-direction", direction])
             .map_err(|e| format!("set play-direction={direction} failed: {e}"))
@@ -352,7 +446,7 @@ impl MpvPlayer {
     /// empty string) to clear the override and let libmpv use the video's
     /// native ratio. Persisted per-profile in the `.free` file's metadata.
     pub fn set_aspect_ratio(&self, value: &str) -> Result<(), String> {
-        eprintln!("[fvp] set_aspect_ratio: {value:?}");
+        crate::log!("playback", "set_aspect_ratio: {value:?}");
         let mpv = self.mpv.lock();
         // Map our "auto"/"" / null sentinels to libmpv's "no" disable
         // value. Anything else passes through verbatim.
@@ -411,6 +505,7 @@ impl MpvPlayer {
     }
 
     pub fn stop(&self) -> Result<(), String> {
+        crate::library::orchestrator::set_playback_holds_file(false);
         let mpv = self.mpv.lock();
         mpv_command_array(mpv.ctx.as_ptr(), &["stop"])
             .map_err(|e| format!("stop command failed: {e}"))
@@ -419,7 +514,7 @@ impl MpvPlayer {
     /// Add an external subtitle file (.srt / .vtt / .ass / .ssa) to the current
     /// playback. The `"select"` flag makes mpv immediately switch to it.
     pub fn add_subtitle(&self, path: &str) -> Result<(), String> {
-        eprintln!("[fvp] add_subtitle: {path}");
+        crate::log!("playback", "add_subtitle: {path}");
         if !std::path::Path::new(path).exists() {
             return Err(format!("Subtitle file does not exist:\n  {path}"));
         }
@@ -503,7 +598,7 @@ impl MpvPlayer {
     }
 
     pub fn set_audio_track(&self, id: Option<i64>) -> Result<(), String> {
-        eprintln!("[fvp] set_audio_track: {id:?}");
+        crate::log!("playback", "set_audio_track: {id:?}");
         let mpv = self.mpv.lock();
         let value = match id {
             Some(n) => n.to_string(),
@@ -514,7 +609,7 @@ impl MpvPlayer {
     }
 
     pub fn set_video_track(&self, id: Option<i64>) -> Result<(), String> {
-        eprintln!("[fvp] set_video_track: {id:?}");
+        crate::log!("playback", "set_video_track: {id:?}");
         let mpv = self.mpv.lock();
         let value = match id {
             Some(n) => n.to_string(),
@@ -564,7 +659,7 @@ impl MpvPlayer {
     }
 
     pub fn set_audio_device(&self, name: &str) -> Result<(), String> {
-        eprintln!("[fvp] set_audio_device: {name}");
+        crate::log!("playback", "set_audio_device: {name}");
         let mpv = self.mpv.lock();
         mpv_command_array(mpv.ctx.as_ptr(), &["set", "audio-device", name])
             .map_err(|e| format!("set audio-device={name} failed: {e}"))
@@ -639,6 +734,28 @@ impl MpvPlayer {
         let path: String = mpv
             .get_property("path")
             .map_err(|_| "no file is currently loaded".to_string())?;
+
+        // EARLY EXIT — if the requested graph is identical to the current
+        // graph, skip the reload entirely. The expensive reload was
+        // racing the initial loadfile on slow network shares and causing
+        // the demuxer to read the file's header twice in rapid
+        // succession — producing "missing mandatory atoms / broken
+        // header" errors. Most clear-overlay calls (e.g. the frontend's
+        // useAudioReplaceOverlay hook firing on every file change) come
+        // in WHEN THE GRAPH IS ALREADY EMPTY, so this short-circuits
+        // the unnecessary work.
+        let current_graph: String = mpv
+            .get_property::<String>("lavfi-complex")
+            .unwrap_or_default();
+        if current_graph == graph {
+            crate::log!(
+                "playback:lavfi",
+                "apply: graph unchanged (len={} bytes) — skipping reload (path={path})",
+                graph.len()
+            );
+            return Ok(());
+        }
+
         let position: f64 = mpv.get_property("time-pos").unwrap_or(0.0);
         let paused: bool = mpv.get_property("pause").unwrap_or(false);
 
@@ -646,11 +763,12 @@ impl MpvPlayer {
         // libavfilter is actually being handed. Wrapped in <<< … >>> so the
         // boundaries are unambiguous even if the graph itself contains
         // newlines or terminal-special chars.
-        eprintln!(
-            "[fvp] apply_lavfi_complex: path={path} pos={position:.3}s paused={paused} \
-             graph_len={glen} bytes\n[fvp] >>>BEGIN GRAPH<<<\n{graph}\n[fvp] >>>END GRAPH<<<",
-            glen = graph.len(),
+        crate::log!(
+            "playback:lavfi",
+            "apply: path={path} pos={position:.3}s paused={paused} graph_len={} bytes",
+            graph.len()
         );
+        crate::log!("playback:lavfi", ">>>BEGIN GRAPH<<<\n{graph}\n>>>END GRAPH<<<");
 
         // lavfi-complex must be set BEFORE the loadfile that should pick it up.
         // Set it via `set` command so libmpv treats it as an option update.
@@ -663,15 +781,19 @@ impl MpvPlayer {
             .get_property::<String>("lavfi-complex")
             .unwrap_or_else(|_| "<unreadable>".into());
         if echoed != graph {
-            eprintln!(
-                "[fvp] WARN: lavfi-complex echoed back DIFFERENT from sent.\n\
-                 [fvp] sent_len={} echoed_len={}\n[fvp] echoed:\n{}",
+            crate::log!(
+                "playback:lavfi",
+                "WARN: echoed back DIFFERENT from sent. sent_len={} echoed_len={}",
                 graph.len(),
-                echoed.len(),
-                echoed,
+                echoed.len()
             );
+            crate::log!("playback:lavfi", "echoed:\n{echoed}");
         } else {
-            eprintln!("[fvp] lavfi-complex echoed back identical ({} bytes)", echoed.len());
+            crate::log!(
+                "playback:lavfi",
+                "echoed back identical ({} bytes)",
+                echoed.len()
+            );
         }
 
         // Reload the same file with start=<position> so the seek happens as
@@ -711,9 +833,9 @@ pub(crate) mod video_subclass {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, EnumChildWindows, GetClientRect, SetWindowLongPtrW,
-        SetWindowPos, GWLP_WNDPROC, SWP_NOACTIVATE, SWP_NOZORDER, WM_RBUTTONUP, WS_CHILD,
-        WS_VISIBLE,
+        CreateWindowExW, DefWindowProcW, EnumChildWindows, GetClientRect, GetWindowLongW,
+        GetWindowRect, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, GWLP_WNDPROC,
+        SWP_NOACTIVATE, SWP_NOZORDER, WM_LBUTTONUP, WM_RBUTTONUP, WS_CHILD, WS_VISIBLE,
     };
 
     type WndProcFn = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
@@ -755,6 +877,64 @@ pub(crate) mod video_subclass {
         };
         INTERMEDIATE_HWND.store(intermediate as usize, Ordering::Release);
         intermediate as usize
+    }
+
+    /// Read back the intermediate HWND + the mpv-created grandchild HWND
+    /// geometry, visibility, and style. If width or height is 0, the
+    /// frontend's useVideoAreaReporter never sized the slot — that's the
+    /// "decoder running, screen black" case. If WS_VISIBLE is missing,
+    /// the HWND was created hidden and ShowWindow was never called.
+    pub fn dump_hwnd_geometry(label: &str) {
+        let intermediate = INTERMEDIATE_HWND.load(Ordering::Acquire) as HWND;
+        if intermediate.is_null() {
+            crate::log!("playback:hwnd", "{label} no intermediate HWND");
+            return;
+        }
+        let mut wr = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut cr = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let (visible, style) = unsafe {
+            GetWindowRect(intermediate, &mut wr);
+            GetClientRect(intermediate, &mut cr);
+            (IsWindowVisible(intermediate) != 0, GetWindowLongW(intermediate, GWL_STYLE))
+        };
+        crate::log!(
+            "playback:hwnd",
+            "{label} intermediate={:p} visible={visible} style=0x{:08x} screen_rect=({},{})-({},{}) [{}x{}] client=({}x{})",
+            intermediate,
+            style as u32,
+            wr.left, wr.top, wr.right, wr.bottom,
+            wr.right - wr.left, wr.bottom - wr.top,
+            cr.right - cr.left, cr.bottom - cr.top,
+        );
+
+        let mut mpv_child: HWND = std::ptr::null_mut();
+        unsafe {
+            EnumChildWindows(
+                intermediate,
+                Some(find_first_child),
+                &mut mpv_child as *mut HWND as LPARAM,
+            );
+        }
+        if mpv_child.is_null() {
+            crate::log!("playback:hwnd", "{label} NO mpv child HWND found inside intermediate — libmpv hasn't created its render window");
+            return;
+        }
+        let mut mwr = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut mcr = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let (mvisible, mstyle) = unsafe {
+            GetWindowRect(mpv_child, &mut mwr);
+            GetClientRect(mpv_child, &mut mcr);
+            (IsWindowVisible(mpv_child) != 0, GetWindowLongW(mpv_child, GWL_STYLE))
+        };
+        crate::log!(
+            "playback:hwnd",
+            "{label} mpv_child={:p} visible={mvisible} style=0x{:08x} screen_rect=({},{})-({},{}) [{}x{}] client=({}x{})",
+            mpv_child,
+            mstyle as u32,
+            mwr.left, mwr.top, mwr.right, mwr.bottom,
+            mwr.right - mwr.left, mwr.bottom - mwr.top,
+            mcr.right - mcr.left, mcr.bottom - mcr.top,
+        );
     }
 
     pub fn resize_intermediate(x: i32, y: i32, width: i32, height: i32) {
@@ -824,6 +1004,14 @@ pub(crate) mod video_subclass {
             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             if let Some(app) = APP.get() {
                 let _ = app.emit("video-context-menu", serde_json::json!({ "x": x, "y": y }));
+            }
+        }
+        // Left-click on the libmpv HWND → forward to frontend as a Tauri
+        // event. Player Mode uses this to toggle pause/play. The frontend
+        // decides whether to act on it (it's a no-op in Creator Mode).
+        if msg == WM_LBUTTONUP {
+            if let Some(app) = APP.get() {
+                let _ = app.emit("video-click", serde_json::json!({}));
             }
         }
 

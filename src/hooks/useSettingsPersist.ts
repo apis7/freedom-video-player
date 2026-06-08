@@ -8,8 +8,6 @@ interface PersistedSettings {
   autosaveDraft?: boolean;
   jumpPlayheadOnSnipSelect?: boolean;
   libraryEnabled?: boolean;
-  libraryFolder?: string | null;
-  libraryRecursive?: boolean;
   customCategories?: string[];
   autoSnipLanguage?: string;
   autoSnipPadBeforeMs?: number;
@@ -17,6 +15,8 @@ interface PersistedSettings {
   customHotkeys?: Record<string, string>;
   dontShowBeepShortenWarning?: boolean;
   authorHandle?: string | null;
+  playerShowProfileIcon?: boolean;
+  playerShowPathOnStart?: boolean;
 }
 
 /**
@@ -39,8 +39,6 @@ export function useSettingsPersist() {
           jumpPlayheadOnSnipSelect:
             parsed.jumpPlayheadOnSnipSelect ?? s.jumpPlayheadOnSnipSelect,
           libraryEnabled: parsed.libraryEnabled ?? s.libraryEnabled,
-          libraryFolder: parsed.libraryFolder ?? s.libraryFolder,
-          libraryRecursive: parsed.libraryRecursive ?? s.libraryRecursive,
           customCategories: parsed.customCategories ?? s.customCategories,
           autoSnipLanguage: parsed.autoSnipLanguage ?? s.autoSnipLanguage,
           autoSnipPadBeforeMs:
@@ -50,6 +48,10 @@ export function useSettingsPersist() {
           dontShowBeepShortenWarning:
             parsed.dontShowBeepShortenWarning ?? s.dontShowBeepShortenWarning,
           authorHandle: parsed.authorHandle ?? s.authorHandle,
+          playerShowProfileIcon:
+            parsed.playerShowProfileIcon ?? s.playerShowProfileIcon,
+          playerShowPathOnStart:
+            parsed.playerShowPathOnStart ?? s.playerShowPathOnStart,
         }));
       }
     } catch {
@@ -64,23 +66,21 @@ export function useSettingsPersist() {
         state.autosaveDraft !== prev.autosaveDraft ||
         state.jumpPlayheadOnSnipSelect !== prev.jumpPlayheadOnSnipSelect ||
         state.libraryEnabled !== prev.libraryEnabled ||
-        state.libraryFolder !== prev.libraryFolder ||
-        state.libraryRecursive !== prev.libraryRecursive ||
         state.customCategories !== prev.customCategories ||
         state.autoSnipLanguage !== prev.autoSnipLanguage ||
         state.autoSnipPadBeforeMs !== prev.autoSnipPadBeforeMs ||
         state.autoSnipPadAfterMs !== prev.autoSnipPadAfterMs ||
         state.customHotkeys !== prev.customHotkeys ||
         state.dontShowBeepShortenWarning !== prev.dontShowBeepShortenWarning ||
-        state.authorHandle !== prev.authorHandle;
+        state.authorHandle !== prev.authorHandle ||
+        state.playerShowProfileIcon !== prev.playerShowProfileIcon ||
+        state.playerShowPathOnStart !== prev.playerShowPathOnStart;
       if (!relevantChanged) return;
 
       const payload: PersistedSettings = {
         autosaveDraft: state.autosaveDraft,
         jumpPlayheadOnSnipSelect: state.jumpPlayheadOnSnipSelect,
         libraryEnabled: state.libraryEnabled,
-        libraryFolder: state.libraryFolder,
-        libraryRecursive: state.libraryRecursive,
         customCategories: state.customCategories,
         autoSnipLanguage: state.autoSnipLanguage,
         autoSnipPadBeforeMs: state.autoSnipPadBeforeMs,
@@ -88,6 +88,8 @@ export function useSettingsPersist() {
         customHotkeys: state.customHotkeys,
         dontShowBeepShortenWarning: state.dontShowBeepShortenWarning,
         authorHandle: state.authorHandle,
+        playerShowProfileIcon: state.playerShowProfileIcon,
+        playerShowPathOnStart: state.playerShowPathOnStart,
       };
       const json = JSON.stringify(payload);
       if (json === lastSerialized) return;

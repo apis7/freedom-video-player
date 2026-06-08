@@ -10,6 +10,7 @@
 //!   - `details` — TMDb id → full movie record (cast, crew, plot, etc.)
 
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 
 // Read access token is held in a gitignored sidecar file
 // (`src-tauri/.tmdb_token`) so it's embedded in the binary at build
@@ -54,6 +55,8 @@ pub struct TmdbMovieDetails {
     pub overview: String,
     /// Full URL to a medium poster (w342), or None.
     pub poster_url: Option<String>,
+    /// Genre names ("Drama", "Comedy", ...). May be empty if TMDb has none.
+    pub genres: Vec<String>,
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -90,6 +93,13 @@ struct RawMovieDetails {
     overview: String,
     poster_path: Option<String>,
     credits: Option<RawCredits>,
+    #[serde(default)]
+    genres: Vec<RawGenre>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawGenre {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,18 +126,37 @@ struct RawCrewMember {
 // ────────────────────────────────────────────────────────────────────
 
 pub fn search(query: &str) -> Result<Vec<TmdbSearchResult>, String> {
+    search_with_year(query, None)
+}
+
+/// Search with an optional `year` filter. When passed, TMDb restricts
+/// results to films released that year (much more precise than tacking
+/// the year onto the query string, which TMDb tends to ignore or
+/// mis-rank). Used by the library enrichment worker to disambiguate
+/// common titles ("Frozen" 2013 vs other "Frozen" movies).
+pub fn search_with_year(
+    query: &str,
+    year: Option<u32>,
+) -> Result<Vec<TmdbSearchResult>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
     let tok = tmdb_token();
     let url = format!("{BASE_URL}/search/movie");
-    let raw: RawSearchResponse = ureq::get(&url)
+    let mut req = ureq::get(&url)
         .set("Authorization", &format!("Bearer {tok}"))
         .set("Accept", "application/json")
         .query("query", q)
         .query("include_adult", "false")
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some(y) = year {
+        // Both year and primary_release_year limit by year; primary_*
+        // requires it to be the FIRST release. We use the looser `year`
+        // so re-releases / festival cuts still match.
+        req = req.query("year", &y.to_string());
+    }
+    let raw: RawSearchResponse = req
         .call()
         .map_err(|e| format!("TMDb search request failed: {e}"))?
         .into_json()
@@ -178,6 +207,7 @@ pub fn details(tmdb_id: u32) -> Result<TmdbMovieDetails, String> {
         })
         .unwrap_or_default();
 
+    let genres = raw.genres.into_iter().map(|g| g.name).collect();
     Ok(TmdbMovieDetails {
         tmdb_id: raw.id,
         imdb_id: raw.imdb_id,
@@ -189,7 +219,23 @@ pub fn details(tmdb_id: u32) -> Result<TmdbMovieDetails, String> {
         top_cast,
         overview: raw.overview,
         poster_url: raw.poster_path.as_deref().map(|p| poster_url(p, "w342")),
+        genres,
     })
+}
+
+/// Fetch the raw bytes for a TMDb image URL. Tiny wrapper so the poster
+/// cache doesn't duplicate the request boilerplate. Times out at 15s
+/// (posters can be a few hundred KB on slow connections).
+pub fn fetch_image(url: &str) -> Result<Vec<u8>, String> {
+    let resp = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("TMDb image request failed: {e}"))?;
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("TMDb image read failed: {e}"))?;
+    Ok(buf)
 }
 
 fn extract_year(release_date: &str) -> Option<u32> {
@@ -202,4 +248,151 @@ fn extract_year(release_date: &str) -> Option<u32> {
 
 fn poster_url(path: &str, size: &str) -> String {
     format!("{IMG_BASE}/{size}{path}")
+}
+
+// ────────────────────────────────────────────────────────────────────
+// TV series API — search + per-season episodes. Used by the
+// "Auto-name episodes from TMDb" flow in Auto-detect seasons.
+// ────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TmdbTvSearchResult {
+    pub tmdb_tv_id: u32,
+    pub name: String,
+    pub original_name: String,
+    pub first_air_year: Option<u32>,
+    pub overview: String,
+    pub poster_url: Option<String>,
+    pub number_of_seasons: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TmdbTvSeasonEpisode {
+    pub season_number: u32,
+    pub episode_number: u32,
+    pub name: String,
+    pub overview: String,
+    pub air_date: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawTvSearchResponse {
+    results: Vec<RawTvSearchHit>,
+}
+#[derive(Deserialize)]
+struct RawTvSearchHit {
+    id: u32,
+    name: String,
+    #[serde(default)]
+    original_name: String,
+    #[serde(default)]
+    first_air_date: String,
+    #[serde(default)]
+    overview: String,
+    poster_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawTvDetails {
+    number_of_seasons: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct RawTvSeason {
+    episodes: Vec<RawTvSeasonEpisode>,
+}
+#[derive(Deserialize)]
+struct RawTvSeasonEpisode {
+    #[serde(default)]
+    season_number: u32,
+    #[serde(default)]
+    episode_number: u32,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    overview: String,
+    #[serde(default)]
+    air_date: Option<String>,
+}
+
+pub fn search_tv(query: &str) -> Result<Vec<TmdbTvSearchResult>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tok = tmdb_token();
+    let url = format!("{BASE_URL}/search/tv");
+    let raw: RawTvSearchResponse = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {tok}"))
+        .set("Accept", "application/json")
+        .query("query", q)
+        .query("include_adult", "false")
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|e| format!("TMDb TV search failed: {e}"))?
+        .into_json()
+        .map_err(|e| format!("TMDb TV search not JSON: {e}"))?;
+    let mut mapped: Vec<TmdbTvSearchResult> = raw
+        .results
+        .into_iter()
+        .take(SEARCH_LIMIT)
+        .map(|h| TmdbTvSearchResult {
+            tmdb_tv_id: h.id,
+            name: h.name,
+            original_name: h.original_name,
+            first_air_year: extract_year(&h.first_air_date),
+            overview: h.overview,
+            poster_url: h.poster_path.as_deref().map(|p| poster_url(p, "w185")),
+            number_of_seasons: None,
+        })
+        .collect();
+    // Look up details for each candidate to populate number_of_seasons.
+    // We only do this for the first 5 results to keep latency bounded.
+    for hit in mapped.iter_mut().take(5) {
+        if let Ok(d) = tv_details_lookup(hit.tmdb_tv_id) {
+            hit.number_of_seasons = d.number_of_seasons;
+        }
+    }
+    Ok(mapped)
+}
+
+fn tv_details_lookup(tmdb_tv_id: u32) -> Result<RawTvDetails, String> {
+    let tok = tmdb_token();
+    let url = format!("{BASE_URL}/tv/{tmdb_tv_id}");
+    ureq::get(&url)
+        .set("Authorization", &format!("Bearer {tok}"))
+        .set("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|e| format!("TMDb TV details: {e}"))?
+        .into_json::<RawTvDetails>()
+        .map_err(|e| format!("TMDb TV details not JSON: {e}"))
+}
+
+/// Fetch a single TV season's episode list. season=0 means "specials".
+pub fn tv_season(
+    tmdb_tv_id: u32,
+    season_number: u32,
+) -> Result<Vec<TmdbTvSeasonEpisode>, String> {
+    let tok = tmdb_token();
+    let url = format!("{BASE_URL}/tv/{tmdb_tv_id}/season/{season_number}");
+    let raw: RawTvSeason = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {tok}"))
+        .set("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|e| format!("TMDb season fetch: {e}"))?
+        .into_json()
+        .map_err(|e| format!("TMDb season not JSON: {e}"))?;
+    Ok(raw
+        .episodes
+        .into_iter()
+        .map(|e| TmdbTvSeasonEpisode {
+            season_number: e.season_number,
+            episode_number: e.episode_number,
+            name: e.name,
+            overview: e.overview,
+            air_date: e.air_date,
+        })
+        .collect())
 }

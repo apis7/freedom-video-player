@@ -13,6 +13,12 @@ import { ImdbLinkModal } from "../components/ImdbLinkModal";
 import { SnipGroupsModal } from "../components/SnipGroupsModal";
 import { BeepShortenModal } from "../components/BeepShortenModal";
 import { MovieInfoModal } from "../components/MovieInfoModal";
+import { UncategorizedSnipsModal } from "../components/UncategorizedSnipsModal";
+import { LoadingOverlay } from "../components/LoadingOverlay";
+import { WaveformBackground } from "../components/WaveformBackground";
+import { PeaksBuildingBadge } from "../components/PeaksBuildingBadge";
+import { useAudioPeaks } from "../hooks/useAudioPeaks";
+import { useSavedStatusTracker } from "../hooks/useSavedStatusTracker";
 import {
   AutoSnipRunningModal,
   AutoSnipNoSubsModal,
@@ -29,6 +35,11 @@ import {
   MAX_BEEP_DURATION_MS,
   BEEP_DEFAULT_FREQ_HZ,
   BEEP_DEFAULT_LEVEL_DB,
+  MUTE_DIALOGUE_MODE_LABELS,
+  AUDIO_BLUR_MODE_LABELS,
+  AUDIO_BLUR_MODE_DESCRIPTIONS,
+  type MuteDialogueMode,
+  type AudioBlurMode,
 } from "../ipc/types";
 import type { Marker } from "../state/types";
 import { formatTime, formatDuration } from "../utils/format";
@@ -55,6 +66,8 @@ export function CreatorMode() {
   const [ctxFlag, setCtxFlag] = useState<import("../state/types").Flag | null>(null);
   const [renamingMarker, setRenamingMarker] = useState<Marker | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [saveAsMode, setSaveAsMode] = useState(false);
+  const [showUncategorizedModal, setShowUncategorizedModal] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
   const [showImdbModal, setShowImdbModal] = useState(false);
@@ -68,6 +81,15 @@ export function CreatorMode() {
   >({ stage: "idle" });
   const detectedProfiles = useAppStore((s) => s.detectedProfiles);
   const snipCount = useAppStore((s) => s.snips.length);
+
+  // Background waveform: load existing peaks sidecar (or kick off a build)
+  // whenever a file is loaded in Creator mode. Fully non-blocking; rendered
+  // by WaveformBackground inside the snip lane.
+  useAudioPeaks();
+
+  // Track whether the current editing state has been exported to a `.free`
+  // file since the last edit. Drives the green/orange pill next to Autosave.
+  useSavedStatusTracker();
 
   // Toolbar's Clear All button bubbles up via a window event so the modal
   // (owned at this level) can render — keeps toolbar component simple.
@@ -83,6 +105,60 @@ export function CreatorMode() {
     return () => window.removeEventListener("fvp:request-imdb-link", handler);
   }, []);
 
+  // Ctrl+S — Save. Silent overwrite when lastSavedPath is set; otherwise
+  // open the Save modal with the video stem as the default filename.
+  // Ctrl+Shift+S — Save As. Always opens the Save modal regardless.
+  // Uncategorized snips block both paths with the UncategorizedSnipsModal.
+  useEffect(() => {
+    const openSaveModal = (saveAs: boolean) => {
+      setSaveAsMode(saveAs);
+      setExporting(true);
+    };
+    const handleSave = async () => {
+      const s = useAppStore.getState();
+      if (!s.currentFile) return;
+      if (s.snips.length === 0) {
+        s.showToast("No snips to save.", "info");
+        return;
+      }
+      const uncategorized = s.snips.filter((sn) => sn.categories.length === 0).length;
+      if (uncategorized > 0) {
+        setShowUncategorizedModal(true);
+        return;
+      }
+      // Silent overwrite when we know where to write.
+      if (s.lastSavedPath) {
+        const { saveProfileToExactPath } = await import("../utils/exportProfile");
+        const result = await saveProfileToExactPath(s.lastSavedPath);
+        if (result.ok && result.path) {
+          const name = result.path.split(/[\\/]/).pop() ?? result.path;
+          s.showToast(`Saved → ${name}`, "info", 2500);
+        } else {
+          s.showToast(`Save failed: ${result.error ?? "unknown"}`, "error");
+        }
+        return;
+      }
+      openSaveModal(false);
+    };
+    const handleSaveAs = () => {
+      const s = useAppStore.getState();
+      if (!s.currentFile) return;
+      const uncategorized = s.snips.filter((sn) => sn.categories.length === 0).length;
+      if (uncategorized > 0) {
+        setShowUncategorizedModal(true);
+        return;
+      }
+      openSaveModal(true);
+    };
+    const saveListener = () => void handleSave();
+    window.addEventListener("fvp:request-export", saveListener);
+    window.addEventListener("fvp:request-export-as", handleSaveAs);
+    return () => {
+      window.removeEventListener("fvp:request-export", saveListener);
+      window.removeEventListener("fvp:request-export-as", handleSaveAs);
+    };
+  }, []);
+
   useEffect(() => {
     const handler = () => setShowGroupsModal(true);
     window.addEventListener("fvp:request-groups", handler);
@@ -95,6 +171,16 @@ export function CreatorMode() {
     const handler = async () => {
       const file = useAppStore.getState().currentFile;
       if (!file) return;
+      // Upfront short-circuit: if there are NO embedded subs loaded AND
+      // the user hasn't loaded an external .srt yet, jump straight to
+      // the no-subs modal so the user can pick a file or hop to
+      // OpenSubtitles. Without this, the user clicks AutoSnip and gets
+      // a vague error toast after a delay — worse UX.
+      const entriesNow = useAppStore.getState().subtitleEntries;
+      if (entriesNow.length === 0) {
+        setAutoSnipState({ stage: "no-subs", videoPath: file });
+        return;
+      }
       setAutoSnipState({ stage: "running" });
       const { runAutoSnipOnEntries } = await import("../utils/autoSnipFlow");
       try {
@@ -487,7 +573,12 @@ export function CreatorMode() {
 
   return (
     <div className="h-full flex flex-col">
-      <CreatorTopToolbar hasFile={!!currentFile} onExportClick={() => setExporting(true)} />
+      <CreatorTopToolbar
+        hasFile={!!currentFile}
+        onExportClick={() =>
+          window.dispatchEvent(new CustomEvent("fvp:request-export"))
+        }
+      />
 
       {/* Upper region: rails + video. Timeline is BELOW, spanning full width. */}
       <div className="flex-1 min-h-0 flex flex-col">
@@ -536,12 +627,21 @@ export function CreatorMode() {
       />
       {exporting && (
         <ExportProfileModal
-          onCancel={() => setExporting(false)}
+          saveAsMode={saveAsMode}
+          onCancel={() => {
+            setExporting(false);
+            setSaveAsMode(false);
+          }}
           onSuccess={(path) => {
             setExporting(false);
-            alert(`Saved to:\n${path}\n\nSwitch to Player Mode to see it in the profile chip.`);
+            setSaveAsMode(false);
+            const name = path.split(/[\\/]/).pop() ?? path;
+            useAppStore.getState().showToast(`Saved → ${name}`, "info", 3000);
           }}
         />
+      )}
+      {showUncategorizedModal && (
+        <UncategorizedSnipsModal onClose={() => setShowUncategorizedModal(false)} />
       )}
       {showPicker && (
         <ProfilePickerModal
@@ -740,6 +840,7 @@ function CreatorTopToolbar({
         />
         Autosave
       </label>
+      <SaveStatusPill />
       <Sep />
       <ToolbarButton
         title="Export to a .free file next to the video"
@@ -821,6 +922,50 @@ function ToolbarButton({
 
 function Sep() {
   return <div className="w-px h-5 bg-fvp-border mx-1" />;
+}
+
+/**
+ * Small pill next to the Autosave checkbox that shows whether the current
+ * editing state has been exported to a `.free` file since the last edit.
+ *   - green check ✓ ("Saved"): current snapshot matches last manual export
+ *   - orange circle ●  ("Unsaved"): edits since last export, or never exported
+ * Hidden when no file is loaded, or when the state is empty (nothing to
+ * save yet — first-open of a fresh file, before any work).
+ */
+function SaveStatusPill() {
+  const hasFile = useAppStore((s) => s.currentFile !== null);
+  const unsaved = useAppStore((s) => s.unsavedSinceExport);
+  const hasSavedSnapshot = useAppStore((s) => s.lastSavedSnapshot !== null);
+  const snipCount = useAppStore((s) => s.snips.length);
+  const markerCount = useAppStore((s) => s.markers.length);
+
+  if (!hasFile) return null;
+  // Empty file, no save history → nothing meaningful to indicate.
+  if (!hasSavedSnapshot && snipCount === 0 && markerCount === 0) return null;
+
+  if (unsaved) {
+    return (
+      <span
+        className="inline-block w-3 h-3 rounded-full bg-fvp-warn shadow-inner mx-1 select-none"
+        title={
+          hasSavedSnapshot
+            ? "Unsaved changes since the last .free export. Press Ctrl+S to export."
+            : "Not yet exported to a .free file. Autosave is keeping your work safe, but press Ctrl+S to create a real profile."
+        }
+        aria-label="Unsaved changes"
+      />
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center justify-center w-3 h-3 rounded-full bg-fvp-ok text-white mx-1 select-none"
+      style={{ fontSize: 9, lineHeight: 1 }}
+      title="Saved to a .free file. No edits since the last export."
+      aria-label="Saved"
+    >
+      ✓
+    </span>
+  );
 }
 
 /** Toolbar button → opens the Movie Info modal in edit mode. */
@@ -1313,6 +1458,8 @@ function ActionPicker({
     "freeze_frame",
     "audio_replace",
     "beep",
+    "mute_dialogue",
+    "audio_blur",
   ] as const;
   return (
     <div className="space-y-2">
@@ -1334,6 +1481,18 @@ function ActionPicker({
                   type: "beep",
                   freq_hz: BEEP_DEFAULT_FREQ_HZ,
                   level_db: BEEP_DEFAULT_LEVEL_DB,
+                });
+              } else if (t === "mute_dialogue") {
+                onChange({
+                  type: "mute_dialogue",
+                  mode: "auto",
+                  intensity: 100,
+                });
+              } else if (t === "audio_blur") {
+                onChange({
+                  type: "audio_blur",
+                  mode: "muffled",
+                  intensity: 70,
                 });
               } else {
                 onChange({ type: t } as SnipAction);
@@ -1359,6 +1518,12 @@ function ActionPicker({
       )}
       {value.type === "beep" && (
         <BeepSettings value={value} onChange={onChange} />
+      )}
+      {value.type === "mute_dialogue" && (
+        <MuteDialogueSettings value={value} onChange={onChange} />
+      )}
+      {value.type === "audio_blur" && (
+        <AudioBlurSettings value={value} onChange={onChange} />
       )}
     </div>
   );
@@ -1436,6 +1601,163 @@ function BeepSettings({
         Beep snips are capped at {MAX_BEEP_DURATION_MS / 1000}s. During the
         snip, the original audio is muted and a sine tone plays in its place.
         Video keeps playing normally.
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Settings panel for a mute_dialogue snip. Mode picker + intensity slider.
+ * No real-time preview — the user has to use the snip's regular AB-toggle
+ * play preview to hear the result (per directive: keep the picker
+ * lightweight; preview lives in the existing AB-loop infrastructure).
+ */
+function MuteDialogueSettings({
+  value,
+  onChange,
+}: {
+  value: Extract<SnipAction, { type: "mute_dialogue" }>;
+  onChange: (a: SnipAction) => void;
+}) {
+  return (
+    <div className="space-y-3 mt-2 p-2 bg-fvp-bg/40 border border-fvp-border rounded">
+      <div className="text-[10px] text-fvp-muted leading-relaxed">
+        Best-effort. Works well on 5.1+ surround (center channel mute) and
+        on stereo with centered dialogue. <strong>Mono sources can&apos;t be
+        cleanly separated</strong> — the effect will produce silence in that
+        case. Use AB-preview to verify before saving.
+      </div>
+      <div className="space-y-1">
+        <Label>Mode</Label>
+        {(Object.entries(MUTE_DIALOGUE_MODE_LABELS) as [MuteDialogueMode, string][]).map(
+          ([mode, label]) => (
+            <label
+              key={mode}
+              className={clsx(
+                "flex items-start gap-2 cursor-pointer p-1.5 rounded border text-[11px]",
+                value.mode === mode
+                  ? "border-fvp-accent bg-fvp-accent/10"
+                  : "border-fvp-border hover:bg-fvp-surface2/40",
+              )}
+            >
+              <input
+                type="radio"
+                checked={value.mode === mode}
+                onChange={() => onChange({ ...value, mode })}
+                className="accent-fvp-accent mt-0.5"
+              />
+              <span className="text-fvp-text">{label}</span>
+            </label>
+          ),
+        )}
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <Label>
+            Intensity{" "}
+            <span className="text-fvp-muted text-[10px]">
+              (subtract amount for stereo-cancel)
+            </span>
+          </Label>
+          <span className="text-[11px] text-fvp-text tabular-nums">
+            {value.intensity}
+          </span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={value.intensity}
+          onChange={(e) =>
+            onChange({ ...value, intensity: parseInt(e.target.value, 10) })
+          }
+          className="w-full accent-fvp-accent"
+          disabled={value.mode === "center_channel"}
+          title={
+            value.mode === "center_channel"
+              ? "Center-channel mode doesn't use intensity (mute is binary)."
+              : ""
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Settings panel for an audio_blur snip. Three presets + intensity. Each
+ * preset sounds quite different; the descriptions help the user pick
+ * before they have to actually listen.
+ */
+function AudioBlurSettings({
+  value,
+  onChange,
+}: {
+  value: Extract<SnipAction, { type: "audio_blur" }>;
+  onChange: (a: SnipAction) => void;
+}) {
+  return (
+    <div className="space-y-3 mt-2 p-2 bg-fvp-bg/40 border border-fvp-border rounded">
+      <div className="text-[10px] text-fvp-muted leading-relaxed">
+        Destroys speech intelligibility while keeping the soundscape. Use
+        the snip&apos;s AB-toggle preview to A/B the presets and pick
+        whichever sounds best for this scene.
+      </div>
+      <div className="space-y-1">
+        <Label>Preset</Label>
+        {(Object.entries(AUDIO_BLUR_MODE_LABELS) as [AudioBlurMode, string][]).map(
+          ([mode, label]) => (
+            <label
+              key={mode}
+              className={clsx(
+                "flex items-start gap-2 cursor-pointer p-1.5 rounded border text-[11px]",
+                value.mode === mode
+                  ? "border-fvp-accent bg-fvp-accent/10"
+                  : "border-fvp-border hover:bg-fvp-surface2/40",
+              )}
+            >
+              <input
+                type="radio"
+                checked={value.mode === mode}
+                onChange={() => onChange({ ...value, mode })}
+                className="accent-fvp-accent mt-0.5"
+              />
+              <div>
+                <div className="text-fvp-text">{label}</div>
+                <div className="text-fvp-muted text-[10px] leading-snug">
+                  {AUDIO_BLUR_MODE_DESCRIPTIONS[mode]}
+                </div>
+              </div>
+            </label>
+          ),
+        )}
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <Label>
+            Intensity{" "}
+            <span className="text-fvp-muted text-[10px]">
+              {value.mode === "muffled"
+                ? "(lowpass cutoff)"
+                : value.mode === "garbled_grain"
+                  ? "(modulation depth)"
+                  : "(phase scramble)"}
+            </span>
+          </Label>
+          <span className="text-[11px] text-fvp-text tabular-nums">
+            {value.intensity}
+          </span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={value.intensity}
+          onChange={(e) =>
+            onChange({ ...value, intensity: parseInt(e.target.value, 10) })
+          }
+          className="w-full accent-fvp-accent"
+        />
       </div>
     </div>
   );
@@ -1771,8 +2093,18 @@ function VideoPreviewArea({
   videoRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const freezeFrameSrc = useAppStore((s) => s.freezeFrameSrc);
+  const loading = useAppStore((s) => s.loading);
   return (
-    <div ref={videoRef as React.RefObject<HTMLDivElement>} className="flex-1 min-h-0 relative">
+    <div
+      ref={videoRef as React.RefObject<HTMLDivElement>}
+      // MUST stay transparent (no bg-* class). The intermediate libmpv
+      // HWND sits BEHIND the WebView2 in the sibling z-order on the
+      // Tauri window. An opaque background here covers the video.
+      // LoadingOverlay still paints on top of this when state.loading
+      // is true to mask the brief HWND-clear gap on file open.
+      className="flex-1 min-h-0 relative"
+      style={{ background: "transparent" }}
+    >
       {freezeFrameSrc && (
         <img
           src={freezeFrameSrc}
@@ -1781,19 +2113,26 @@ function VideoPreviewArea({
           className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none z-10"
         />
       )}
-      {!hasFile && (
-        <div className="absolute inset-0 bg-fvp-bg flex items-center justify-center text-fvp-muted text-sm">
-          <div className="text-center">
-            <div className="text-fvp-text text-base mb-2">No file loaded</div>
-            <div className="text-xs mb-4">Open a file to start editing snips.</div>
-            <button
-              onClick={() => void openFileFlow()}
-              className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90"
-            >
-              Open file…
-            </button>
+      {/* Loading takes precedence over no-file (same precedence as
+          Player Mode). Black overlay + spinner masks the libmpv HWND
+          during the attach gap, killing the white flash. */}
+      {loading ? (
+        <LoadingOverlay />
+      ) : (
+        !hasFile && (
+          <div className="absolute inset-0 bg-fvp-bg flex items-center justify-center text-fvp-muted text-sm">
+            <div className="text-center">
+              <div className="text-fvp-text text-base mb-2">No file loaded</div>
+              <div className="text-xs mb-4">Open a file to start editing snips.</div>
+              <button
+                onClick={() => void openFileFlow()}
+                className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90"
+              >
+                Open file…
+              </button>
+            </div>
           </div>
-        </div>
+        )
       )}
     </div>
   );
@@ -2134,10 +2473,11 @@ function TimelinePanel() {
         </div>
       </div>
 
-      {/* Layers area */}
+      {/* Layers area. WF (waveform) and Sc (scene-cut) placeholders used to
+          sit above the snip lanes here; they were never wired to real data
+          and took vertical space. Snips lane is the only meaningful row,
+          with the waveform planned to overlay it as ghost background. */}
       <div className="flex flex-col relative">
-        <Layer label="WF" />
-        <Layer label="Sc" />
         <SnipLayer
           ref={snipLayerRef}
           snips={snips}
@@ -2448,20 +2788,6 @@ function formatTimeShort(ms: number): string {
   const ss = s.toString().padStart(2, "0");
   if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${ss}`;
   return `${m}:${ss}`;
-}
-
-function Layer({ label }: { label: string }) {
-  return (
-    <div className="h-6 flex border-b border-fvp-border/40">
-      <div
-        className="shrink-0 px-1 text-[9px] text-fvp-muted border-r border-fvp-border h-full flex items-center justify-center bg-fvp-surface"
-        style={{ width: LABEL_COL_PX }}
-      >
-        {label}
-      </div>
-      <div className="flex-1 h-full" />
-    </div>
-  );
 }
 
 /** Renders subtitle entries with filter-chain awareness — entries that fall
@@ -2790,6 +3116,9 @@ const SnipLayer = React.forwardRef<
         }
       >
         <div className="relative" style={{ height: contentHeight }}>
+          {/* Ghost waveform behind everything. Pointer-events:none — the snip
+              lane keeps full control of drag-create / select / nudge. */}
+          <WaveformBackground viewStartMs={viewStartMs} viewEndMs={viewStartMs + viewDurationMs} />
           {/* Lane dividers — subtle horizontal lines so multi-lane stacking is visible */}
           {Array.from({ length: laneCount }).map((_, i) => (
             <div
@@ -2855,6 +3184,9 @@ const SnipLayer = React.forwardRef<
             />
           )}
         </div>
+        {/* Background-build indicator — pointer-events:none so it can't
+            intercept clicks on the snip lane behind it. */}
+        <PeaksBuildingBadge />
       </div>
     </div>
   );
@@ -2953,6 +3285,10 @@ function actionLabelByType(t: SnipAction["type"]): string {
       return "Audio-replace";
     case "beep":
       return "Beep";
+    case "mute_dialogue":
+      return "Mute dialogue";
+    case "audio_blur":
+      return "Audio blur";
   }
 }
 

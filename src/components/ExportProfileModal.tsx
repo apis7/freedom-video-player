@@ -1,21 +1,34 @@
 import { useEffect, useState } from "react";
 import { useAppStore } from "../state/appStore";
-import { exportCurrentProfile, computeExportPath } from "../utils/exportProfile";
+import {
+  exportCurrentProfile,
+  computeExportPath,
+  ensureFreeExtension,
+  defaultFilenameFor,
+} from "../utils/exportProfile";
 import { profileIpc } from "../ipc";
 
 interface ExportProfileModalProps {
+  /** Pre-fill the filename input. Pass the video's stem (e.g. "Movie") for
+   *  Ctrl+S; pass the previously-saved filename for Save-As to make
+   *  versioning easy ("Movie Family.free" → tweak suffix → "Movie Strict"). */
   initialName?: string;
+  /** True when this is "Save As" (Ctrl+Shift+S). Just changes the header
+   *  copy + button label; everything else works the same. */
+  saveAsMode?: boolean;
   onCancel: () => void;
   onSuccess: (path: string) => void;
 }
 
 /**
- * Export modal. Pre-checks whether the target path would overwrite an
- * existing .free and asks for explicit confirmation. Closes on backdrop
- * click only if no edits have been made.
+ * Filename picker for `.free` export. Defaults to the video's stem so the
+ * common case (one profile per video) is one Enter press away. Auto-
+ * appends `.free` if the user omitted it. Pre-checks for an existing file
+ * at the resulting path and warns about overwrite.
  */
 export function ExportProfileModal({
   initialName = "",
+  saveAsMode = false,
   onCancel,
   onSuccess,
 }: ExportProfileModalProps) {
@@ -25,7 +38,10 @@ export function ExportProfileModal({
   const inc = useAppStore((s) => s.incrementOpenModalCount);
   const dec = useAppStore((s) => s.decrementOpenModalCount);
 
-  const defaultName = initialName || "My Profile";
+  // initialName arrives without ".free"; the input shows what the user
+  // typed (or the default) verbatim, the .free is auto-appended in the
+  // resulting path preview.
+  const defaultName = initialName || (currentFile ? defaultFilenameFor(currentFile).replace(/\.free$/i, "") : "My Profile");
   const [name, setName] = useState(defaultName);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +52,7 @@ export function ExportProfileModal({
     return () => dec();
   }, [inc, dec]);
 
-  // Re-check overwrite status whenever the profile name (or file) changes.
+  // Re-check overwrite status whenever the filename (or file) changes.
   useEffect(() => {
     let cancelled = false;
     setOverwriteTarget(null);
@@ -82,23 +98,31 @@ export function ExportProfileModal({
     }
   };
 
+  const finalFilename = ensureFreeExtension(name);
+  const finalPath =
+    currentFile && finalFilename
+      ? computeExportPath(currentFile, finalFilename)
+      : null;
+
   return (
     <div
       className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center"
       onClick={tryClose}
     >
       <div
-        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl p-5 min-w-[400px] max-w-[520px]"
+        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl p-5 min-w-[460px] max-w-[600px]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="text-sm font-semibold text-fvp-text mb-1">Export profile to .free</div>
+        <div className="text-sm font-semibold text-fvp-text mb-1">
+          {saveAsMode ? "Save profile as…" : "Save profile to .free"}
+        </div>
         <div className="text-[11px] text-fvp-muted mb-4">
-          Saves alongside the video file as <span className="font-mono">&lt;video&gt;.&lt;profile name&gt;.free</span>.
-          Player Mode will auto-detect it.
+          Saves alongside the video file. <span className="font-mono">.free</span> is
+          appended automatically if you leave it off.
         </div>
 
         <label className="block text-[10px] uppercase tracking-wider text-fvp-muted mb-1">
-          Profile name
+          Filename
         </label>
         <input
           autoFocus
@@ -113,9 +137,15 @@ export function ExportProfileModal({
               tryClose();
             }
           }}
-          className="w-full bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded px-2 py-1.5 text-sm text-fvp-text outline-none mb-3"
-          placeholder="e.g. Family Friendly"
+          className="w-full bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded px-2 py-1.5 text-sm text-fvp-text outline-none mb-2 font-mono"
+          placeholder="e.g. Movie  (becomes Movie.free)"
         />
+
+        {finalPath && (
+          <div className="text-[10px] text-fvp-muted mb-3 font-mono break-all">
+            → {finalPath}
+          </div>
+        )}
 
         <div className="text-[11px] text-fvp-muted mb-4 space-y-1">
           <div>
@@ -123,12 +153,12 @@ export function ExportProfileModal({
           </div>
           {uncategorized > 0 && (
             <div className="text-fvp-warn">
-              ⚠ {uncategorized} snip(s) need at least one category before this profile can be exported.
+              ⚠ {uncategorized} snip(s) need at least one category before this profile can be saved.
             </div>
           )}
           {overwriteTarget && (
             <div className="text-fvp-warn">
-              ⚠ A profile with this name already exists — saving will overwrite it.
+              ⚠ A file with this name already exists — saving will overwrite it (a backup is kept).
             </div>
           )}
         </div>
@@ -149,10 +179,10 @@ export function ExportProfileModal({
           </button>
           <button
             onClick={() => void handleSave()}
-            disabled={busy || uncategorized > 0 || snips.length === 0}
+            disabled={busy || uncategorized > 0 || snips.length === 0 || !finalFilename}
             className="px-3 py-1.5 bg-fvp-accent hover:opacity-90 text-white rounded disabled:opacity-50"
           >
-            {busy ? "Saving…" : overwriteTarget ? "Overwrite .free" : "Save .free"}
+            {busy ? "Saving…" : overwriteTarget ? "Overwrite" : "Save"}
           </button>
         </div>
       </div>

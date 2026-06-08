@@ -54,10 +54,20 @@ export interface AppState {
   /** When true, Creator's working state autosaves to a sidecar .fvp-draft.json
    *  next to the video file on every change (debounced). */
   autosaveDraft: boolean;
+  /** Player setting — when true, a small FVP icon shows in the corner of
+   *  the video while a profile is actively applying. Default off. */
+  playerShowProfileIcon: boolean;
+  /** Player setting — when true, the movie's file path briefly fades in
+   *  over the bottom of the video on play, but only when starting from
+   *  the very beginning (<1s in). Default off. */
+  playerShowPathOnStart: boolean;
   /** Active category filter for the Snip rail. null = show all. */
   snipFilterCategory: string | null;
   /** One-at-a-time transient toast (info / warn / error). */
   toast: Toast | null;
+  /** Persistent bottom-of-screen progress banner for long-running bulk
+   *  operations (e.g. "Refreshing metadata 12/50"). null when idle. */
+  bulkProgress: { label: string; completed: number; total: number } | null;
   /** Open modal counter — incremented/decremented by modals on mount/unmount.
    *  The document-level right-click handler bails when this is > 0 so menus
    *  don't open under modals. */
@@ -87,11 +97,6 @@ export interface AppState {
   videoTracks: import("../ipc/subtitles").SubtitleTrack[];
   /** Current deinterlace state. */
   deinterlaceOn: boolean;
-  /** Library Mode: currently-selected folder + scan results. */
-  libraryFolder: string | null;
-  libraryItems: import("../ipc/library").LibraryItem[];
-  libraryRecursive: boolean;
-  libraryScanning: boolean;
   /** ISO-639-1 code of the wordlist AutoSnip uses. Defaults to "en". */
   autoSnipLanguage: string;
   /** AutoSnip default padding (ms) applied before / after each subtitle
@@ -174,6 +179,27 @@ export interface AppState {
    *  without showing the confirmation popup. Suppressed via the "don't
    *  show this again" checkbox on the popup. Persisted in localStorage. */
   dontShowBeepShortenWarning: boolean;
+  /** Audio waveform peaks for the currently-loaded file. Null until the
+   *  sidecar is loaded or built. Used by Creator's ghost waveform layer. */
+  audioPeaks: import("../ipc/types").LoadedPeaks | null;
+  /** True while a background peak-build is in flight for the current file.
+   *  Drives the small "building waveform" badge. Pointer-events:none — must
+   *  never block the user's timeline interactions. */
+  peaksBuilding: boolean;
+  /** 0–100 progress for the in-flight build, or null when not building. */
+  peaksBuildPercent: number | null;
+  /** Snapshot key of the persistence-relevant state at the time of the last
+   *  manual export. Null when the user hasn't exported in this session.
+   *  Compared against the current snapshot to derive `unsavedSinceExport`. */
+  lastSavedSnapshot: string | null;
+  /** Derived: true when there's unsaved editing work since the last manual
+   *  `.free` export. Drives the saved-status pill next to Autosave. */
+  unsavedSinceExport: boolean;
+  /** Absolute path of the last successful manual export for the current
+   *  file. Set after every successful save; cleared on file open. Ctrl+S
+   *  silently overwrites this path; Ctrl+Shift+S always opens the Save As
+   *  modal regardless of whether this is set. */
+  lastSavedPath: string | null;
 }
 
 export interface Marker {
@@ -262,9 +288,12 @@ export interface AppActions {
   removeGroup: (id: string) => void;
   setSnipGroup: (snipId: string, groupId: string | null) => void;
   setAutosaveDraft: (v: boolean) => void;
+  setPlayerShowProfileIcon: (v: boolean) => void;
+  setPlayerShowPathOnStart: (v: boolean) => void;
   setSnipFilterCategory: (c: string | null) => void;
   showToast: (message: string, kind?: Toast["kind"], durationMs?: number) => void;
   dismissToast: () => void;
+  setBulkProgress: (p: { label: string; completed: number; total: number } | null) => void;
   incrementOpenModalCount: () => void;
   decrementOpenModalCount: () => void;
   addMarker: (ms: number, name?: string) => void;

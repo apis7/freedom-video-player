@@ -184,6 +184,11 @@ export async function openVideoPath(selected: string): Promise<void> {
     moviePlot: null,
     imdbRating: null,
     imdbId: null,
+    // Reset save tracking for the new file. Tracker will recompute on the
+    // first state change after this clear; empty + no saved-snapshot = clean.
+    lastSavedSnapshot: null,
+    unsavedSinceExport: false,
+    lastSavedPath: null,
   });
   // Clear any aspect override from a previous file before the new file
   // gets a chance to set its own (or fall back to native).
@@ -226,8 +231,14 @@ export async function openVideoPath(selected: string): Promise<void> {
 
     // Compute fingerprint in background and cache on the store so the
     // autosave can embed it in the `.fvp-autosave.free` sidecar.
+    // 800ms delay so libmpv gets first dibs on SMB-share bandwidth —
+    // running fingerprint + profile scan in parallel with the initial
+    // demux can starve the video stream of bytes on slow shares,
+    // resulting in audio-only / black-screen playback.
     void (async () => {
       try {
+        await new Promise((r) => setTimeout(r, 800));
+        if (useAppStore.getState().currentFile !== selected) return;
         const fp = await profileIpc.computeFingerprint(selected);
         if (useAppStore.getState().currentFile === selected) {
           useAppStore.setState({ currentFileFingerprint: fp });
@@ -240,8 +251,12 @@ export async function openVideoPath(selected: string): Promise<void> {
       }
     })();
 
+    // Same logic as fingerprint — defer the profile-folder scan so the
+    // initial libmpv demux gets first dibs on SMB bandwidth.
     void (async () => {
       try {
+        await new Promise((r) => setTimeout(r, 1200));
+        if (useAppStore.getState().currentFile !== selected) return;
         const matches = await profileIpc.scanFolderForProfiles(selected);
         const detected = matches.map((m) => ({
           ...m,

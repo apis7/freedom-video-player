@@ -23,6 +23,8 @@ function actionPriority(a: SnipAction): number {
     case "beep":
       return 2;
     case "audio_replace":
+    case "mute_dialogue":
+    case "audio_blur":
       return 1;
   }
 }
@@ -245,6 +247,16 @@ export function useProfileApplication() {
               `VIDEO: plays through normally • AUDIO: muted + ${a.freq_hz}Hz sine ` +
               `overlay @ ${a.level_db}dB (capped at ${MAX_BEEP_DURATION_MS}ms if snip is longer)`;
             break;
+          case "mute_dialogue":
+            what = state.audioOverlayActive
+              ? `VIDEO: plays through normally • AUDIO: libmpv overlay attempting dialogue removal (mode=${a.mode}, intensity=${a.intensity})`
+              : "VIDEO: plays through normally • AUDIO: muted (overlay off — silence fallback)";
+            break;
+          case "audio_blur":
+            what = state.audioOverlayActive
+              ? `VIDEO: plays through normally • AUDIO: libmpv overlay blurring (mode=${a.mode}, intensity=${a.intensity})`
+              : "VIDEO: plays through normally • AUDIO: muted (overlay off — silence fallback)";
+            break;
         }
         console.log(`${head}\n            ${what}${prev ? ` (was in snip ${prev})` : ""}`);
         ownership.current.activeSnipId = winner.id;
@@ -404,29 +416,48 @@ export function useProfileApplication() {
         ownership.current.beepSnipId = null;
       }
 
-      // ── Audio-replace ──
-      // When the libmpv lavfi-complex overlay is engaged (Player Mode with
-      // an active profile, or Creator with AB-toggle ON), libmpv is already
-      // crossfading source audio over the snip window — we just keep our
-      // hands off. When the overlay is NOT engaged, fall back to Skip: jump
-      // past the snip so offensive audio isn't heard. The snip's direction /
-      // offset / crossfade settings persist in the .free file either way.
-      if (winner.action.type === "audio_replace") {
+      // ── Audio-replace / Mute-dialogue / Audio-blur ──
+      // All three are handled by the libmpv lavfi-complex overlay. When
+      // the overlay is engaged, we keep our hands off — the filter
+      // graph crossfades the effect over the snip window. When the
+      // overlay is NOT engaged, fall back to Skip (for audio_replace
+      // — preserves the user's "remove the audio" intent) or to
+      // silence-via-mute (for mute_dialogue / audio_blur — gentler,
+      // matches the user's intent of "I want to soften this part").
+      if (
+        winner.action.type === "audio_replace" ||
+        winner.action.type === "mute_dialogue" ||
+        winner.action.type === "audio_blur"
+      ) {
+        const a = winner.action;
         if (!state.audioOverlayActive) {
-          if (state.playing && !recentlyNavigated()) {
-            if (ownership.current.lastSkipFromMs !== winner.start_ms) {
-              console.log(
-                `[fvp:engine] 🔁 AUDIO-REPLACE (overlay off — Skip fallback) fired: ` +
-                  `seek ${currentMs.toFixed(0)}ms → ${winner.end_ms}ms`,
-              );
-              try { await playback.seek(winner.end_ms / 1000); } catch {}
-              ownership.current.lastSkipFromMs = winner.start_ms;
+          if (a.type === "audio_replace") {
+            // Skip fallback for audio_replace.
+            if (state.playing && !recentlyNavigated()) {
+              if (ownership.current.lastSkipFromMs !== winner.start_ms) {
+                console.log(
+                  `[fvp:engine] 🔁 AUDIO-REPLACE (overlay off — Skip fallback) fired: ` +
+                    `seek ${currentMs.toFixed(0)}ms → ${winner.end_ms}ms`,
+                );
+                try { await playback.seek(winner.end_ms / 1000); } catch {}
+                ownership.current.lastSkipFromMs = winner.start_ms;
+              }
+            }
+          } else {
+            // Silence fallback for mute_dialogue / audio_blur — the
+            // effect can't run, so mute the audio for the duration.
+            if (!ownership.current.mutedByUs) {
+              try { await playback.setMuted(true); } catch {}
+              ownership.current.mutedByUs = true;
             }
           }
-        }
-        if (ownership.current.mutedByUs) {
-          try { await playback.setMuted(false); } catch {}
-          ownership.current.mutedByUs = false;
+        } else {
+          // Overlay active — libmpv handles the effect. Make sure we
+          // don't leave a stale user-mute in place.
+          if (ownership.current.mutedByUs) {
+            try { await playback.setMuted(false); } catch {}
+            ownership.current.mutedByUs = false;
+          }
         }
         frame = requestAnimationFrame(tick);
         return;

@@ -6,6 +6,7 @@ import { MenuBar } from "./components/MenuBar";
 import { StatusBar } from "./components/StatusBar";
 import { CheatsheetOverlay } from "./components/CheatsheetOverlay";
 import { ToastOverlay } from "./components/Toast";
+import { BulkProgressBar } from "./components/BulkProgressBar";
 import { LoadTimeoutModal } from "./components/LoadTimeoutModal";
 import { AboutModal } from "./components/AboutModal";
 import { SafetyBanner } from "./components/SafetyBanner";
@@ -129,6 +130,7 @@ export function App() {
       {showStatusBar && <StatusBar />}
       <CheatsheetOverlay />
       <ToastOverlay />
+      <BulkProgressBar />
       <LoadTimeoutModal />
       <AboutModalIfVisible />
       <SafetyBanner />

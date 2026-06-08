@@ -4,6 +4,7 @@ import { useAppStore } from "../state/appStore";
 import { TransportBar } from "../components/TransportBar";
 import { ContextMenu, type MenuItem } from "../components/ContextMenu";
 import { ProfileChip } from "../components/ProfileChip";
+import { ProfileActiveIcon, MoviePathOverlay } from "../components/PlayerOverlays";
 import { ProfileSwitcher } from "../components/ProfileSwitcher";
 import { SkipThatTray } from "../components/SkipThatTray";
 import { openFileFlow } from "../utils/openFileFlow";
@@ -12,6 +13,9 @@ import { subtitlesIpc } from "../ipc";
 import { playerController } from "../controller/playerController";
 import { useVideoAreaReporter } from "../hooks/useVideoAreaReporter";
 import { RateMovieModal } from "../components/RateMovieModal";
+import { LoadingOverlay } from "../components/LoadingOverlay";
+import { ResumeOrStartOverModal } from "../components/ResumeOrStartOverModal";
+import { useLibraryWatchTracker } from "../hooks/useLibraryWatchTracker";
 
 export function PlayerMode() {
   const currentFile = useAppStore((s) => s.currentFile);
@@ -26,6 +30,7 @@ export function PlayerMode() {
   const [rating, setRating] = useState(false);
   const videoAreaRef = useRef<HTMLDivElement>(null);
   useVideoAreaReporter(videoAreaRef);
+  const { resumePrompt, dismissResume } = useLibraryWatchTracker();
 
   // Document-level contextmenu handler (capture phase) — catches every right
   // click that produces a DOM event, regardless of which element it lands on
@@ -63,8 +68,24 @@ export function PlayerMode() {
     return () => unlisten?.();
   }, []);
 
+  // Left-click on the libmpv HWND → toggle pause/play in Player Mode.
+  // The click lands on libmpv's native child window, never reaches the
+  // DOM, so we rely on the Rust WNDPROC subclass forwarding it as the
+  // `video-click` Tauri event. Suppressed while any modal is open so
+  // a backdrop click doesn't also pause playback.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("video-click", () => {
+      if (useAppStore.getState().openModalCount > 0) return;
+      if (!useAppStore.getState().currentFile) return;
+      void playerController.togglePause();
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
   const showTransport = !fullscreen || chromeVisible;
-  const overlayVisible = !currentFile || loading;
 
   const buildMenuItems = (): MenuItem[] => [
     { kind: "item", label: "Open file…", hotkey: "Ctrl+O", onClick: () => void openFileFlow() },
@@ -166,16 +187,18 @@ export function PlayerMode() {
 
   return (
     <div className="h-full flex flex-col">
-      <div ref={videoAreaRef} className="flex-1 min-h-0 relative">
+      <div ref={videoAreaRef} className="flex-1 min-h-0 relative" style={{ background: "transparent" }}>
         <FreezeFrameOverlay />
-        {overlayVisible && (
-          <div className="absolute inset-0 bg-fvp-bg flex items-center justify-center text-fvp-muted text-sm">
-            {loading ? (
-              <div className="text-center">
-                <Spinner />
-                <div className="mt-4 text-xs">Loading…</div>
-              </div>
-            ) : (
+        {/* Loading takes precedence over no-file (a fresh load wants to
+            show the spinner, not the empty-state pitch). The spinner
+            overlay is opaque black, so it also hides the libmpv HWND
+            during the brief render gap when a new file is attaching —
+            this is what kills the white flash on file open. */}
+        {loading ? (
+          <LoadingOverlay />
+        ) : (
+          !currentFile && (
+            <div className="absolute inset-0 bg-fvp-bg flex items-center justify-center text-fvp-muted text-sm">
               <div className="text-center">
                 <img
                   src="/icon_96px.png"
@@ -196,10 +219,12 @@ export function PlayerMode() {
                   Open file…
                 </button>
               </div>
-            )}
-          </div>
+            </div>
+          )
         )}
         <ProfileChip />
+        <ProfileActiveIcon />
+        <MoviePathOverlay />
       </div>
       <SkipThatTray onViewDraft={() => useAppStore.setState({ mode: "creator" })} />
       {showTransport && <TransportBar onOpenFile={() => void openFileFlow()} />}
@@ -211,13 +236,15 @@ export function PlayerMode() {
           onClose={() => setRating(false)}
         />
       )}
+      {resumePrompt && (
+        <ResumeOrStartOverModal
+          progressMs={resumePrompt.progressMs}
+          durationMs={resumePrompt.durationMs}
+          title={resumePrompt.title}
+          onResolved={dismissResume}
+        />
+      )}
     </div>
-  );
-}
-
-function Spinner() {
-  return (
-    <div className="inline-block w-8 h-8 border-2 border-fvp-border border-t-fvp-accent rounded-full animate-spin" />
   );
 }
 

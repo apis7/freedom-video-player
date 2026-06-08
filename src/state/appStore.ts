@@ -57,7 +57,10 @@ function resolveCollisionsFor(
 
 export const useAppStore = create<AppState & AppActions>((set) => ({
   mode: "player",
-  libraryEnabled: false,
+  // Library Mode on by default per librrary_directive.md ("By default it's
+  // on, but can be disabled in Settings"). Users with no library use case
+  // can flip it off; everyone else gets the Library tab automatically.
+  libraryEnabled: true,
   currentFile: null,
   loading: false,
   playing: false,
@@ -85,8 +88,11 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   skipThatPendingStartMs: null,
   skipThatTrayActiveAt: null,
   autosaveDraft: true,
+  playerShowProfileIcon: false,
+  playerShowPathOnStart: false,
   snipFilterCategory: null,
   toast: null,
+  bulkProgress: null,
   openModalCount: 0,
   loadingTimedOut: false,
   autosaveErrorShown: false,
@@ -98,10 +104,6 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   audioTracks: [],
   videoTracks: [],
   deinterlaceOn: false,
-  libraryFolder: null,
-  libraryItems: [],
-  libraryRecursive: true,
-  libraryScanning: false,
   autoSnipLanguage: "en",
   autoSnipPadBeforeMs: 200,
   autoSnipPadAfterMs: 300,
@@ -131,6 +133,12 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   moviePlot: null,
   imdbRating: null,
   imdbId: null,
+  audioPeaks: null,
+  peaksBuilding: false,
+  peaksBuildPercent: null,
+  lastSavedSnapshot: null,
+  unsavedSinceExport: false,
+  lastSavedPath: null,
 
   setMode: (mode) =>
     set((s) => {
@@ -403,6 +411,8 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   toggleJumpPlayheadOnSnipSelect: () =>
     set((s) => ({ jumpPlayheadOnSnipSelect: !s.jumpPlayheadOnSnipSelect })),
   setAutosaveDraft: (v) => set({ autosaveDraft: v }),
+  setPlayerShowProfileIcon: (v) => set({ playerShowProfileIcon: v }),
+  setPlayerShowPathOnStart: (v) => set({ playerShowPathOnStart: v }),
   setSnipFilterCategory: (c) => set({ snipFilterCategory: c }),
   showToast: (message, kind = "info", durationMs = 5000) =>
     set({
@@ -416,6 +426,7 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
       },
     }),
   dismissToast: () => set({ toast: null }),
+  setBulkProgress: (bulkProgress) => set({ bulkProgress }),
   incrementOpenModalCount: () =>
     set((s) => ({ openModalCount: s.openModalCount + 1 })),
   decrementOpenModalCount: () =>

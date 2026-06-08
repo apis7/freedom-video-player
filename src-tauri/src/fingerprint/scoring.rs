@@ -159,12 +159,24 @@ fn average_phash_distance(a: &Fingerprint, b: &Fingerprint) -> Option<f64> {
 
 /// Scan a folder for `.free` files and score each against the given video fingerprint.
 /// Returns results sorted best-match first; `NoMatch` entries are excluded.
+///
+/// Special case for autosave files: `<stem>.fvp-autosave.free` is paired with
+/// its video by name convention, not by fingerprint — autosave can fire before
+/// fingerprint computation finishes, so the stored fingerprint may be empty.
+/// When the basename matches we accept it as Exact and skip fingerprint scoring
+/// entirely. Without this the autosave wouldn't be detected on reopen even
+/// though `load_draft` (which keys by filename) still restores the snips.
 pub fn scan_folder(folder: &Path, video: &Fingerprint) -> Vec<MatchResult> {
     let mut results = Vec::new();
     let entries = match std::fs::read_dir(folder) {
         Ok(e) => e,
         Err(_) => return results,
     };
+    // Video stem the autosave sidecar would be paired with. `video.filename`
+    // already excludes the directory, so strip the extension.
+    let video_stem: Option<String> = std::path::Path::new(&video.filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned());
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("free") {
@@ -174,7 +186,23 @@ pub fn scan_folder(folder: &Path, video: &Fingerprint) -> Vec<MatchResult> {
             Ok(f) => f,
             Err(_) => continue,
         };
-        let score = score_against(&file.payload.fingerprint, video);
+        // Autosave sidecar: file stem is `<videoStem>.fvp-autosave`.
+        let is_autosave_for_this_video = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|stem| stem.strip_suffix(".fvp-autosave"))
+            .zip(video_stem.as_deref())
+            .map(|(a, b)| a == b)
+            .unwrap_or(false);
+
+        let score = if is_autosave_for_this_video {
+            MatchScore {
+                quality: MatchQuality::Exact,
+                reasons: vec!["paired by autosave filename convention".into()],
+            }
+        } else {
+            score_against(&file.payload.fingerprint, video)
+        };
         if score.quality == MatchQuality::NoMatch {
             continue;
         }

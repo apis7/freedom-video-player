@@ -86,8 +86,9 @@ pub async fn extract_embedded_subtitle(
             if let Ok(text) = std::fs::read_to_string(&cache_path) {
                 if let Ok(parsed) = serde_json::from_str::<SubCacheFile>(&text) {
                     if parsed.schema == 1 && parsed.track_id == track_id {
-                        eprintln!(
-                            "[fvp] sub cache hit: {} ({} entries)",
+                        crate::log!(
+                            "subs",
+                            "sub cache hit: {} ({} entries)",
                             cache_path.display(),
                             parsed.entries.len()
                         );
@@ -148,7 +149,7 @@ fn extract_subs_blocking(video_path: &str, track_id: i64) -> Result<Vec<Subtitle
             }
             Some(Ok(_)) => {}
             Some(Err(e)) => {
-                eprintln!("[extract_subs] libmpv event error: {e:?}");
+                crate::log!("subs:extract", "libmpv event error: {e:?}");
             }
             None => {}
         }

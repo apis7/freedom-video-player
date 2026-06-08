@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
@@ -32,9 +32,37 @@ thiserror = "2"
 # Synchronous HTTP client for TMDb lookups. Sync + rustls keeps the
 # tree small and dodges the cmake/OpenSSL dance reqwest would pull in.
 ureq = { version = "2", features = ["json", "tls"], default-features = false }
+# Local-date conversion for rolling backup rotation. "clock" pulls in the
+# OS timezone hook; we skip serde / wasm features for a small footprint.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Library Mode SQLite store. `bundled` ships the SQLite amalgamation with
+# the binary so we don't need a system libsqlite3 — keeps the installer
+# self-contained on Windows.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Cheap fingerprint hashing for the library identity scheme. md-5 is small,
+# adequate for "is this the same file?" use (we never use it for security).
+md-5 = "0.10"
+# SHA-256 for the 4-digit Family-View PIN ("speed bump for kids" per
+# directive — not a hardened secret). Stored hashed in library_settings.
+sha2 = "0.10"
+# Cross-platform recycle-bin: the Library's "Delete permanently" path
+# moves files to the OS trash rather than nuking them — directive
+# requires this be explicit, confirmed, and undoable.
+trash = "5"
+# Strong fingerprint hashing (computed on demand only). BLAKE3 is much
+# faster than SHA-256 and we don't need crypto strength here, just a
+# stable content ID.
+blake3 = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    # AttachConsole + SetStdHandle so the GUI exe can opt into showing
+    # stdout/stderr when launched from a terminal (PowerShell / cmd).
+    "Win32_System_Console",
+] }
 
 # Crates committed in tech_stack.md but deferred until first needed:
 #   tokio (async runtime)

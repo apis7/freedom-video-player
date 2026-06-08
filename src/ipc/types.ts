@@ -87,6 +87,16 @@ export interface TmdbMovieDetails {
   poster_url: string | null;
 }
 
+/** Audio waveform peaks (one byte per peak, 0..=255 amplitude). Cached as
+ *  a sidecar `<stem>.fvp-peaks.bin` and loaded once on file-open in Creator
+ *  Mode for the ghost-background render under the snip lane. */
+export interface LoadedPeaks {
+  peaks_per_second: number;
+  duration_ms: number;
+  /** Length is roughly duration_ms * peaks_per_second / 1000. */
+  peaks: Uint8Array;
+}
+
 /** Built-in aspect-ratio presets surfaced in the menu. The empty-string
  *  value maps to libmpv's "no" (clear override). */
 export const ASPECT_RATIO_PRESETS: { label: string; value: string }[] = [
@@ -128,7 +138,43 @@ export type SnipAction =
       /** Tone level in dB relative to full scale. Default -22 dB (subtle,
        *  audible but not jarring). */
       level_db: number;
+    }
+  | {
+      /** Best-effort dialogue removal — auto-detects channel layout. */
+      type: "mute_dialogue";
+      mode: MuteDialogueMode;
+      /** 0..100 — for stereo_cancel, scales the subtracted amount. */
+      intensity: number;
+    }
+  | {
+      /** Garbled/muffled audio that destroys speech intelligibility. */
+      type: "audio_blur";
+      mode: AudioBlurMode;
+      /** 0..100 — preset-specific (lowpass cutoff, grain size, etc.). */
+      intensity: number;
     };
+
+export type MuteDialogueMode = "auto" | "center_channel" | "stereo_cancel";
+export type AudioBlurMode = "muffled" | "garbled_grain" | "garbled_phase";
+
+export const MUTE_DIALOGUE_MODE_LABELS: Record<MuteDialogueMode, string> = {
+  auto: "Auto (recommended)",
+  center_channel: "Drop center channel (5.1/7.1)",
+  stereo_cancel: "Stereo center-cancel",
+};
+export const AUDIO_BLUR_MODE_LABELS: Record<AudioBlurMode, string> = {
+  muffled: "Muffled (lowpass + reverb)",
+  garbled_grain: "Garbled — modulation",
+  garbled_phase: "Garbled — phase scramble",
+};
+export const AUDIO_BLUR_MODE_DESCRIPTIONS: Record<AudioBlurMode, string> = {
+  muffled:
+    "Heavy lowpass + reverb. Sounds like dialogue through a wall — most natural; least obvious as an effect. Music character largely survives.",
+  garbled_grain:
+    "Aggressive modulation (vibrato + flanger + chorus). Speech becomes drunken nonsense; music smears.",
+  garbled_phase:
+    "FFT phase scramble. The original timbre and loudness are preserved, but the time structure that conveys words is gone. Very textural.",
+};
 
 export interface Snip {
   id: string;

@@ -219,6 +219,50 @@ pub enum SnipAction {
         #[serde(default = "default_beep_level_db")]
         level_db: i32,
     },
+    /// Attempt to remove/mute dialogue. Best-effort — works well on 5.1+
+    /// with a discrete center channel, decently on stereo with centered
+    /// dialogue, fails outright on mono. The runtime auto-detects the
+    /// channel layout and picks an appropriate FFmpeg filter.
+    ///
+    /// - `mode`:
+    ///     "auto"           → backend picks center_channel for 5.1+,
+    ///                        stereo_cancel for stereo, silence for mono.
+    ///     "center_channel" → force the multichannel path even on stereo
+    ///                        (will silently fall back if the source has
+    ///                        no center channel).
+    ///     "stereo_cancel"  → force L-R / R-L subtraction.
+    /// - `intensity`: 0..=100. For stereo_cancel, scales the subtracted
+    ///   amount (100 = full subtract, 50 = half-subtract). For center
+    ///   channel, currently ignored (mute is binary). Left in the schema
+    ///   so a future "duck instead of mute" mode can use it.
+    MuteDialogue {
+        #[serde(default = "default_mute_dialogue_mode")]
+        mode: String,
+        #[serde(default = "default_mute_dialogue_intensity")]
+        intensity: u8,
+    },
+    /// Garbled/muffled audio — destroys speech intelligibility while
+    /// preserving the soundscape. Three flavors:
+    ///
+    /// - "muffled"        → heavy lowpass + reverb. Sounds like dialogue
+    ///                      through a wall. Most natural; least obvious
+    ///                      as an effect.
+    /// - "garbled_grain"  → 50 ms granular reversal. Foreign-language
+    ///                      vibe. Loudness contour preserved; phonemes
+    ///                      destroyed.
+    /// - "garbled_phase"  → FFT phase scramble. Spectral envelope
+    ///                      preserved; temporal structure obliterated.
+    ///
+    /// `intensity` (0..=100) scales the effect strength. For muffled:
+    /// the lowpass cutoff slides 1600Hz → 300Hz as intensity goes 0→100.
+    /// For granular: grain size slides 20ms → 100ms. For phase: how much
+    /// of the phase is randomized vs. preserved.
+    AudioBlur {
+        #[serde(default = "default_audio_blur_mode")]
+        mode: String,
+        #[serde(default = "default_audio_blur_intensity")]
+        intensity: u8,
+    },
 }
 
 fn default_crossfade_ms() -> u32 {
@@ -230,6 +274,21 @@ fn default_beep_freq_hz() -> u32 {
 fn default_beep_level_db() -> i32 {
     -22
 }
+fn default_mute_dialogue_mode() -> String {
+    "auto".into()
+}
+fn default_mute_dialogue_intensity() -> u8 {
+    100
+}
+fn default_audio_blur_mode() -> String {
+    "muffled".into()
+}
+fn default_audio_blur_intensity() -> u8 {
+    70
+}
+
+pub const MUTE_DIALOGUE_MODES: &[&str] = &["auto", "center_channel", "stereo_cancel"];
+pub const AUDIO_BLUR_MODES: &[&str] = &["muffled", "garbled_grain", "garbled_phase"];
 
 /// Hard cap on Beep snip duration. Enforced by the frontend's action picker
 /// (which offers to shorten longer snips) and by the apply engine as a
@@ -491,6 +550,44 @@ fn validate_action(snip_id: &str, action: &SnipAction) -> Result<(), ValidationE
                     snip_id: snip_id.to_string(),
                     reason: format!(
                         "offset_ms={offset_ms} outside [{MIN_AUDIO_REPLACE_OFFSET_MS}, {MAX_AUDIO_REPLACE_OFFSET_MS}]"
+                    ),
+                });
+            }
+            Ok(())
+        }
+        SnipAction::MuteDialogue { mode, intensity } => {
+            if !MUTE_DIALOGUE_MODES.iter().any(|m| m == mode) {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "mute_dialogue mode '{mode}' not in {MUTE_DIALOGUE_MODES:?}"
+                    ),
+                });
+            }
+            if *intensity > 100 {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "mute_dialogue intensity={intensity} > 100"
+                    ),
+                });
+            }
+            Ok(())
+        }
+        SnipAction::AudioBlur { mode, intensity } => {
+            if !AUDIO_BLUR_MODES.iter().any(|m| m == mode) {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "audio_blur mode '{mode}' not in {AUDIO_BLUR_MODES:?}"
+                    ),
+                });
+            }
+            if *intensity > 100 {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "audio_blur intensity={intensity} > 100"
                     ),
                 });
             }

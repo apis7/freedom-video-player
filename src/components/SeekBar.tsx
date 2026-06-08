@@ -101,6 +101,10 @@ export function SeekBar({ onScrubStateChange }: SeekBarProps) {
         return "#c792ea";
       case "beep":
         return "#facc15";
+      case "mute_dialogue":
+        return "#5eead4"; // teal — "dialog gone"
+      case "audio_blur":
+        return "#a78bfa"; // lighter purple — "smeared"
       default:
         return "#888";
     }

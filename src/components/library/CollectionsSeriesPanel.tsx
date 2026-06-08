@@ -1,0 +1,1020 @@
+import { useCallback, useEffect, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { useAppStore } from "../../state/appStore";
+import {
+  libraryIpc,
+  type CollectionRow,
+  type LibraryRow,
+  type SeriesRow,
+} from "../../ipc/library";
+import { ContextMenu, type MenuItem } from "../ContextMenu";
+import {
+  getIdentityDragData,
+  setSidebarReorderData,
+  getSidebarReorderData,
+} from "./dragKinds";
+import { SmartTmdbReviewModal } from "./SmartTmdbReviewModal";
+
+export interface ActiveScope {
+  kind: "all" | "collection" | "series";
+  id: number | null;
+  name: string | null;
+}
+
+interface Props {
+  refreshToken: number;
+  activeScope: ActiveScope;
+  onScopeChange: (s: ActiveScope) => void;
+  /** Library rows the parent already loaded; lets us match dropped paths
+   *  to existing identities without a round-trip per call. */
+  rows: LibraryRow[];
+  /** Parent re-fetches list/collections/series whenever members change. */
+  onMembershipChanged: () => void;
+}
+
+const VIDEO_EXTENSIONS = [
+  "mkv", "mp4", "avi", "mov", "m4v", "webm",
+  "wmv", "flv", "mpg", "mpeg", "ts", "m2ts",
+];
+
+/**
+ * Sidebar panel listing Collections + Series. Each item is a click-target
+ * that scopes the main library to its members. Right-click for rename /
+ * add files / add folders / delete via a proper ContextMenu (no more
+ * window.prompt ugliness).
+ *
+ * Spacers between the All Movies row, the Collections group, and the
+ * Series group make the three categories read as visually distinct
+ * from the Filters & Search section below.
+ */
+export function CollectionsSeriesPanel({
+  refreshToken,
+  activeScope,
+  onScopeChange,
+  rows,
+  onMembershipChanged,
+}: Props) {
+  const showToast = useAppStore((s) => s.showToast);
+  const [collections, setCollections] = useState<CollectionRow[]>([]);
+  const [series, setSeries] = useState<SeriesRow[]>([]);
+  const [creating, setCreating] = useState<null | "collection" | "series">(
+    null,
+  );
+  const [draftName, setDraftName] = useState("");
+  const [renaming, setRenaming] = useState<
+    | null
+    | { kind: "collection"; id: number; current: string }
+    | { kind: "series"; id: number; current: string }
+  >(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    items: MenuItem[];
+  } | null>(null);
+  const [smartTmdb, setSmartTmdb] = useState<{
+    kind: "collection" | "series";
+    id: number;
+    name: string;
+  } | null>(null);
+
+  const reload = useCallback(async () => {
+    try {
+      const [c, s] = await Promise.all([
+        libraryIpc.listCollections(),
+        libraryIpc.listSeries(),
+      ]);
+      setCollections(c);
+      setSeries(s);
+    } catch (err) {
+      showToast(`Load collections/series failed: ${err}`, "error");
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, refreshToken]);
+
+  // ── Create flows ────────────────────────────────────────────────
+  const createCollection = async () => {
+    if (!draftName.trim()) return;
+    try {
+      await libraryIpc.createCollection(draftName);
+      setDraftName("");
+      setCreating(null);
+      await reload();
+    } catch (err) {
+      showToast(`Create failed: ${err}`, "error");
+    }
+  };
+  const createSeries = async () => {
+    if (!draftName.trim()) return;
+    try {
+      await libraryIpc.createSeries(draftName, false);
+      setDraftName("");
+      setCreating(null);
+      await reload();
+    } catch (err) {
+      showToast(`Create failed: ${err}`, "error");
+    }
+  };
+
+  // ── Delete flow (with confirmation modal) ───────────────────────
+  const deleteCollection = async (c: CollectionRow) => {
+    if (
+      !window.confirm(
+        `Delete collection "${c.name}"?\n\nMovies stay in the library — only the collection grouping is removed.`,
+      )
+    )
+      return;
+    try {
+      await libraryIpc.deleteCollection(c.id);
+      if (activeScope.kind === "collection" && activeScope.id === c.id) {
+        onScopeChange({ kind: "all", id: null, name: null });
+      }
+      await reload();
+      onMembershipChanged();
+    } catch (err) {
+      showToast(`Delete failed: ${err}`, "error");
+    }
+  };
+  const deleteSeries = async (s: SeriesRow) => {
+    if (
+      !window.confirm(
+        `Delete series "${s.name}"?\n\nMovies stay in the library (they'll reappear in All Movies) — only the series grouping is removed.`,
+      )
+    )
+      return;
+    try {
+      await libraryIpc.deleteSeries(s.id);
+      if (activeScope.kind === "series" && activeScope.id === s.id) {
+        onScopeChange({ kind: "all", id: null, name: null });
+      }
+      await reload();
+      onMembershipChanged();
+    } catch (err) {
+      showToast(`Delete failed: ${err}`, "error");
+    }
+  };
+
+  // ── Add-files / add-folders flows shared by collection + series ─
+  const addFilesTo = async (
+    kind: "collection" | "series",
+    id: number,
+    name: string,
+  ) => {
+    const picked = await openDialog({
+      multiple: true,
+      filters: [{ name: "Video", extensions: VIDEO_EXTENSIONS }],
+    });
+    const paths =
+      typeof picked === "string"
+        ? [picked]
+        : Array.isArray(picked)
+          ? picked
+          : [];
+    if (paths.length === 0) return;
+    const norm = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+    const wanted = new Set(paths.map(norm));
+    const matching = Array.from(
+      new Set(
+        rows
+          .filter((r) => wanted.has(norm(r.file.path)))
+          .map((r) => r.identity.id),
+      ),
+    );
+    if (matching.length === 0) {
+      showToast(
+        "Pick files that are already indexed (in a watched library folder). To bring in new files first, add the folder via Settings → Library.",
+        "warn",
+        5500,
+      );
+      return;
+    }
+    try {
+      if (kind === "collection") {
+        await libraryIpc.addToCollection(id, matching);
+      } else {
+        await libraryIpc.addToSeries(id, matching);
+      }
+      showToast(
+        `Added ${matching.length} movie${matching.length === 1 ? "" : "s"} to "${name}"`,
+        "info",
+        3000,
+      );
+      onMembershipChanged();
+    } catch (err) {
+      showToast(`Add failed: ${err}`, "error");
+    }
+  };
+  const addFolderTo = async (
+    kind: "collection" | "series",
+    id: number,
+    name: string,
+  ) => {
+    const picked = await openDialog({ directory: true, multiple: false });
+    if (typeof picked !== "string") return;
+    try {
+      // Index the folder first if it isn't already (so its videos
+      // become identities we can wire to the group). add_folder is
+      // idempotent — if it's already a watched folder, just no-ops.
+      try {
+        await libraryIpc.addFolder(picked, true);
+        showToast(
+          `Indexing ${picked} — adding to ${kind} as it scans.`,
+          "info",
+          3500,
+        );
+      } catch {
+        // Already watched.
+      }
+      // Pull a fresh row list so identities under `picked` are visible.
+      const fresh = await libraryIpc.listItems();
+      const norm = picked.replace(/\\/g, "/").toLowerCase();
+      const matching = Array.from(
+        new Set(
+          fresh
+            .filter((r) =>
+              r.file.path
+                .replace(/\\/g, "/")
+                .toLowerCase()
+                .startsWith(norm),
+            )
+            .map((r) => r.identity.id),
+        ),
+      );
+      if (matching.length === 0) {
+        showToast(
+          "No indexed videos found in that folder yet — try again after the scan completes.",
+          "warn",
+          4500,
+        );
+        return;
+      }
+      if (kind === "collection") {
+        await libraryIpc.addToCollection(id, matching);
+      } else {
+        await libraryIpc.addToSeries(id, matching);
+      }
+      showToast(
+        `Added ${matching.length} movie${matching.length === 1 ? "" : "s"} from folder to "${name}"`,
+        "info",
+        3500,
+      );
+      onMembershipChanged();
+    } catch (err) {
+      showToast(`Add folder failed: ${err}`, "error");
+    }
+  };
+
+  // ── Right-click menus ───────────────────────────────────────────
+  // Smart TMDb only works when at least one group member already has a
+  // TMDb id — that's the "donor" the user needs to seed the heuristic.
+  const groupHasDonor = (
+    kind: "collection" | "series",
+    id: number,
+  ): boolean =>
+    rows.some((r) => {
+      if (r.identity.tmdb_id == null) return false;
+      if (kind === "collection") {
+        return r.collections.some((c) => c.collection_id === id);
+      }
+      return r.series?.series_id === id;
+    });
+  const collectionMenu = (c: CollectionRow): MenuItem[] => {
+    const donor = groupHasDonor("collection", c.id);
+    return [
+      {
+        kind: "item",
+        label: "Rename…",
+        onClick: () =>
+          setRenaming({ kind: "collection", id: c.id, current: c.name }),
+      },
+      {
+        kind: "item",
+        label: "Add files…",
+        onClick: () => void addFilesTo("collection", c.id, c.name),
+      },
+      {
+        kind: "item",
+        label: "Add folder & subfolders…",
+        onClick: () => void addFolderTo("collection", c.id, c.name),
+      },
+      { kind: "separator" },
+      {
+        kind: "item",
+        label: "Smart TMDb search…",
+        title: donor
+          ? "Use already-matched members as a hint to find TMDb matches for the rest"
+          : "Match at least one member manually first (Replace metadata from TMDb…) to use Smart Search.",
+        disabled: !donor,
+        onClick: () =>
+          setSmartTmdb({ kind: "collection", id: c.id, name: c.name }),
+      },
+      { kind: "separator" },
+      {
+        kind: "item",
+        label: "Delete collection",
+        onClick: () => void deleteCollection(c),
+      },
+    ];
+  };
+  const seriesMenu = (s: SeriesRow): MenuItem[] => {
+    const donor = groupHasDonor("series", s.id);
+    return [
+      {
+        kind: "item",
+        label: "Rename…",
+        onClick: () =>
+          setRenaming({ kind: "series", id: s.id, current: s.name }),
+      },
+      {
+        kind: "item",
+        label: "Add files…",
+        onClick: () => void addFilesTo("series", s.id, s.name),
+      },
+      {
+        kind: "item",
+        label: "Add folder & subfolders…",
+        onClick: () => void addFolderTo("series", s.id, s.name),
+      },
+      { kind: "separator" },
+      {
+        kind: "item",
+        label: "Smart TMDb search…",
+        title: donor
+          ? "Use already-matched members as a hint to find TMDb matches for the rest"
+          : "Match at least one member manually first (Replace metadata from TMDb…) to use Smart Search.",
+        disabled: !donor,
+        onClick: () =>
+          setSmartTmdb({ kind: "series", id: s.id, name: s.name }),
+      },
+      { kind: "separator" },
+      {
+        kind: "item",
+        label: "Create collection from series",
+        title:
+          "Copies every member of this series into a new collection of the same name. The series itself is unchanged.",
+        onClick: () => void createCollectionFromSeries(s),
+      },
+      { kind: "separator" },
+      {
+        kind: "item",
+        label: "Delete series",
+        onClick: () => void deleteSeries(s),
+      },
+    ];
+  };
+
+  /**
+   * Build a new Collection that mirrors a Series. Per directive:
+   * collections feel like a playlist (movies still display individually
+   * in All Movies), so duplicating a series into a collection lets the
+   * user surface its members in the main library view without losing
+   * the series grouping. The series stays put; this is a copy, not a
+   * conversion.
+   *
+   * Uses the rows prop the parent already loaded (no extra DB call).
+   * Picks a default name with " — collection" suffix when a collection
+   * with the same name already exists, so we never silently merge into
+   * an unrelated collection.
+   */
+  const createCollectionFromSeries = async (s: SeriesRow) => {
+    const memberIds = Array.from(
+      new Set(
+        rows
+          .filter((r) => r.series?.series_id === s.id)
+          .map((r) => r.identity.id),
+      ),
+    );
+    if (memberIds.length === 0) {
+      showToast(
+        `"${s.name}" has no members to copy into a collection.`,
+        "warn",
+        3500,
+      );
+      return;
+    }
+    // Avoid silently merging into an existing collection with the same
+    // name — suffix when there's a clash.
+    const existing = new Set(collections.map((c) => c.name.toLowerCase()));
+    let candidate = s.name;
+    if (existing.has(candidate.toLowerCase())) {
+      candidate = `${s.name} — collection`;
+      let i = 2;
+      while (existing.has(candidate.toLowerCase())) {
+        candidate = `${s.name} — collection ${i}`;
+        i++;
+      }
+    }
+    try {
+      const newId = await libraryIpc.createCollection(candidate);
+      await libraryIpc.addToCollection(newId, memberIds);
+      showToast(
+        `Created collection "${candidate}" with ${memberIds.length} movie${memberIds.length === 1 ? "" : "s"} from "${s.name}".`,
+        "info",
+        3500,
+      );
+      // Refresh the sidebar and the parent's library list so the new
+      // collection appears immediately and any per-row collection
+      // membership chips update.
+      await reload();
+      onMembershipChanged();
+    } catch (err) {
+      showToast(`Couldn't create collection: ${err}`, "error");
+    }
+  };
+
+  // ── Accordion expand/collapse state ──────────────────────────────
+  // Only one of {collections, series} can be expanded at a time, per
+  // directive: "user clicks Collections and it expands; then user clicks
+  // Series — now series expands, and collections un-expands." When the
+  // user clicks "All Movies" we collapse both. Default state: whichever
+  // group contains the active scope is expanded so the sidebar lines up
+  // with what the user is currently viewing.
+  type ExpandedSection = "collections" | "series" | null;
+  const [expanded, setExpanded] = useState<ExpandedSection>(() => {
+    if (activeScope.kind === "collection") return "collections";
+    if (activeScope.kind === "series") return "series";
+    return null;
+  });
+  // Reflect external scope changes (e.g. user clicked a series synth
+  // tile in the main library) by expanding the matching group.
+  useEffect(() => {
+    if (activeScope.kind === "collection" && expanded !== "collections") {
+      setExpanded("collections");
+    } else if (activeScope.kind === "series" && expanded !== "series") {
+      setExpanded("series");
+    } else if (activeScope.kind === "all" && expanded !== null) {
+      setExpanded(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScope.kind, activeScope.id]);
+
+  // ── Render ──────────────────────────────────────────────────────
+  return (
+    <div className="px-3 py-2 border-b border-fvp-border bg-fvp-surface text-xs">
+      {/* ALL MOVIES — top-level header. Bold + caps, slightly larger
+          than the FILTERS & SEARCH heading so the eye lands here first. */}
+      <button
+        onClick={() => onScopeChange({ kind: "all", id: null, name: null })}
+        className={
+          "w-full text-left px-1.5 py-1 rounded text-[13px] font-bold uppercase tracking-wider transition-colors " +
+          (activeScope.kind === "all"
+            ? "bg-fvp-accent/30 text-fvp-text"
+            : "text-fvp-text hover:bg-fvp-surface2/60")
+        }
+      >
+        All Movies
+      </button>
+
+      {/* spacer */}
+      <div className="h-2" />
+
+      {/* Collections — header is itself a button that toggles the
+          expand state. The "+" creator button is split out so clicking
+          it doesn't accidentally collapse the list. */}
+      <AccordionHeader
+        label="Collections"
+        expanded={expanded === "collections"}
+        onToggle={() =>
+          setExpanded(expanded === "collections" ? null : "collections")
+        }
+        onAdd={() => {
+          setExpanded("collections");
+          setDraftName("");
+          setCreating("collection");
+        }}
+        count={collections.length}
+        tooltip="Collections are playlist-style groupings. Movies you add to a collection STILL show individually in All Movies — the collection is just an additional way to browse them."
+      />
+      {expanded === "collections" && (
+        <div className="mb-1">
+          {creating === "collection" && (
+            <InlineCreator
+              placeholder="Collection name…"
+              value={draftName}
+              onChange={setDraftName}
+              onSubmit={() => void createCollection()}
+              onCancel={() => {
+                setCreating(null);
+                setDraftName("");
+              }}
+            />
+          )}
+          {collections.length === 0 && creating !== "collection" && (
+            <div className="text-[10px] text-fvp-muted italic px-1">
+              No collections yet.
+            </div>
+          )}
+          {collections.map((c) => (
+            <ScopeRow
+              key={`coll-${c.id}`}
+              reorderKind="collection"
+              reorderId={c.id}
+              label={c.name}
+              countBadge={c.item_count}
+              active={
+                activeScope.kind === "collection" && activeScope.id === c.id
+              }
+              onClick={() =>
+                onScopeChange({
+                  kind: "collection",
+                  id: c.id,
+                  name: c.name,
+                })
+              }
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  items: collectionMenu(c),
+                });
+              }}
+              onDropIdentities={(ids) => {
+                void libraryIpc
+                  .addToCollection(c.id, ids)
+                  .then(() => {
+                    showToast(
+                      `Added ${ids.length} movie${ids.length === 1 ? "" : "s"} to "${c.name}"`,
+                      "info",
+                      2500,
+                    );
+                    onMembershipChanged();
+                  })
+                  .catch((err) =>
+                    showToast(`Add failed: ${err}`, "error"),
+                  );
+              }}
+              onReorderDrop={(sourceId) => {
+                const ordered = collections.map((x) => x.id);
+                const srcIdx = ordered.indexOf(sourceId);
+                const tgtIdx = ordered.indexOf(c.id);
+                if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
+                ordered.splice(srcIdx, 1);
+                const insertIdx = srcIdx < tgtIdx ? tgtIdx - 1 : tgtIdx;
+                ordered.splice(insertIdx, 0, sourceId);
+                void libraryIpc
+                  .reorderCollections(ordered)
+                  .then(() => void reload())
+                  .catch((err) =>
+                    showToast(`Reorder failed: ${err}`, "error"),
+                  );
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* spacer between Collections + Series groups */}
+      <div className="h-2" />
+
+      <AccordionHeader
+        label="Series"
+        expanded={expanded === "series"}
+        onToggle={() =>
+          setExpanded(expanded === "series" ? null : "series")
+        }
+        onAdd={() => {
+          setExpanded("series");
+          setDraftName("");
+          setCreating("series");
+        }}
+        count={series.length}
+        tooltip="Series act as a single bundled entity. When you add movies to a series, the individual movies STOP showing in All Movies — only the series tile appears. Click into the series to see its episodes."
+      />
+      {expanded === "series" && (
+        <div className="mb-1">
+          {creating === "series" && (
+            <InlineCreator
+              placeholder="Series name…"
+              value={draftName}
+              onChange={setDraftName}
+              onSubmit={() => void createSeries()}
+              onCancel={() => {
+                setCreating(null);
+                setDraftName("");
+              }}
+            />
+          )}
+          {series.length === 0 && creating !== "series" && (
+            <div className="text-[10px] text-fvp-muted italic px-1">
+              No series yet.
+            </div>
+          )}
+          {series.map((s) => (
+            <ScopeRow
+              key={`ser-${s.id}`}
+              reorderKind="series"
+              reorderId={s.id}
+              label={s.name}
+              countBadge={s.item_count}
+              active={
+                activeScope.kind === "series" && activeScope.id === s.id
+              }
+              onClick={() =>
+                onScopeChange({ kind: "series", id: s.id, name: s.name })
+              }
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  items: seriesMenu(s),
+                });
+              }}
+              onDropIdentities={(ids) => {
+                void libraryIpc
+                  .addToSeries(s.id, ids)
+                  .then(() => {
+                    showToast(
+                      `Added ${ids.length} movie${ids.length === 1 ? "" : "s"} to "${s.name}"`,
+                      "info",
+                      2500,
+                    );
+                    onMembershipChanged();
+                  })
+                  .catch((err) =>
+                    showToast(`Add failed: ${err}`, "error"),
+                  );
+              }}
+              onReorderDrop={(sourceId) => {
+                const ordered = series.map((x) => x.id);
+                const srcIdx = ordered.indexOf(sourceId);
+                const tgtIdx = ordered.indexOf(s.id);
+                if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
+                ordered.splice(srcIdx, 1);
+                const insertIdx = srcIdx < tgtIdx ? tgtIdx - 1 : tgtIdx;
+                ordered.splice(insertIdx, 0, sourceId);
+                void libraryIpc
+                  .reorderSeriesList(ordered)
+                  .then(() => void reload())
+                  .catch((err) =>
+                    showToast(`Reorder failed: ${err}`, "error"),
+                  );
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {smartTmdb && (
+        <SmartTmdbReviewModal
+          groupKind={smartTmdb.kind}
+          groupId={smartTmdb.id}
+          groupName={smartTmdb.name}
+          onResolved={() => {
+            setSmartTmdb(null);
+            onMembershipChanged();
+          }}
+        />
+      )}
+
+      {renaming && (
+        <RenameDialog
+          kind={renaming.kind}
+          currentName={renaming.current}
+          onCancel={() => setRenaming(null)}
+          onConfirm={(newName) => {
+            const op =
+              renaming.kind === "collection"
+                ? libraryIpc.renameCollection(renaming.id, newName)
+                : libraryIpc.renameSeries(renaming.id, newName);
+            void op
+              .then(() => {
+                setRenaming(null);
+                void reload();
+                // The active scope's display name needs to follow if
+                // the user just renamed the currently-scoped group.
+                if (
+                  activeScope.kind === renaming.kind &&
+                  activeScope.id === renaming.id
+                ) {
+                  onScopeChange({
+                    kind: activeScope.kind,
+                    id: activeScope.id,
+                    name: newName,
+                  });
+                }
+              })
+              .catch((err) => showToast(`Rename failed: ${err}`, "error"));
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Accordion-style section header. Clicking the label area toggles the
+ * expand state; the "+" button is split so creating a new item doesn't
+ * accidentally collapse the section. Caret rotates 90° when expanded.
+ * Count badge surfaces how many items live under the header so the
+ * user knows whether expanding is worthwhile.
+ */
+function AccordionHeader({
+  label,
+  expanded,
+  count,
+  onToggle,
+  onAdd,
+  tooltip,
+}: {
+  label: string;
+  expanded: boolean;
+  count: number;
+  onToggle: () => void;
+  onAdd: () => void;
+  /** Hover tooltip explaining how this grouping behaves vs the other —
+   *  series collapse to one tile in All Movies, collections don't. */
+  tooltip?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between mt-1 mb-1">
+      <button
+        onClick={onToggle}
+        title={tooltip}
+        className="flex items-center gap-1.5 flex-1 text-left px-1 py-0.5 rounded hover:bg-fvp-surface2/40 group"
+      >
+        <span
+          className={
+            "text-[10px] text-fvp-muted transition-transform " +
+            (expanded ? "rotate-90" : "")
+          }
+        >
+          ▶
+        </span>
+        <span className="text-[11px] uppercase tracking-wider text-fvp-text font-bold">
+          {label}
+        </span>
+        {count > 0 && (
+          <span className="text-[9px] text-fvp-muted">({count})</span>
+        )}
+      </button>
+      <button
+        onClick={onAdd}
+        className="text-fvp-muted hover:text-fvp-accent text-[14px] leading-none px-1"
+        title={`New ${label.toLowerCase().replace(/s$/, "")}`}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+function ScopeRow({
+  label,
+  countBadge,
+  active,
+  onClick,
+  onContextMenu,
+  onDropIdentities,
+  reorderKind,
+  reorderId,
+  onReorderDrop,
+}: {
+  label: string;
+  countBadge?: number;
+  active: boolean;
+  onClick: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
+  /** When provided, the row becomes a drop target for FVP identity drags
+   *  (rows from the main library view). Drop fires with the dragged
+   *  identity ids; the parent decides whether to call addToCollection
+   *  or addToSeries. */
+  onDropIdentities?: (ids: number[]) => void;
+  /** When provided alongside reorderId, the row is itself draggable and
+   *  also accepts drops of same-kind sidebar reorder payloads — that's
+   *  how the user shuffles the order of collections / series in the
+   *  sidebar. Different-kind drops are rejected so users can't accidentally
+   *  intermix the two lists. */
+  reorderKind?: "collection" | "series";
+  reorderId?: number;
+  onReorderDrop?: (sourceId: number) => void;
+}) {
+  const [hovering, setHovering] = useState(false);
+  const [reorderHover, setReorderHover] = useState(false);
+  const canReorder = reorderKind != null && reorderId != null && onReorderDrop != null;
+  return (
+    <button
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      draggable={canReorder}
+      onDragStart={
+        canReorder
+          ? (e) => {
+              setSidebarReorderData(e.dataTransfer, {
+                kind: reorderKind!,
+                id: reorderId!,
+              });
+            }
+          : undefined
+      }
+      onDragOver={
+        onDropIdentities || canReorder
+          ? (e) => {
+              // Only accept the drop if the drag carries our payload
+              // type. dataTransfer.types is the only thing readable
+              // during dragover (the data itself is locked).
+              const types = Array.from(e.dataTransfer.types);
+              if (
+                onDropIdentities &&
+                types.includes("application/x-fvp-identities")
+              ) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                setHovering(true);
+              } else if (
+                canReorder &&
+                types.includes("application/x-fvp-sidebar-reorder")
+              ) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setReorderHover(true);
+              }
+            }
+          : undefined
+      }
+      onDragLeave={
+        onDropIdentities || canReorder
+          ? () => {
+              setHovering(false);
+              setReorderHover(false);
+            }
+          : undefined
+      }
+      onDrop={
+        onDropIdentities || canReorder
+          ? (e) => {
+              setHovering(false);
+              setReorderHover(false);
+              const reorderPayload = getSidebarReorderData(e.dataTransfer);
+              if (
+                canReorder &&
+                reorderPayload &&
+                reorderPayload.kind === reorderKind &&
+                reorderPayload.id !== reorderId
+              ) {
+                e.preventDefault();
+                onReorderDrop!(reorderPayload.id);
+                return;
+              }
+              const ids = onDropIdentities
+                ? getIdentityDragData(e.dataTransfer)
+                : null;
+              if (onDropIdentities && ids && ids.length > 0) {
+                e.preventDefault();
+                onDropIdentities(ids);
+              }
+            }
+          : undefined
+      }
+      className={
+        "flex items-center w-full px-1.5 py-0.5 rounded text-[11px] text-left transition-colors " +
+        (active
+          ? "bg-fvp-accent/30 text-fvp-text"
+          : hovering
+            ? "bg-fvp-accent/40 text-fvp-text ring-1 ring-fvp-accent"
+            : reorderHover
+              ? "bg-fvp-surface2 text-fvp-text border-t-2 border-fvp-accent"
+              : "text-fvp-text hover:bg-fvp-surface2/60")
+      }
+    >
+      <span className="flex-1 truncate">{label}</span>
+      {countBadge !== undefined && (
+        <span className="text-[9px] text-fvp-muted ml-1">{countBadge}</span>
+      )}
+    </button>
+  );
+}
+
+function InlineCreator({
+  placeholder,
+  value,
+  onChange,
+  onSubmit,
+  onCancel,
+}: {
+  placeholder: string;
+  value: string;
+  onChange: (s: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <input
+      autoFocus
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onSubmit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+      onBlur={() => {
+        if (value.trim()) onSubmit();
+        else onCancel();
+      }}
+      placeholder={placeholder}
+      className="w-full bg-fvp-bg border border-fvp-accent rounded px-1.5 py-0.5 text-[11px] outline-none mb-1"
+    />
+  );
+}
+
+/**
+ * Themed rename dialog. Replaces the old window.prompt that the user
+ * called out as "ugly tauri.localhost says…". Pre-filled with the
+ * current name; Enter saves, Escape cancels.
+ */
+function RenameDialog({
+  kind,
+  currentName,
+  onCancel,
+  onConfirm,
+}: {
+  kind: "collection" | "series";
+  currentName: string;
+  onCancel: () => void;
+  onConfirm: (newName: string) => void;
+}) {
+  const inc = useAppStore((s) => s.incrementOpenModalCount);
+  const dec = useAppStore((s) => s.decrementOpenModalCount);
+  const [name, setName] = useState(currentName);
+
+  useEffect(() => {
+    inc();
+    return () => dec();
+  }, [inc, dec]);
+
+  const submit = () => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === currentName) {
+      onCancel();
+      return;
+    }
+    onConfirm(trimmed);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 z-[65] flex items-center justify-center"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl p-4 min-w-[340px]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-sm font-semibold text-fvp-text mb-2">
+          Rename {kind}
+        </div>
+        <div className="text-[11px] text-fvp-muted mb-2">
+          Currently:{" "}
+          <span className="text-fvp-text font-mono">{currentName}</span>
+        </div>
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onCancel();
+            }
+          }}
+          className="w-full bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded px-2 py-1.5 text-sm text-fvp-text outline-none"
+        />
+        <div className="flex justify-end gap-2 mt-3 text-xs">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1 text-fvp-text hover:bg-fvp-surface2 rounded"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={!name.trim() || name.trim() === currentName}
+            className="px-3 py-1 bg-fvp-accent text-white rounded hover:opacity-90 disabled:opacity-50"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

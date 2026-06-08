@@ -41,7 +41,10 @@ export function ProfileChip() {
 
   const styleByVariant = {
     off: "bg-fvp-err/80 text-white border-fvp-err",
-    none: "bg-fvp-surface/85 text-fvp-text border-fvp-muted/60 hover:bg-fvp-surface2 hover:border-fvp-muted",
+    // "none" was neutral surface; promoted to red so the user can't miss
+    // "this video has no profile / nothing active." Matches the safety
+    // banner's color language.
+    none: "bg-fvp-err/80 text-white border-fvp-err hover:bg-fvp-err",
     active: "bg-fvp-surface/85 text-fvp-text border-fvp-muted/60 hover:bg-fvp-accent hover:border-fvp-accent hover:text-white",
   } as const;
 

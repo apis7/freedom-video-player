@@ -3,6 +3,7 @@ import { useAppStore } from "../state/appStore";
 import { HOTKEYS, keyFor } from "../state/hotkeys";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { MAX_AUTHOR_HANDLE_LEN } from "../ipc/types";
+import { LibrarySettingsPanel } from "../components/library/LibrarySettingsPanel";
 
 /**
  * Settings — first pass. Holds the toggles that have state hooks today.
@@ -10,12 +11,14 @@ import { MAX_AUTHOR_HANDLE_LEN } from "../ipc/types";
  * (hotkey customization, theme, default snip durations, padding, etc.).
  */
 export function SettingsMode() {
-  const libraryEnabled = useAppStore((s) => s.libraryEnabled);
-  const setLibraryEnabled = useAppStore((s) => s.setLibraryEnabled);
   const autosaveDraft = useAppStore((s) => s.autosaveDraft);
   const setAutosaveDraft = useAppStore((s) => s.setAutosaveDraft);
   const jumpOn = useAppStore((s) => s.jumpPlayheadOnSnipSelect);
   const toggleJump = useAppStore((s) => s.toggleJumpPlayheadOnSnipSelect);
+  const playerShowProfileIcon = useAppStore((s) => s.playerShowProfileIcon);
+  const setPlayerShowProfileIcon = useAppStore((s) => s.setPlayerShowProfileIcon);
+  const playerShowPathOnStart = useAppStore((s) => s.playerShowPathOnStart);
+  const setPlayerShowPathOnStart = useAppStore((s) => s.setPlayerShowPathOnStart);
 
   return (
     <div className="h-full bg-fvp-bg p-6 text-fvp-text text-sm overflow-auto">
@@ -24,6 +27,21 @@ export function SettingsMode() {
         Hotkey customization, default snip padding, themes, and the full
         Settings surface arrive in a later milestone.
       </p>
+
+      <Section title="Player Mode">
+        <Toggle
+          checked={playerShowProfileIcon}
+          onChange={setPlayerShowProfileIcon}
+          label="Show profile-active icon on video"
+          help="When a .free profile is currently filtering playback, a small FVP badge shows in the corner of the video so you know edits are being applied."
+        />
+        <Toggle
+          checked={playerShowPathOnStart}
+          onChange={setPlayerShowPathOnStart}
+          label="Show movie file path briefly on play"
+          help="When you start a movie from the very beginning, the file path appears at the bottom for ~5 seconds then fades out. Only fires for fresh starts (resumes don't trigger it)."
+        />
+      </Section>
 
       <Section title="Profile Creator">
         <Toggle
@@ -52,12 +70,7 @@ export function SettingsMode() {
       </Section>
 
       <Section title="Library">
-        <Toggle
-          checked={libraryEnabled}
-          onChange={setLibraryEnabled}
-          label="Enable Library mode"
-          help="Adds a Library tab and folder-watching for batch profile management. Chapter 3 of the build — feature surface is minimal today."
-        />
+        <LibrarySettingsPanel />
       </Section>
 
       <Section title="AutoSnip — subtitle language">

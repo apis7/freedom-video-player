@@ -7,6 +7,13 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  /* MUST stay transparent — the libmpv playback surface is a native
+     child window (HWND) positioned underneath WebView2's render layer.
+     Any opaque background here will cover the video. The brief white
+     flash on file load is fought a different way (see the video-area
+     container's explicit dark bg in Player/Creator mode markup, which
+     libmpv's HWND naturally covers once it produces a frame).
+   */
   background: transparent;
   color: #e6e8ee;
   overflow: hidden;
@@ -41,4 +48,64 @@ body {
 }
 .animate-\[slide_1\.4s_ease-in-out_infinite\] {
   animation: slide 1.4s ease-in-out infinite;
+}
+
+/* Red–white–blue conic-gradient loading ring. Used by LoadingOverlay
+   while a file is being opened (covers the libmpv HWND so the white-
+   flash gap doesn't show). Mask carves out the center for the ring
+   look; the whole thing spins. */
+.fvp-spinner-rwb {
+  width: 64px;
+  height: 64px;
+  border-radius: 9999px;
+  /* Three equal-width solid color zones (~25% each: red / white / blue)
+     with short ~8% fades between adjacent colors. The red zone wraps the
+     0/100 % boundary (its two halves — 0-14 % and 88-100 % — are visually
+     one continuous arc) so each color reads as a distinct band rather
+     than a continuous rainbow. */
+  background: conic-gradient(
+    from 0deg,
+    #b22234 0%,
+    #b22234 14%,
+    #ffffff 22%,
+    #ffffff 47%,
+    #3c3b6e 55%,
+    #3c3b6e 80%,
+    #b22234 88%,
+    #b22234 100%
+  );
+  -webkit-mask: radial-gradient(circle, transparent 56%, black 57%);
+          mask: radial-gradient(circle, transparent 56%, black 57%);
+  animation: fvp-spin 1.4s linear infinite;
+}
+
+@keyframes fvp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Quick "wrong PIN" shake on the PIN prompt modal. Tiny horizontal
+   wobble — visible without being jarring. */
+@keyframes wiggle {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+/* Movie Roulette confetti — each piece interpolates from the center to
+   (--cx, --cy) while rotating (--cr) and fading out. JS sets the three
+   per-piece custom properties; this keyframe stays generic. */
+@keyframes confetti-burst {
+  0% {
+    transform: translate(-50%, -50%) translate(0, 0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) translate(var(--cx), calc(var(--cy) + 400px))
+      rotate(var(--cr));
+    opacity: 0;
+  }
 }

@@ -22,11 +22,19 @@
         "decorations": false,
         "transparent": true,
         "shadow": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPLOCALDATA/poster-cache/**",
+          "$LOCALDATA/com.fvp.desktop/poster-cache/**"
+        ]
+      }
     }
   },
   "bundle": {

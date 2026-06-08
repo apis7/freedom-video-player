@@ -67,6 +67,26 @@ export function AboutModal({ onClose }: AboutModalProps) {
           Freedom Video Player. Helping you hit the &quot;skip&quot; button.
         </p>
 
+        <div className="mt-4 pt-3 border-t border-fvp-border text-[11px] text-fvp-muted leading-relaxed mb-3">
+          <div className="text-fvp-text font-semibold mb-1">OUR PHILOSOPHY</div>
+          <p className="mb-2">
+            This software is meant to assist parents or individuals who want
+            to enjoy movies again. It is not meant to be a lockdown, as if
+            one could (haha!) lock smart teenagers out of all bad things.
+            There&apos;s no wall in the world high enough to keep smart
+            determined children out of trouble; and FVP is no exception.
+            However, good tools can help, if there&apos;s a solid foundation
+            and relationship. As such, FVP is meant to be a tool that helps
+            equip for enjoyment and education, not a surveillance or
+            lockout tool.
+          </p>
+          <p className="italic">
+            Proverbs 22:6: &quot;Train up a child in the way he should go;
+            even when he is old, he will not depart from it.&quot; Enjoy
+            the show.
+          </p>
+        </div>
+
         <div className="mt-4 pt-3 border-t border-fvp-border text-[11px] text-fvp-muted leading-relaxed">
           <div className="text-fvp-text font-semibold mb-1">
             MAPS — Media Audience Prudence Standard

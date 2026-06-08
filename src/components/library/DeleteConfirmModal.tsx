@@ -60,6 +60,17 @@ export function DeleteConfirmModal({
 
   const fileIds = rows.map((r) => r.file.id);
 
+  // Files on UNC / network shares can't be sent to the Recycle Bin —
+  // Windows requires a per-volume $RECYCLE.BIN that doesn't exist on
+  // SMB. For those, the "recycle" choice falls back to permanent
+  // deletion; warn the user up-front so they know "recycle bin" isn't
+  // an undo path here.
+  const networkRows = rows.filter(
+    (r) => r.file.path.startsWith("\\\\") || r.file.path.startsWith("//"),
+  );
+  const hasNetworkFiles = networkRows.length > 0;
+  const allNetworkFiles = networkRows.length === rows.length;
+
   const confirm = async () => {
     if (busy) return;
     setBusy(true);
@@ -155,13 +166,22 @@ export function DeleteConfirmModal({
             />
             <div className="flex-1">
               <div className="text-fvp-err text-xs font-semibold">
-                Delete permanently (send to Recycle Bin)
+                {allNetworkFiles
+                  ? "Delete permanently from network share (no recycle bin)"
+                  : "Delete permanently (send to Recycle Bin)"}
               </div>
               <div className="text-[11px] text-fvp-muted">
-                Moves the video file to the OS Recycle Bin and drops
-                the library record. Recoverable from Recycle Bin until
-                you empty it.
+                {allNetworkFiles
+                  ? "Network shares (SMB) don't have a Recycle Bin — the file will be permanently deleted from the server with no undo. Make sure you've got a backup if you need one."
+                  : "Moves the video file to the OS Recycle Bin and drops the library record. Recoverable from Recycle Bin until you empty it."}
               </div>
+              {hasNetworkFiles && !allNetworkFiles && (
+                <div className="text-[10px] text-fvp-warn mt-1">
+                  ⚠ {networkRows.length} of {rows.length} are on a network
+                  share and will be permanently deleted with no recycle-bin
+                  fallback.
+                </div>
+              )}
             </div>
           </label>
         </div>
@@ -197,7 +217,9 @@ export function DeleteConfirmModal({
               {busy
                 ? "Working…"
                 : choice === "recycle"
-                  ? "Send to Recycle Bin"
+                  ? allNetworkFiles
+                    ? "Delete permanently"
+                    : "Send to Recycle Bin"
                   : "Remove from library"}
             </button>
           </div>

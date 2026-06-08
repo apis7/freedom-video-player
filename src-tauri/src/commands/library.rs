@@ -1240,6 +1240,14 @@ pub fn library_remove_files(
 /// confirmed, undoable, never the default. `trash` crate handles the
 /// per-OS specifics (SHFileOperation on Windows, NSWorkspace on Mac,
 /// XDG trash spec on Linux).
+/// True for UNC paths like `\\server\share\file.mp4` or
+/// `\\?\UNC\server\share\file.mp4` (extended-length UNC form). These
+/// can't be sent to the Recycle Bin on Windows — the shell APIs
+/// require a per-volume `$RECYCLE.BIN` which doesn't exist on SMB.
+fn is_unc_or_network_path(path: &str) -> bool {
+    path.starts_with("\\\\") || path.starts_with("//")
+}
+
 #[tauri::command]
 pub fn library_trash_files(
     db: State<'_, LibraryDb>,
@@ -1272,13 +1280,10 @@ pub fn library_trash_files(
     };
     let mut to_remove: Vec<i64> = Vec::new();
     for (id, path) in &paths {
-        // If the file is already gone from disk, treat the trash op as
-        // a success — the user's intent ("get rid of this") is satisfied
-        // and the library row is now meaningless. Skips the noisy "file
-        // not found" error that previously bubbled up to the UI. We
-        // check via fs::metadata BEFORE handing off to trash::delete
-        // because the trash crate's error mapping for "missing" varies
-        // by OS / shell version and isn't programmatically reliable.
+        // Already absent on disk → user's intent ("get rid of this") is
+        // satisfied; just drop the library row. Pre-check is necessary
+        // because the trash crate's error mapping for "missing" is
+        // inconsistent across OS / shell versions.
         if !std::path::Path::new(path).exists() {
             crate::log!(
                 "library",
@@ -1288,6 +1293,44 @@ pub fn library_trash_files(
             to_remove.push(*id);
             continue;
         }
+        // UNC / network-share paths can't be sent to the Recycle Bin
+        // at all on Windows. The OS shell returns "Class not registered"
+        // (0x80070002) because the per-volume `$RECYCLE.BIN` infra
+        // doesn't exist on remote SMB. Only option here is a permanent
+        // delete via std::fs. The user already confirmed they want the
+        // file gone; the alternative (refuse and leave it alone) is
+        // worse than the loss of an undo. Log clearly so the difference
+        // is auditable.
+        if is_unc_or_network_path(path) {
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    crate::log!(
+                        "library",
+                        "trash_files: {path} permanently deleted (UNC path — no recycle bin on remote shares)"
+                    );
+                    summary.trashed += 1;
+                    to_remove.push(*id);
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        // Race: vanished between exists() and remove.
+                        crate::log!(
+                            "library",
+                            "trash_files: {path} vanished during permanent delete — silently removing row"
+                        );
+                        summary.trashed += 1;
+                        to_remove.push(*id);
+                    } else {
+                        crate::log!(
+                            "library",
+                            "trash_files: FAILED permanent delete {path}: {e}"
+                        );
+                        summary.failed.push(format!("{path}: {e}"));
+                    }
+                }
+            }
+            continue;
+        }
         match trash::delete(path) {
             Ok(()) => {
                 summary.trashed += 1;
@@ -1295,8 +1338,6 @@ pub fn library_trash_files(
                 crate::log!("library", "trash_files: trashed {path}");
             }
             Err(e) => {
-                // Race window: file vanished between our exists() check
-                // and the trash call. Still treat as success.
                 if !std::path::Path::new(path).exists() {
                     crate::log!(
                         "library",

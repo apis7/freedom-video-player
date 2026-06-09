@@ -250,25 +250,14 @@ export function LibraryMode() {
   // Recompute probable pairs only when a scan actually completes — not
   // on every list refresh. Previously this fired every time the user
   // toggled a flag (each refresh cost 700ms for ~1200 identities).
-  // Initial run on mount happens via the scan-done listener too: the
-  // orchestrator emits scan-done as part of the startup ScanAll.
-  useEffect(() => {
-    const unlisteners: UnlistenFn[] = [];
-    let cancelled = false;
-    listen("library:scan-done", () => {
-      void refreshProbablePairs();
-    }).then((un) => {
-      if (cancelled) un();
-      else unlisteners.push(un);
-    });
-    // Also run once on mount so an already-finished startup scan still
-    // surfaces probable pairs without waiting for a manual rescan.
-    void refreshProbablePairs();
-    return () => {
-      cancelled = true;
-      for (const un of unlisteners) un();
-    };
-  }, [refreshProbablePairs]);
+  // refreshProbablePairs is NO LONGER auto-run on scan-done or on
+  // mount. Earlier versions auto-ran it every time the library
+  // refreshed, producing 21k+ "probable" pairs from a 1200-item
+  // library (the matcher was too permissive and the volume drowned
+  // out real matches). The matcher itself has been tightened, but
+  // even with tight matching there's no reason to spend 4 seconds
+  // scoring identities on every list refresh — users open
+  // Tools → "Look for upgrades" when they want to review pairs.
 
   const familyViewOn = librarySettings?.family_view_enabled ?? false;
   const familyViewAllowed = librarySettings?.family_view_allowed ?? false;
@@ -1456,29 +1445,10 @@ export function LibraryMode() {
         >
           🎬 Roulette
         </button>
-        {probablePairs.length > 0 ? (
-          <button
-            onClick={() => {
-              actlog(
-                "header",
-                `open reconciliation badge (${probablePairs.length} pair${probablePairs.length === 1 ? "" : "s"})`,
-              );
-              setActivePairIdx(0);
-            }}
-            className="px-2 py-1 bg-fvp-warn/20 text-fvp-warn border border-fvp-warn rounded cursor-pointer hover:bg-fvp-warn/30 flex items-center gap-1"
-            title={`${probablePairs.length} pair${probablePairs.length === 1 ? "" : "s"} need review — likely duplicates or upgrades of existing titles`}
-          >
-            <WarningTriangle className="w-3.5 h-3.5 fill-fvp-warn" />
-            <span className="text-[11px]">{probablePairs.length}</span>
-          </button>
-        ) : (
-          <span
-            className="px-2 py-1 border border-fvp-border rounded text-fvp-muted cursor-default flex items-center gap-1"
-            title="No pairs need review."
-          >
-            <span className="text-fvp-muted/70 text-[11px]">✓</span>
-          </span>
-        )}
+        {/* The "review pairs" alert badge was removed — duplicated
+            the Tools → "Look for upgrades" surface. Run that menu
+            item explicitly when you want to review possible-same-
+            movie pairs. */}
         <LibraryToolsMenu
           onRunDuplicates={() => {
             actlog("tools", "run duplicates scan");

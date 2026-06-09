@@ -101,52 +101,104 @@ pub fn score_match(
         return MatchVerdict { band: MatchBand::Unrelated, signals };
     }
 
-    let mut strong_signals = 0u32;
+    // TMDb-id agreement is a CERTAIN-level signal on its own — two
+    // identities pointing at the same TMDb row are the same movie even
+    // if the filenames disagree wildly. We surface it as Probable so
+    // the user gets the chance to review (it's still distinct content
+    // by fingerprint, just same logical movie).
+    if let (Some(a), Some(b)) = (extra.new_tmdb_id, extra.existing_tmdb_id) {
+        if a == b {
+            signals.push(format!("embedded TMDb id matches (id={a})"));
+            return MatchVerdict {
+                band: MatchBand::Probable,
+                signals,
+            };
+        }
+    }
 
-    // Signal 1 — duration within ±3 % (strong but dangerous).
+    // HARD requirement #1: titles must fuzzy-match. Without this
+    // EVERY other signal is meaningless — two random ~120-min movies
+    // with different encodings would otherwise score 2 signals
+    // (duration + resolution/codec) and surface as Probable, drowning
+    // the user in noise (21k pairs from a 1200-item library).
+    let existing_title_str = existing_parsed_title.unwrap_or("");
+    if !titles_match(&new_parsed.title, existing_title_str) {
+        signals.push("titles don't fuzzy-match — skipped".into());
+        return MatchVerdict {
+            band: MatchBand::Unrelated,
+            signals,
+        };
+    }
+    signals.push(format!(
+        "titles fuzzy-match (\"{}\" ↔ \"{}\")",
+        new_parsed.title, existing_title_str
+    ));
+
+    // Trailer / short-clip rejection: when title fuzzy-matches BUT
+    // both durations are known and they differ by more than 50 %,
+    // this is almost always a trailer paired with the feature (or a
+    // 5-minute YouTube rip paired with the 2-hour movie). Drop.
+    if existing_duration_ms > 0 && new_duration_ms > 0 {
+        let d = (new_duration_ms as i64 - existing_duration_ms as i64).abs() as f64;
+        let avg = (new_duration_ms + existing_duration_ms) as f64 / 2.0;
+        let pct = d / avg * 100.0;
+        if pct > 50.0 {
+            signals.push(format!(
+                "duration differs {pct:.0}% — likely trailer / clip, not the same feature"
+            ));
+            return MatchVerdict {
+                band: MatchBand::Unrelated,
+                signals,
+            };
+        }
+    }
+
+    // HARD requirement #2: year OR duration must agree. Title alone
+    // catches things like "The Stand 1994" vs "The Stand 2020" — same
+    // name, different work. Requiring year-within-1 OR duration-within-3%
+    // filters those out. Temporal correlation is a third acceptable
+    // tie-breaker for the "I moved a file" case.
+    let mut second_signal_ok = false;
+
+    if let (Some(existing_year), Some(new_year)) =
+        (existing_parsed_year, new_parsed.year)
+    {
+        if (existing_year - new_year).abs() <= 1 {
+            signals.push(format!(
+                "year matches (±1: {} ↔ {})",
+                existing_year, new_year
+            ));
+            second_signal_ok = true;
+        } else {
+            signals.push(format!(
+                "year mismatch ({} vs {}) — different movies",
+                existing_year, new_year
+            ));
+            return MatchVerdict {
+                band: MatchBand::Unrelated,
+                signals,
+            };
+        }
+    }
+
     if existing_duration_ms > 0 && new_duration_ms > 0 {
         let d = (new_duration_ms as i64 - existing_duration_ms as i64).abs() as f64;
         let avg = (new_duration_ms + existing_duration_ms) as f64 / 2.0;
         let pct = d / avg * 100.0;
         if pct <= 3.0 {
             signals.push(format!("duration matches within {pct:.1}%"));
-            strong_signals += 1;
+            second_signal_ok = true;
         }
     }
 
-    // Signal 2 — parsed title + year match (strong).
-    if let (Some(existing_title), Some(existing_year), Some(new_year)) =
-        (existing_parsed_title, existing_parsed_year, new_parsed.year)
-    {
-        if existing_year == new_year && titles_match(existing_title, &new_parsed.title) {
-            signals.push(format!(
-                "parsed title+year match (\"{}\" / {existing_year})",
-                existing_title
-            ));
-            strong_signals += 1;
-        }
-    }
-
-    // Signal 3 — embedded metadata title/year via TMDB-id (medium).
-    // Two distinct identities pointing at the same TMDB row are almost
-    // certainly the same movie; this is a high-quality signal even when
-    // the filename and duration disagree.
-    if let (Some(a), Some(b)) = (extra.new_tmdb_id, extra.existing_tmdb_id) {
-        if a == b {
-            signals.push(format!("embedded TMDb id matches (id={a})"));
-            strong_signals += 1;
-        }
-    }
-
-    // Signal 4 — temporal correlation (medium). Caller passes true when
-    // a previously-indexed file in the same folder vanished recently
-    // and this candidate appeared during that window.
     if extra.temporal_correlation {
         signals.push("temporal correlation (known file vanished, this appeared)".into());
-        strong_signals += 1;
+        second_signal_ok = true;
     }
 
-    // Signal 5 — resolution / codec differ from the match (medium).
+    // Resolution/codec differing is a tertiary signal — useful as
+    // context for the "this is an upgrade" framing but NOT enough to
+    // accept the pair on its own.
     let res_differs = matches!(
         (new_resolution, existing_resolution),
         (Some(a), Some(b)) if a != b
@@ -157,10 +209,17 @@ pub fn score_match(
     );
     if res_differs || codec_differs {
         signals.push("resolution/codec differs (upgrade signature)".into());
-        strong_signals += 1;
     }
 
-    let band = if strong_signals >= 2 {
+    // Allow title-only when BOTH year and duration are unknown — for
+    // unmatched / old files the user explicitly wants the matcher to
+    // surface anything name-similar.
+    let both_year_and_dur_unknown = existing_parsed_year.is_none()
+        && new_parsed.year.is_none()
+        && existing_duration_ms == 0
+        && new_duration_ms == 0;
+
+    let band = if second_signal_ok || both_year_and_dur_unknown {
         MatchBand::Probable
     } else {
         MatchBand::Unrelated
@@ -195,17 +254,83 @@ fn has_3d_marker(title: &str) -> bool {
     false
 }
 
+/// Token set for fuzzy title comparison. Strips punctuation, year
+/// tokens (4-digit 1900-2099), variant markers (3D / Extended /
+/// Director's Cut / etc.), and stop words ("the", "a", "an") so
+/// "Mary Poppins (1964)" and "1964 - Mary Poppins - Disney" yield
+/// overlapping token sets. Used by `titles_match`.
+fn title_tokens(s: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &["the", "a", "an", "of", "and"];
+    const VARIANT_WORDS: &[&str] = &[
+        "3d",
+        "extended",
+        "edition",
+        "director",
+        "directors",
+        "cut",
+        "final",
+        "theatrical",
+        "unrated",
+        "uncut",
+        "special",
+        "remastered",
+        "hd",
+        "bluray",
+        "brrip",
+        "dvdrip",
+        "webrip",
+        "x264",
+        "x265",
+        "h264",
+        "h265",
+        "1080p",
+        "720p",
+        "480p",
+        "2160p",
+        "4k",
+    ];
+    let cleaned: String = s
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    cleaned
+        .split_whitespace()
+        .filter(|tok| {
+            // Drop years.
+            if tok.len() == 4 && tok.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(y) = tok.parse::<u32>() {
+                    if (1900..=2099).contains(&y) {
+                        return false;
+                    }
+                }
+            }
+            !STOP_WORDS.contains(tok) && !VARIANT_WORDS.contains(tok)
+        })
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// True when two titles plausibly refer to the same movie. Uses
+/// token-containment: the SHORTER title's significant tokens must
+/// ALL appear in the longer title. Allows "Mary Poppins" ↔ "Mary
+/// Poppins Disney" (subset match) but rejects "Terminator" ↔
+/// "Sherlock Holmes" (zero overlap). Empty token sets (rare —
+/// titles that are entirely stop-words / years / variant markers)
+/// never match anything to avoid mass-pairing junk identities.
 fn titles_match(a: &str, b: &str) -> bool {
-    fn norm(s: &str) -> String {
-        s.chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect::<String>()
-            .to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+    let ta = title_tokens(a);
+    let tb = title_tokens(b);
+    if ta.is_empty() || tb.is_empty() {
+        return false;
     }
-    norm(a) == norm(b)
+    let (shorter, longer) = if ta.len() <= tb.len() {
+        (&ta, &tb)
+    } else {
+        (&tb, &ta)
+    };
+    let long_set: std::collections::HashSet<&String> = longer.iter().collect();
+    shorter.iter().all(|t| long_set.contains(t))
 }
 
 /// Cut-detection threshold per librrary_directive.md §5: when runtime
@@ -321,24 +446,12 @@ mod tests {
     }
 
     #[test]
-    fn tmdb_id_plus_temporal_is_probable() {
-        // No duration / title / resolution signals — purely the two
-        // new "medium" signals. Sum to 2, which crosses the threshold.
-        let v = score_match(
-            "xyz", &parsed("Random Filename", None), 1_000_000, None, None,
-            "abc", None, None, 9_000_000, None, None,
-            ExtraSignals {
-                new_tmdb_id: Some(12345),
-                existing_tmdb_id: Some(12345),
-                temporal_correlation: true,
-            },
-        );
-        assert_eq!(v.band, MatchBand::Probable);
-    }
-
-    #[test]
-    fn tmdb_id_alone_is_unrelated() {
-        // Just TMDb match without anything else is one signal → UNRELATED.
+    fn tmdb_id_match_is_probable_on_its_own() {
+        // Two identities pointing at the same TMDb row → same logical
+        // movie. Surface as Probable even when filenames / titles /
+        // durations disagree (user might have linked one identity to
+        // the wrong TMDb row; the dialog gives them the chance to
+        // reject). Hard-rule above the title check.
         let v = score_match(
             "xyz", &parsed("Random Filename", None), 1_000_000, None, None,
             "abc", None, None, 9_000_000, None, None,
@@ -346,8 +459,36 @@ mod tests {
                 new_tmdb_id: Some(12345),
                 existing_tmdb_id: Some(12345),
                 temporal_correlation: false,
+                new_filename: None,
+                existing_filename: None,
             },
         );
+        assert_eq!(v.band, MatchBand::Probable);
+    }
+
+    #[test]
+    fn trailer_vs_feature_is_unrelated() {
+        // Title fuzzy-matches AND year matches, but durations differ
+        // 89% → almost certainly a trailer / clip. The duration-sanity
+        // check kicks in and overrides the title+year agreement.
+        let v = score_match(
+            "xyz", &parsed("Moana", Some(2016)), 1_000_000, None, None,
+            "abc", Some("Moana"), Some(2016), 9_000_000, None, None,
+            ExtraSignals::default(),
+        );
         assert_eq!(v.band, MatchBand::Unrelated);
+    }
+
+    #[test]
+    fn title_year_match_at_similar_runtime_is_probable() {
+        // "Mary Poppins (1964)" vs "Mary Poppins 1964" — different
+        // fingerprints (different encodes), same logical movie. Both
+        // ~140 min. Should be Probable.
+        let v = score_match(
+            "xyz", &parsed("Mary Poppins", Some(1964)), 8_400_000, None, None,
+            "abc", Some("Mary Poppins"), Some(1964), 8_400_000, None, None,
+            ExtraSignals::default(),
+        );
+        assert_eq!(v.band, MatchBand::Probable);
     }
 }

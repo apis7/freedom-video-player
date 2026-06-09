@@ -956,7 +956,9 @@ function ScopeRow({
               : "text-fvp-text hover:bg-fvp-surface2/60")
       }
     >
-      <span className="flex-1 truncate">{label}</span>
+      <span className="flex-1 truncate" title={label}>
+        {label}
+      </span>
       {countBadge !== undefined && (
         <span className="text-[9px] text-fvp-muted ml-1">{countBadge}</span>
       )}

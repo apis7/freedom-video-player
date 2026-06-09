@@ -33,6 +33,7 @@ import { MovieRouletteModal } from "../components/library/MovieRouletteModal";
 import { PinPromptModal } from "../components/library/PinPromptModal";
 import { ReconciliationDialog } from "../components/library/ReconciliationDialog";
 import { DuplicateCatcherModal } from "../components/library/DuplicateCatcherModal";
+import { PossibleDuplicatesModal } from "../components/library/PossibleDuplicatesModal";
 import { AnalyticsDashboard } from "../components/library/AnalyticsDashboard";
 import { AutoDetectSeriesModal } from "../components/library/AutoDetectSeriesModal";
 import { BrokenFileModal } from "../components/library/BrokenFileModal";
@@ -47,6 +48,7 @@ import { AddToGroupModal } from "../components/library/AddToGroupModal";
 import { DeleteConfirmModal } from "../components/library/DeleteConfirmModal";
 import type {
   DuplicateCluster,
+  FuzzyDupPair,
   LibrarySettingsSnapshot,
   ProbablePair,
 } from "../ipc/library";
@@ -145,6 +147,7 @@ export function LibraryMode() {
   const [probablePairs, setProbablePairs] = useState<ProbablePair[]>([]);
   const [activePairIdx, setActivePairIdx] = useState<number | null>(null);
   const [duplicateClusters, setDuplicateClusters] = useState<DuplicateCluster[] | null>(null);
+  const [possibleDupPairs, setPossibleDupPairs] = useState<FuzzyDupPair[] | null>(null);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [autoSeriesOpen, setAutoSeriesOpen] = useState(false);
   const [autoSeasonsOpen, setAutoSeasonsOpen] = useState<{
@@ -1375,6 +1378,48 @@ export function LibraryMode() {
             actlog("tools", "open detect-series");
             setAutoSeriesOpen(true);
           }}
+          onRunPossibleDuplicates={() => {
+            actlog("tools", "run possible-duplicates scan");
+            void (async () => {
+              try {
+                const pairs = await libraryIpc.findPossibleDuplicates();
+                actlog(
+                  "tools",
+                  `possible-duplicates result: ${pairs.length} pair${pairs.length === 1 ? "" : "s"}`,
+                );
+                setPossibleDupPairs(pairs);
+              } catch (err) {
+                showToast(`Possible-duplicate scan failed: ${err}`, "error");
+              }
+            })();
+          }}
+          onRunFullMetadataRefresh={() => {
+            actlog("tools", "run full metadata refresh");
+            const targets = rows
+              .filter(
+                (r) =>
+                  !r.identity.poster_local_path &&
+                  !r.identity.custom_thumbnail_path &&
+                  !r.file.is_missing,
+              )
+              .map((r) => r.identity.id);
+            const unique = Array.from(new Set(targets));
+            if (unique.length === 0) {
+              showToast(
+                "Every item already has a poster — nothing to refresh.",
+                "info",
+                3500,
+              );
+              return;
+            }
+            if (
+              !window.confirm(
+                `Queue a TMDb metadata refresh for ${unique.length} item${unique.length === 1 ? "" : "s"} without a poster?\n\nThe backend throttles to one request at a time. Progress shows at the bottom of the window. You can keep using the app while it runs.`,
+              )
+            )
+              return;
+            void refreshManyMetadata(unique);
+          }}
         />
         <Divider />
         <ViewModeToggle
@@ -1786,6 +1831,14 @@ export function LibraryMode() {
           onClose={() => setDuplicateClusters(null)}
         />
       )}
+
+      {possibleDupPairs !== null && (
+        <PossibleDuplicatesModal
+          pairs={possibleDupPairs}
+          onResolved={refreshItems}
+          onClose={() => setPossibleDupPairs(null)}
+        />
+      )}
       {analyticsOpen && (
         <AnalyticsDashboard
           rows={rows}
@@ -1924,11 +1977,15 @@ function LibraryToolsMenu({
   onRunUpgrades,
   onOpenAnalytics,
   onOpenDetectSeries,
+  onRunPossibleDuplicates,
+  onRunFullMetadataRefresh,
 }: {
   onRunDuplicates: () => void;
   onRunUpgrades: () => void;
   onOpenAnalytics: () => void;
   onOpenDetectSeries: () => void;
+  onRunPossibleDuplicates: () => void;
+  onRunFullMetadataRefresh: () => void;
 }) {
   const [open, setOpen] = useState(false);
   // Close on Esc + outside-click.
@@ -1986,8 +2043,10 @@ function LibraryToolsMenu({
           onClick={(e) => e.stopPropagation()}
         >
           {item("🧹 Clean duplicates", "Files that share identical content (same strong fingerprint) — review and delete the extra copies", onRunDuplicates)}
+          {item("🔎 Find possible duplicates", "Fuzzy match — titles that LOOK like the same movie but aren't byte-identical (different size, slightly different filename). Excludes 3D / Extended variants.", onRunPossibleDuplicates)}
           {item("⬆ Look for upgrades", "Re-scan for likely higher-quality copies of existing titles", onRunUpgrades)}
           {item("📺 Detect series", "Scan folders and propose series groupings", onOpenDetectSeries)}
+          {item("↻ Full metadata refresh", "Queue a TMDb refresh for every item without a poster. Backend throttles to one request at a time.", onRunFullMetadataRefresh)}
           {item("📊 Analytics", "Watch patterns by tag, time window, and movie", onOpenAnalytics)}
         </div>
       )}

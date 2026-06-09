@@ -4,7 +4,13 @@ import { libraryIpc } from "../../ipc/library";
 import { useAppStore } from "../../state/appStore";
 import { LibraryPoster } from "./LibraryPoster";
 import { formatBytes, formatRuntime } from "./libraryFormat";
-import { displayTitle, looksLike3DInTitle, strip3DFromTitle } from "./titleDisplay";
+import {
+  displayTitle,
+  looksLike3DInTitle,
+  strip3DFromTitle,
+  looksLikeExtendedInTitle,
+  stripExtendedFromTitle,
+} from "./titleDisplay";
 
 interface Props {
   /** Primary-selected row (drives the single-row view). */
@@ -148,7 +154,12 @@ function SingleRowPanel({
     }
   };
   const setFlag = async (
-    key: "noProfileNecessary" | "priorityForProfile" | "nonFamilyFriendly" | "is3d",
+    key:
+      | "noProfileNecessary"
+      | "priorityForProfile"
+      | "nonFamilyFriendly"
+      | "is3d"
+      | "isExtended",
     value: boolean,
   ) => {
     try {
@@ -181,6 +192,29 @@ function SingleRowPanel({
       }
     }
     await setFlag("is3d", value);
+  };
+
+  // Same shape as set3D — if the title already contains an
+  // Extended-style marker, offer to clean it up before adding the
+  // " (Extended)" suffix.
+  const setExtended = async (value: boolean) => {
+    if (value && id.movie_title && looksLikeExtendedInTitle(id.movie_title)) {
+      const cleaned = stripExtendedFromTitle(id.movie_title);
+      const ok = window.confirm(
+        `The title "${id.movie_title}" already has an Extended/Director's Cut marker. ` +
+          `Strip it so the new "(Extended)" suffix is the only marker?\n\n` +
+          `OK → rename to "${cleaned}" then mark as Extended.\n` +
+          `Cancel → leave title alone, just mark as Extended.`,
+      );
+      if (ok) {
+        try {
+          await libraryIpc.setManualMetadata(id.id, "title", cleaned);
+        } catch (err) {
+          showToast(`Couldn't update title: ${err}`, "error");
+        }
+      }
+    }
+    await setFlag("isExtended", value);
   };
 
   // Save handler factory for inline-editable fields. Empty string is
@@ -338,6 +372,12 @@ function SingleRowPanel({
           tip="Marks the movie as a 3D release — appends &quot;(3D)&quot; to the displayed title and surfaces in the 3D filter."
           checked={id.is_3d}
           onChange={(v) => void set3D(v)}
+        />
+        <FlagToggle
+          label="Extended Edition / Director's Cut"
+          tip="Marks an Extended / Director's Cut / Final Cut variant — appends &quot;(Extended)&quot; to the title and tells the fuzzy-duplicate scanner NOT to pair this with the theatrical release."
+          checked={id.is_extended}
+          onChange={(v) => void setExtended(v)}
         />
       </div>
 

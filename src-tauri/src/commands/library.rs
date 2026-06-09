@@ -582,7 +582,8 @@ pub fn library_get_row(
             i.maps_filtered_tier, i.maps_filtered_summary,
             i.maps_unfiltered_tier, i.maps_unfiltered_summary,
             f.has_subtitle,
-            i.is_3d
+            i.is_3d,
+            i.is_extended
          FROM library_files f
          JOIN library_identities i ON i.id = f.identity_id
          WHERE f.id = ?1",
@@ -633,11 +634,12 @@ pub fn library_set_flags(
     priority_for_profile: Option<bool>,
     non_family_friendly: Option<bool>,
     is_3d: Option<bool>,
+    is_extended: Option<bool>,
 ) -> Result<(), String> {
     crate::log!(
         "library",
-        "set_flags id={identity_id} no_profile_necessary={:?} priority_for_profile={:?} non_family_friendly={:?} is_3d={:?}",
-        no_profile_necessary, priority_for_profile, non_family_friendly, is_3d
+        "set_flags id={identity_id} no_profile_necessary={:?} priority_for_profile={:?} non_family_friendly={:?} is_3d={:?} is_extended={:?}",
+        no_profile_necessary, priority_for_profile, non_family_friendly, is_3d, is_extended
     );
     let now = now_unix();
     let conn = db.lock();
@@ -664,6 +666,12 @@ pub fn library_set_flags(
             "UPDATE library_identities SET is_3d = ?1, last_updated_at = ?2 WHERE id = ?3",
             params![v as i64, now, identity_id],
         ).map_err(|e| format!("set is_3d: {e}"))?;
+    }
+    if let Some(v) = is_extended {
+        conn.execute(
+            "UPDATE library_identities SET is_extended = ?1, last_updated_at = ?2 WHERE id = ?3",
+            params![v as i64, now, identity_id],
+        ).map_err(|e| format!("set is_extended: {e}"))?;
     }
     Ok(())
 }
@@ -2704,7 +2712,8 @@ fn build_row(db: &LibraryDb, file_id: i64) -> Result<Option<LibraryRow>, String>
             i.maps_filtered_tier, i.maps_filtered_summary,
             i.maps_unfiltered_tier, i.maps_unfiltered_summary,
             f.has_subtitle,
-            i.is_3d
+            i.is_3d,
+            i.is_extended
          FROM library_files f
          JOIN library_identities i ON i.id = f.identity_id
          WHERE f.id = ?1",
@@ -3005,6 +3014,236 @@ pub fn library_find_duplicates(
         }
     }
     Ok(out)
+}
+
+/// Comparison key for the fuzzy-duplicate matcher: strips variant
+/// markers ("3D", "Extended", "Director's Cut", trailing year, etc.),
+/// punctuation, and case so "Mary Poppins (1964)" and "Mary Poppins
+/// 1964" hash to the same key.
+///
+/// No regex dep — does it with simple string scans + the existing
+/// variant constants. Bit verbose but keeps Cargo.toml lean.
+fn fuzzy_title_key(title: &str) -> String {
+    // Lowercase + replace any non-alphanumeric with whitespace so
+    // "Mary-Poppins.1964" tokenizes to ["mary", "poppins", "1964"].
+    let lowered: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    // Drop year-like trailing tokens (4 digits 1900-2099) and known
+    // variant words. Tokenize, filter, rejoin.
+    const VARIANT_TOKENS: &[&str] = &[
+        "3d",
+        "extended",
+        "edition",
+        "director",
+        "directors",
+        "cut",
+        "final",
+        "theatrical",
+        "unrated",
+        "uncut",
+        "special",
+    ];
+    lowered
+        .split_whitespace()
+        .filter(|tok| {
+            // Drop years.
+            if tok.len() == 4 && tok.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(y) = tok.parse::<u32>() {
+                    if (1900..=2099).contains(&y) {
+                        return false;
+                    }
+                }
+            }
+            !VARIANT_TOKENS.contains(tok)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Levenshtein-distance based similarity score in [0, 1]. Used by
+/// the fuzzy duplicate detector. 1.0 = identical strings; 0.0 = no
+/// shared characters at the same positions.
+fn similarity(a: &str, b: &str) -> f64 {
+    if a == b {
+        return 1.0;
+    }
+    let alen = a.chars().count();
+    let blen = b.chars().count();
+    if alen == 0 || blen == 0 {
+        return 0.0;
+    }
+    // Simple DP Levenshtein. Capped at 60 chars per side for perf —
+    // movie titles never approach that.
+    let a_chars: Vec<char> = a.chars().take(60).collect();
+    let b_chars: Vec<char> = b.chars().take(60).collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+    let mut prev = (0..=n).collect::<Vec<_>>();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    let dist = prev[n] as f64;
+    let max_len = m.max(n) as f64;
+    1.0 - dist / max_len
+}
+
+/// One side of a fuzzy-duplicate candidate pair. Includes the full
+/// library row so the modal can render rich detail without a second
+/// round-trip.
+#[derive(serde::Serialize)]
+pub struct FuzzyDupCandidate {
+    pub row: LibraryRow,
+}
+
+#[derive(serde::Serialize)]
+pub struct FuzzyDupPair {
+    pub a: FuzzyDupCandidate,
+    pub b: FuzzyDupCandidate,
+    /// 0..=100 (rounded similarity*100). Used to sort high-confidence
+    /// pairs to the top of the review modal.
+    pub score: u32,
+}
+
+/// "Find possible duplicates" tool. Compares every pair of identities
+/// by fuzzy-matched title + year. Pair is emitted when:
+///   - title similarity ≥ 0.85 after stripping variant markers
+///   - year within ±1 (or both null)
+///   - same is_3d flag (3D releases are not duplicates of their 2D
+///     counterparts — different content)
+///   - same is_extended flag (Extended cut is a different release)
+///   - skips rows flagged is_missing (no point reviewing what's gone)
+///   - skips exact-duplicate identities (those are caught by
+///     library_find_duplicates already)
+///
+/// Bounded at 5000 candidate pairs to keep the review modal sane on
+/// large libraries; the user can re-run after resolving the first set.
+#[tauri::command]
+pub fn library_find_possible_duplicates(
+    db: State<'_, LibraryDb>,
+) -> Result<Vec<FuzzyDupPair>, String> {
+    let rows = crate::library::index::list_files_with_identity(&db)?;
+    // De-dupe by identity_id (we want one row per identity, picking
+    // the largest file as the canonical representative).
+    let mut by_identity: HashMap<i64, (crate::library::model::LibraryFile, crate::library::model::LibraryIdentity)> = HashMap::new();
+    for (f, i) in rows {
+        if f.is_missing {
+            continue;
+        }
+        match by_identity.get(&i.id) {
+            Some((existing_f, _)) if existing_f.size_bytes >= f.size_bytes => {}
+            _ => {
+                by_identity.insert(i.id, (f, i));
+            }
+        }
+    }
+    // Pre-compute fuzzy keys so we don't pay the regex cost per
+    // O(N²) iteration.
+    let candidates: Vec<(i64, String, Option<i64>, bool, bool)> = by_identity
+        .iter()
+        .map(|(id, (_, i))| {
+            let title = i.movie_title.as_deref().unwrap_or("");
+            (*id, fuzzy_title_key(title), i.movie_year, i.is_3d, i.is_extended)
+        })
+        .collect();
+    const SCORE_THRESHOLD: f64 = 0.85;
+    const HARD_PAIR_CAP: usize = 5000;
+    let mut pairs: Vec<FuzzyDupPair> = Vec::new();
+    'outer: for i in 0..candidates.len() {
+        for j in (i + 1)..candidates.len() {
+            let a = &candidates[i];
+            let b = &candidates[j];
+            if a.1.is_empty() || b.1.is_empty() {
+                continue;
+            }
+            if a.3 != b.3 || a.4 != b.4 {
+                continue;
+            }
+            if let (Some(ya), Some(yb)) = (a.2, b.2) {
+                if (ya - yb).abs() > 1 {
+                    continue;
+                }
+            }
+            let score = similarity(&a.1, &b.1);
+            if score < SCORE_THRESHOLD {
+                continue;
+            }
+            let Some(row_a) = build_row(&db, by_identity[&a.0].0.id)? else { continue };
+            let Some(row_b) = build_row(&db, by_identity[&b.0].0.id)? else { continue };
+            pairs.push(FuzzyDupPair {
+                a: FuzzyDupCandidate { row: row_a },
+                b: FuzzyDupCandidate { row: row_b },
+                score: (score * 100.0).round() as u32,
+            });
+            if pairs.len() >= HARD_PAIR_CAP {
+                break 'outer;
+            }
+        }
+    }
+    pairs.sort_by(|x, y| y.score.cmp(&x.score));
+    Ok(pairs)
+}
+
+/// Rename a file ON DISK and update the library row. Used by the
+/// fuzzy-duplicate review modal's inline-rename action: the user spots
+/// a mis-named copy, types a clean name, hits OK — we rename the file
+/// in place (same directory, new basename) and update the DB.
+#[tauri::command]
+pub fn library_rename_file(
+    db: State<'_, LibraryDb>,
+    file_id: i64,
+    new_basename: String,
+) -> Result<String, String> {
+    let trimmed = new_basename.trim();
+    if trimmed.is_empty() {
+        return Err("New name can't be empty.".into());
+    }
+    if trimmed.contains('\\') || trimmed.contains('/') {
+        return Err("New name can't contain path separators.".into());
+    }
+    let conn = db.lock();
+    let old_path: String = conn
+        .query_row(
+            "SELECT path FROM library_files WHERE id = ?1",
+            params![file_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("file row missing: {e}"))?;
+    drop(conn);
+    let old_pb = std::path::Path::new(&old_path);
+    let parent = old_pb
+        .parent()
+        .ok_or_else(|| "file has no parent dir".to_string())?;
+    let new_path = parent.join(trimmed);
+    let new_path_str = new_path
+        .to_str()
+        .ok_or_else(|| "new path not utf-8".to_string())?
+        .to_string();
+    if new_path.exists() {
+        return Err(format!(
+            "A file with that name already exists at {new_path_str}"
+        ));
+    }
+    std::fs::rename(old_pb, &new_path)
+        .map_err(|e| format!("rename {old_path} → {new_path_str}: {e}"))?;
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE library_files SET path = ?1 WHERE id = ?2",
+        params![new_path_str, file_id],
+    )
+    .map_err(|e| format!("update path: {e}"))?;
+    crate::log!("library", "rename_file: {old_path} → {new_path_str}");
+    Ok(new_path_str)
 }
 
 /// Bulk-remove every file row currently flagged is_missing=1. Use case:
@@ -3717,6 +3956,7 @@ fn row_from(r: &rusqlite::Row<'_>) -> (LibraryFile, LibraryIdentity) {
         maps_unfiltered_tier: r.get(46).ok(),
         maps_unfiltered_summary: r.get(47).ok(),
         is_3d: r.get::<_, i64>(49).unwrap_or_default() != 0,
+        is_extended: r.get::<_, i64>(50).unwrap_or_default() != 0,
     };
     (file, identity)
 }

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { LibraryRow, ProfileStatus } from "../../ipc/library";
-import { looksLike3DInFilename } from "./titleDisplay";
+import { looksLike3DInFilename, looksLikeExtendedInFilename } from "./titleDisplay";
 
 export type WatchFilter = "any" | "unwatched" | "in_progress" | "watched";
 export type MapsTierFilter =
@@ -65,6 +65,10 @@ export interface LibraryFilterState {
    *  because applyFilters() runs per-row and doesn't see the full row
    *  list; the set is precomputed and passed in via filter context. */
   duplicates: PresenceFilter;
+  /** Extended Edition filter — identity flag OR filename heuristic
+   *  (matches "Extended", "Director's Cut", "Final Cut", "Theatrical
+   *  Cut", "Unrated", "Uncut" in the filename). */
+  isExtended: PresenceFilter;
 }
 
 export const EMPTY_FILTERS: LibraryFilterState = {
@@ -89,6 +93,7 @@ export const EMPTY_FILTERS: LibraryFilterState = {
   is3d: "any",
   broken: "any",
   duplicates: "any",
+  isExtended: "any",
 };
 
 function presenceTest(value: boolean, filter: PresenceFilter): boolean {
@@ -302,6 +307,13 @@ export function applyFilters(
       if (!presenceTest(isDup, filters.duplicates)) return false;
     }
 
+    if (filters.isExtended !== "any") {
+      const filename = row.file.path.split(/[\\/]/).pop() ?? "";
+      const flagged =
+        row.identity.is_extended || looksLikeExtendedInFilename(filename);
+      if (!presenceTest(flagged, filters.isExtended)) return false;
+    }
+
     return true;
   });
 }
@@ -373,7 +385,8 @@ export function LibraryFilters({
     filters.seriesFilter !== "any" ||
     filters.is3d !== "any" ||
     filters.broken !== "any" ||
-    filters.duplicates !== "any";
+    filters.duplicates !== "any" ||
+    filters.isExtended !== "any";
 
   return (
     <aside className="bg-fvp-surface text-xs flex flex-col">
@@ -601,6 +614,11 @@ export function LibraryFilters({
               label="Duplicates"
               value={filters.duplicates}
               onChange={(v) => onChange({ ...filters, duplicates: v })}
+            />
+            <PresenceMini
+              label="Extended Edition"
+              value={filters.isExtended}
+              onChange={(v) => onChange({ ...filters, isExtended: v })}
             />
           </div>
         </Section>

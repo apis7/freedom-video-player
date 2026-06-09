@@ -51,6 +51,7 @@ export interface LibraryIdentity {
   priority_for_profile: boolean;
   no_profile_necessary: boolean;
   is_3d: boolean;
+  is_extended: boolean;
   manual_title: boolean;
   manual_year: boolean;
   manual_thumbnail: boolean;
@@ -141,6 +142,10 @@ export const libraryIpc = {
     invoke<void>("library_relocate_file", { fileId, newPath }),
   removeBrokenLinks: () =>
     invoke<number>("library_remove_broken_links"),
+  findPossibleDuplicates: () =>
+    invoke<FuzzyDupPair[]>("library_find_possible_duplicates"),
+  renameFile: (fileId: number, newBasename: string) =>
+    invoke<string>("library_rename_file", { fileId, newBasename }),
   setFlags: (
     identityId: number,
     flags: {
@@ -148,6 +153,7 @@ export const libraryIpc = {
       priorityForProfile?: boolean;
       nonFamilyFriendly?: boolean;
       is3d?: boolean;
+      isExtended?: boolean;
     },
   ) =>
     invoke<void>("library_set_flags", {
@@ -156,6 +162,7 @@ export const libraryIpc = {
       priorityForProfile: flags.priorityForProfile ?? null,
       nonFamilyFriendly: flags.nonFamilyFriendly ?? null,
       is3d: flags.is3d ?? null,
+      isExtended: flags.isExtended ?? null,
     }),
   setTags: (identityId: number, tags: string[]) =>
     invoke<void>("library_set_tags", { identityId, tags }),
@@ -337,6 +344,13 @@ export interface ProbablePair {
 export interface DuplicateCluster {
   identity_id: number;
   files: LibraryRow[];
+}
+
+export interface FuzzyDupPair {
+  a: { row: LibraryRow };
+  b: { row: LibraryRow };
+  /** 0..=100, rounded. Used to sort high-confidence pairs first. */
+  score: number;
 }
 
 export interface AnalyticsDailyBucket {

@@ -617,7 +617,8 @@ pub fn list_files_with_identity(db: &LibraryDb) -> Result<Vec<(LibraryFile, Libr
                 i.maps_filtered_tier, i.maps_filtered_summary,
                 i.maps_unfiltered_tier, i.maps_unfiltered_summary,
                 f.has_subtitle,
-                i.is_3d
+                i.is_3d,
+                i.is_extended
              FROM library_files f
              JOIN library_identities i ON i.id = f.identity_id
              ORDER BY COALESCE(i.movie_title, f.path) COLLATE NOCASE",
@@ -686,6 +687,7 @@ pub fn list_files_with_identity(db: &LibraryDb) -> Result<Vec<(LibraryFile, Libr
                 maps_unfiltered_tier: r.get(46)?,
                 maps_unfiltered_summary: r.get(47)?,
                 is_3d: r.get::<_, Option<i64>>(49)?.map(|v| v != 0).unwrap_or(false),
+                is_extended: r.get::<_, Option<i64>>(50)?.map(|v| v != 0).unwrap_or(false),
             };
             Ok((file, identity))
         })

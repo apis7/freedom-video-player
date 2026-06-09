@@ -280,6 +280,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE library_identities ADD COLUMN is_3d INTEGER NOT NULL DEFAULT 0;
     "#,
+    // ── v10 — Extended Edition flag ───────────────────────────────────
+    //
+    // Same pattern as is_3d but for Extended / Director's Cut / Final
+    // Cut variants. The "Find possible duplicates" fuzzy matcher must
+    // never pair an extended cut with the theatrical release, so this
+    // flag is part of the equality contract.
+    r#"
+    ALTER TABLE library_identities ADD COLUMN is_extended INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Thread-safe handle around a single `Connection`. SQLite's serialized

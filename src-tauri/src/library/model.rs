@@ -44,6 +44,7 @@ pub struct LibraryIdentity {
     pub priority_for_profile: bool,
     pub no_profile_necessary: bool,
     pub is_3d: bool,
+    pub is_extended: bool,
     pub manual_title: bool,
     pub manual_year: bool,
     pub manual_thumbnail: bool,

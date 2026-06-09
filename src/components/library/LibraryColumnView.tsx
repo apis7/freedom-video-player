@@ -5,6 +5,21 @@ import { formatBytes, formatDateShort, formatPct, formatRuntime } from "./librar
 import { setIdentityDragData } from "./dragKinds";
 import { displayTitle } from "./titleDisplay";
 import { actlog } from "../../utils/actlog";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 export type ColumnId =
   | "title"
@@ -405,6 +420,30 @@ export function LibraryColumnView({
     onReorderRows(ids);
   };
 
+  // ── @dnd-kit row drag (Wave 1 of Path A) ─────────────────────────────
+  // Pointer-event-based drag-reorder via @dnd-kit, replacing the
+  // HTML5 path. HTML5 dragstart/dragover/drop are suppressed on
+  // Windows when tauri's `dragDropEnabled: true` (which we need ON
+  // for Explorer→app file drops). @dnd-kit uses pointer events so
+  // both can coexist. PointerSensor's `distance` constraint of 6px
+  // means a stationary click goes through as onClick — only an
+  // actual drag activates sortable.
+  const sortableSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
+  const sortableIds = sorted.map((r) => r.identity.id);
+  const handleSortableDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    if (!onReorderRows) return;
+    const ids = sorted.map((r) => r.identity.id);
+    const oldIdx = ids.indexOf(Number(active.id));
+    const newIdx = ids.indexOf(Number(over.id));
+    if (oldIdx < 0 || newIdx < 0) return;
+    const next = arrayMove(ids, oldIdx, newIdx);
+    onReorderRows(next);
+  };
+
   // Track which column the user is dragging so we can show drop hints.
   // Same useRef pattern as row reorder — state-based tracking has
   // first-tick lag that breaks dragover delivery in some webviews.
@@ -501,16 +540,120 @@ export function LibraryColumnView({
           </tr>
         </thead>
         <tbody>
-          {sorted.map((row, idx) => {
+          {/* When reorderMode is on, wrap the body rows in a dnd-kit
+              DndContext + SortableContext so the row drag goes through
+              pointer events instead of HTML5 drag (which is suppressed
+              by Tauri's dragDropEnabled=true on Windows). The body
+              renders identical markup either way — just the
+              <SortableTr> wrapper differs. */}
+          {reorderMode && (
+            <DndContext
+              sensors={sortableSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleSortableDragEnd}
+            >
+              <SortableContext items={sortableIds} strategy={verticalListSortingStrategy}>
+                {sorted.map((row, idx) => {
+                  const selected = selectedFileIds.has(row.file.id);
+                  const isPrimary = primarySelectedId === row.file.id;
+                  const seasonStart = seasonStartsAt.get(idx);
+                  const totalCols =
+                    specs.length + 1 + (reorderMode === "series-numbered" ? 1 : 0);
+                  return (
+                    <Fragment key={row.file.id}>
+                      {seasonStart != null && (
+                        <tr className="bg-fvp-accent/15 border-y border-fvp-accent/40">
+                          <td
+                            colSpan={totalCols}
+                            className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-fvp-accent"
+                          >
+                            Season {seasonStart}
+                          </td>
+                        </tr>
+                      )}
+                      <SortableTr
+                        id={row.identity.id}
+                        rowRefs={rowRefs}
+                        idx={idx}
+                        className={clsx(
+                          "border-b border-fvp-border/40 cursor-pointer",
+                          selected
+                            ? isPrimary
+                              ? "bg-fvp-accent/30 text-fvp-text"
+                              : "bg-fvp-accent/15 text-fvp-text"
+                            : "hover:bg-fvp-surface2/40",
+                          row.file.drift_warning && "border-l-2 border-l-fvp-warn",
+                        )}
+                        onClick={(e) =>
+                          onPick(row.file.id, {
+                            ctrl: e.ctrlKey || e.metaKey,
+                            shift: e.shiftKey,
+                          })
+                        }
+                        onDoubleClick={() => onPlay(row)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          if (!selected) {
+                            onPick(row.file.id, { ctrl: false, shift: false });
+                          }
+                          onContextMenu(row, e.clientX, e.clientY);
+                        }}
+                      >
+                        <td
+                          className="px-1 text-center text-fvp-muted cursor-grab w-6 select-none"
+                          title="Drag this row to reorder."
+                        >
+                          ⋮⋮
+                        </td>
+                        {reorderMode === "series-numbered" && (
+                          <td className="px-2 text-fvp-muted text-[11px] w-14 text-right tabular-nums">
+                            {episodeLabels?.get(row.file.id) ?? idx + 1}
+                          </td>
+                        )}
+                        {specs.map((c) => {
+                          const isTitle = c.id === "title";
+                          const showSpinner =
+                            isTitle && refreshingIdentityIds?.has(row.identity.id);
+                          return (
+                            <td
+                              key={c.id}
+                              className="px-2 py-1.5 truncate"
+                              style={{
+                                width: columnWidths[c.id] ?? c.defaultWidth,
+                                maxWidth: columnWidths[c.id] ?? c.defaultWidth,
+                              }}
+                            >
+                              {showSpinner ? (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span
+                                    className="inline-block w-2.5 h-2.5 border-2 border-fvp-accent border-t-transparent rounded-full animate-spin"
+                                    title="Refreshing metadata from TMDb…"
+                                    aria-hidden
+                                  />
+                                  {c.render(row)}
+                                </span>
+                              ) : (
+                                c.render(row)
+                              )}
+                            </td>
+                          );
+                        })}
+                      </SortableTr>
+                    </Fragment>
+                  );
+                })}
+              </SortableContext>
+            </DndContext>
+          )}
+          {!reorderMode && sorted.map((row, idx) => {
             const selected = selectedFileIds.has(row.file.id);
             const isPrimary = primarySelectedId === row.file.id;
             const isDropTargetRow =
               rowDropTargetId === row.identity.id &&
               rowDragIdRef.current !== row.identity.id;
             const seasonStart = seasonStartsAt.get(idx);
-            // Total column count for the spanning season header row.
-            const totalCols =
-              specs.length + (reorderMode ? 1 : 0) + (reorderMode === "series-numbered" ? 1 : 0);
+            // Non-reorder path — no drag-handle column.
+            const totalCols = specs.length;
             return (
               <Fragment key={row.file.id}>
               {seasonStart != null && (
@@ -647,19 +790,8 @@ export function LibraryColumnView({
                   isDropTargetRow && rowDropSide === "after" && "border-b-2 border-b-fvp-accent",
                 )}
               >
-                {reorderMode && (
-                  <td
-                    className="px-1 text-center text-fvp-muted cursor-grab w-6 select-none"
-                    title="Drag this row to reorder. The whole row is grabbable — the dots are just the visual cue."
-                  >
-                    ⋮⋮
-                  </td>
-                )}
-                {reorderMode === "series-numbered" && (
-                  <td className="px-2 text-fvp-muted text-[11px] w-14 text-right tabular-nums">
-                    {episodeLabels?.get(row.file.id) ?? idx + 1}
-                  </td>
-                )}
+                {/* No drag-handle / episode-label tds in the non-reorder
+                    branch — those are exclusive to the SortableTr path. */}
                 {specs.map((c) => {
                   const isTitle = c.id === "title";
                   const showSpinner =
@@ -695,6 +827,58 @@ export function LibraryColumnView({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** Sortable `<tr>` wrapper using @dnd-kit. Used only in reorderMode.
+ *  Pointer-event-based — coexists with Tauri's dragDropEnabled=true
+ *  IDropTarget on WebView2 (HTML5 drag wouldn't). The PointerSensor's
+ *  6px activation distance lets a stationary click still fire onClick
+ *  via the row's existing handler. */
+function SortableTr({
+  id,
+  rowRefs,
+  idx,
+  className,
+  onClick,
+  onDoubleClick,
+  onContextMenu,
+  children,
+}: {
+  id: number;
+  rowRefs: React.MutableRefObject<Map<number, HTMLTableRowElement | null>>;
+  idx: number;
+  className?: string;
+  onClick?: (e: React.MouseEvent) => void;
+  onDoubleClick?: (e: React.MouseEvent) => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
+  children: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+    position: "relative",
+    zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <tr
+      ref={(el) => {
+        setNodeRef(el);
+        rowRefs.current.set(idx, el);
+      }}
+      style={style}
+      className={className}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+      onContextMenu={onContextMenu}
+      {...attributes}
+      {...listeners}
+    >
+      {children}
+    </tr>
   );
 }
 

@@ -8,6 +8,21 @@ import { formatBytes, formatRuntime } from "./libraryFormat";
 import { setIdentityDragData } from "./dragKinds";
 import { displayTitle } from "./titleDisplay";
 import { actlog } from "../../utils/actlog";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  rectSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 interface Props {
   rows: LibraryRow[];
@@ -250,6 +265,22 @@ export function LibraryThumbnailView({
     onContextMenu,
     onRefreshMetadata,
   };
+
+  // @dnd-kit-based reorderable grid for series/collection scopes.
+  // We bypass react-window virtualization in reorderMode — series
+  // typically have < 100 items so there's no perf concern, and
+  // virtualization fights @dnd-kit (off-screen items aren't in the
+  // DOM, so the SortableContext can't see them).
+  if (reorderMode) {
+    return (
+      <ReorderableGrid
+        rows={rows}
+        cardWidth={CARD_W}
+        onReorderRows={onReorderRows}
+        data={itemData}
+      />
+    );
+  }
 
   return (
     <div ref={containerRef} className="h-full w-full">
@@ -676,5 +707,110 @@ function ProfileIcon({ status }: { status: LibraryRow["profile_status"] }) {
     >
       ☆
     </span>
+  );
+}
+
+/** Reorderable grid for series/collection scopes. Skips react-window
+ *  virtualization (typical scope size is small) so @dnd-kit can see
+ *  every item in the SortableContext. Pointer-event-based drag —
+ *  coexists with Tauri's dragDropEnabled=true. */
+function ReorderableGrid({
+  rows,
+  cardWidth,
+  onReorderRows,
+  data,
+}: {
+  rows: LibraryRow[];
+  cardWidth: number;
+  onReorderRows?: (orderedIds: number[]) => void;
+  data: CellData;
+}) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
+  const ids = rows.map((r) => r.identity.id);
+  const handleDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id || !onReorderRows) return;
+    const oldIdx = ids.indexOf(Number(active.id));
+    const newIdx = ids.indexOf(Number(over.id));
+    if (oldIdx < 0 || newIdx < 0) return;
+    onReorderRows(arrayMove(ids, oldIdx, newIdx));
+  };
+  return (
+    <div className="h-full w-full overflow-y-auto p-2">
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext items={ids} strategy={rectSortingStrategy}>
+          <div
+            className="grid gap-2"
+            style={{
+              gridTemplateColumns: `repeat(auto-fill, minmax(${cardWidth - 16}px, 1fr))`,
+            }}
+          >
+            {rows.map((row) => (
+              <SortableCard
+                key={row.identity.id}
+                id={row.identity.id}
+                row={row}
+                data={data}
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+    </div>
+  );
+}
+
+/** Single sortable card wrapper. Renders ThumbCard inside a dnd-kit
+ *  sortable shell. Click / context-menu still work — the
+ *  PointerSensor's 6px activation distance lets stationary clicks
+ *  through. */
+function SortableCard({
+  id,
+  row,
+  data,
+}: {
+  id: number;
+  row: LibraryRow;
+  data: CellData;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+    position: "relative",
+    zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+      <ThumbCard
+        row={row}
+        selected={data.selectedFileIds.has(row.file.id)}
+        isPrimary={data.primarySelectedId === row.file.id}
+        selectedIdentityIds={data.selectedIdentityIds}
+        isRefreshing={data.refreshingIdentityIds.has(row.identity.id)}
+        episodeLabel={data.episodeLabels?.get(row.file.id)}
+        seasonStartLabel={null}
+        reorderMode={data.reorderMode}
+        isReorderDropTarget={false}
+        dropSide="before"
+        isReorderDragSource={isDragging}
+        rowDragIdRef={data.rowDragIdRef}
+        onReorderDragStart={data.onReorderDragStart}
+        onReorderDragOver={data.onReorderDragOver}
+        onReorderDragEnd={data.onReorderDragEnd}
+        onReorderDrop={data.onReorderDrop}
+        onPick={data.onPick}
+        onPlay={data.onPlay}
+        onContextMenu={data.onContextMenu}
+      />
+    </div>
   );
 }

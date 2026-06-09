@@ -30,6 +30,13 @@ interface Props {
   rows: LibraryRow[];
   /** Parent re-fetches list/collections/series whenever members change. */
   onMembershipChanged: () => void;
+  /** Library-wide actions that show up in the right-click menu for
+   *  All Movies / Collections / Series headers. Wired in the parent
+   *  (Library.tsx) so all menu wiring goes through one place. */
+  onRescanLibrary?: () => void;
+  onRemoveBrokenLinks?: () => void;
+  onOpenAnalytics?: () => void;
+  onOpenFvpWebsite?: () => void;
 }
 
 const VIDEO_EXTENSIONS = [
@@ -53,6 +60,10 @@ export function CollectionsSeriesPanel({
   onScopeChange,
   rows,
   onMembershipChanged,
+  onRescanLibrary,
+  onRemoveBrokenLinks,
+  onOpenAnalytics,
+  onOpenFvpWebsite,
 }: Props) {
   const showToast = useAppStore((s) => s.showToast);
   const [collections, setCollections] = useState<CollectionRow[]>([]);
@@ -280,6 +291,41 @@ export function CollectionsSeriesPanel({
       }
       return r.series?.series_id === id;
     });
+  // Library-wide menu shared by All Movies / Collections / Series
+  // headers in the sidebar. None of these actions are scope-specific,
+  // so the same menu fits everywhere — the user doesn't have to think
+  // about which scope they right-clicked.
+  const libraryWideMenu = (): MenuItem[] => [
+    {
+      kind: "item",
+      label: "Rescan library",
+      title: "Re-walk every watched folder, pick up additions and removals.",
+      disabled: !onRescanLibrary,
+      onClick: () => onRescanLibrary?.(),
+    },
+    {
+      kind: "item",
+      label: "Remove broken links",
+      title: "Drop every library row whose file is missing on disk.",
+      disabled: !onRemoveBrokenLinks,
+      onClick: () => onRemoveBrokenLinks?.(),
+    },
+    { kind: "separator" },
+    {
+      kind: "item",
+      label: "Analytics…",
+      disabled: !onOpenAnalytics,
+      onClick: () => onOpenAnalytics?.(),
+    },
+    {
+      kind: "item",
+      label: "Visit FVP website",
+      title: "Opens freedomvideoplayer.com in your default browser.",
+      disabled: !onOpenFvpWebsite,
+      onClick: () => onOpenFvpWebsite?.(),
+    },
+  ];
+
   const collectionMenu = (c: CollectionRow): MenuItem[] => {
     const donor = groupHasDonor("collection", c.id);
     return [
@@ -457,6 +503,14 @@ export function CollectionsSeriesPanel({
           than the FILTERS & SEARCH heading so the eye lands here first. */}
       <button
         onClick={() => onScopeChange({ kind: "all", id: null, name: null })}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({
+            x: e.clientX,
+            y: e.clientY,
+            items: libraryWideMenu(),
+          });
+        }}
         className={
           "w-full text-left px-1.5 py-1 rounded text-[13px] font-bold uppercase tracking-wider transition-colors " +
           (activeScope.kind === "all"
@@ -486,6 +540,10 @@ export function CollectionsSeriesPanel({
         }}
         count={collections.length}
         tooltip="Collections are playlist-style groupings. Movies you add to a collection STILL show individually in All Movies — the collection is just an additional way to browse them."
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({ x: e.clientX, y: e.clientY, items: libraryWideMenu() });
+        }}
       />
       {expanded === "collections" && (
         <div className="mb-1">
@@ -582,6 +640,10 @@ export function CollectionsSeriesPanel({
         }}
         count={series.length}
         tooltip="Series act as a single bundled entity. When you add movies to a series, the individual movies STOP showing in All Movies — only the series tile appears. Click into the series to see its episodes."
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({ x: e.clientX, y: e.clientY, items: libraryWideMenu() });
+        }}
       />
       {expanded === "series" && (
         <div className="mb-1">
@@ -728,6 +790,7 @@ function AccordionHeader({
   onToggle,
   onAdd,
   tooltip,
+  onContextMenu,
 }: {
   label: string;
   expanded: boolean;
@@ -737,9 +800,13 @@ function AccordionHeader({
   /** Hover tooltip explaining how this grouping behaves vs the other —
    *  series collapse to one tile in All Movies, collections don't. */
   tooltip?: string;
+  /** Right-click → opens the library-wide menu (Rescan, Remove broken,
+   *  Analytics, FVP site). The header itself is a passive label; the
+   *  right-click is a known affordance Windows users expect. */
+  onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   return (
-    <div className="flex items-center justify-between mt-1 mb-1">
+    <div className="flex items-center justify-between mt-1 mb-1" onContextMenu={onContextMenu}>
       <button
         onClick={onToggle}
         title={tooltip}

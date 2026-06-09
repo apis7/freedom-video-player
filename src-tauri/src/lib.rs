@@ -198,6 +198,7 @@ pub fn run() {
             commands::library::library_remove_folder,
             commands::library::library_search_by_filename,
             commands::library::library_relocate_file,
+            commands::library::library_remove_broken_links,
             commands::library::library_list_folders,
             commands::library::library_set_folder_scan_on_startup,
             commands::library::library_rescan_all,

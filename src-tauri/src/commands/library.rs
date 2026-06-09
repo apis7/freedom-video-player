@@ -2979,6 +2979,14 @@ pub fn library_find_duplicates(
     let rows = crate::library::index::list_files_with_identity(&db)?;
     let mut grouped: HashMap<i64, Vec<crate::library::model::LibraryFile>> = HashMap::new();
     for (f, _) in &rows {
+        // Skip files the indexer has flagged as missing on disk —
+        // they're not real duplicates of anything anymore, just stale
+        // DB rows waiting to be cleaned up. Including them produced
+        // ghost clusters (e.g. "this missing file pairs with this real
+        // file") that the user couldn't actually resolve.
+        if f.is_missing {
+            continue;
+        }
         grouped.entry(f.identity_id).or_default().push(f.clone());
     }
     let mut out: Vec<DuplicateCluster> = Vec::new();
@@ -2997,6 +3005,30 @@ pub fn library_find_duplicates(
         }
     }
     Ok(out)
+}
+
+/// Bulk-remove every file row currently flagged is_missing=1. Use case:
+/// user manually deleted a bunch of files outside FVP (or via FVP's
+/// trash flow followed by a rescan that confirmed they're gone), wants
+/// to clean up the broken-link rows in one shot. Returns the count
+/// removed so the UI can toast a confirmation. Orphan identities are
+/// cascaded as a side effect (FK + the same post-delete sweep
+/// library_remove_files uses).
+#[tauri::command]
+pub fn library_remove_broken_links(db: State<'_, LibraryDb>) -> Result<u32, String> {
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
+    let removed: u32 = tx
+        .execute("DELETE FROM library_files WHERE is_missing = 1", [])
+        .map_err(|e| format!("delete: {e}"))? as u32;
+    let _ = tx.execute(
+        "DELETE FROM library_identities
+         WHERE id NOT IN (SELECT DISTINCT identity_id FROM library_files)",
+        [],
+    );
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
+    crate::log!("library", "remove_broken_links: removed {removed} row(s)");
+    Ok(removed)
 }
 
 // ── Roulette + suggestions + drift sentinel ─────────────────────────

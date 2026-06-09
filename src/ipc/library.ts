@@ -139,6 +139,8 @@ export const libraryIpc = {
     invoke<string[]>("library_search_by_filename", { filename }),
   relocateFile: (fileId: number, newPath: string) =>
     invoke<void>("library_relocate_file", { fileId, newPath }),
+  removeBrokenLinks: () =>
+    invoke<number>("library_remove_broken_links"),
   setFlags: (
     identityId: number,
     flags: {

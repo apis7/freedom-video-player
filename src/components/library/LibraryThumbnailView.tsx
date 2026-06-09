@@ -39,6 +39,11 @@ interface Props {
   ) => void;
   onPlay: (row: LibraryRow) => void;
   onContextMenu: (row: LibraryRow, x: number, y: number) => void;
+  /** Fire the same backend metadata-refresh that the right-click menu's
+   *  "Refresh metadata from TMDb" uses. Wired to the small refresh
+   *  badge that appears on the bottom-right of every thumbnail that
+   *  has neither a custom thumbnail nor a cached poster. */
+  onRefreshMetadata?: (row: LibraryRow) => void;
 }
 
 // Card width includes its outer gap; height = poster (228 = 152*1.5) +
@@ -70,6 +75,7 @@ export function LibraryThumbnailView({
   onPick,
   onPlay,
   onContextMenu,
+  onRefreshMetadata,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -242,6 +248,7 @@ export function LibraryThumbnailView({
     onPick,
     onPlay,
     onContextMenu,
+    onRefreshMetadata,
   };
 
   return (
@@ -295,6 +302,7 @@ interface CellData {
   onPick: Props["onPick"];
   onPlay: Props["onPlay"];
   onContextMenu: Props["onContextMenu"];
+  onRefreshMetadata?: Props["onRefreshMetadata"];
 }
 
 function Cell({
@@ -337,6 +345,7 @@ function Cell({
         onPick={data.onPick}
         onPlay={data.onPlay}
         onContextMenu={data.onContextMenu}
+        onRefreshMetadata={data.onRefreshMetadata}
       />
     </div>
   );
@@ -362,6 +371,7 @@ function ThumbCard({
   onPick,
   onPlay,
   onContextMenu,
+  onRefreshMetadata,
 }: {
   row: LibraryRow;
   selected: boolean;
@@ -386,6 +396,7 @@ function ThumbCard({
   onPick: Props["onPick"];
   onPlay: Props["onPlay"];
   onContextMenu: Props["onContextMenu"];
+  onRefreshMetadata?: Props["onRefreshMetadata"];
 }) {
   const id = row.identity;
   const f = row.file;
@@ -556,6 +567,29 @@ function ThumbCard({
             ⚠
           </div>
         )}
+        {/* Refresh-metadata shortcut. Shows on the bottom-right when
+            the identity has neither a custom thumbnail nor a cached
+            TMDb poster — these are the rows where the user most likely
+            wants to nudge a fresh search. Hidden once a poster lands. */}
+        {synthSeries == null &&
+          !id.custom_thumbnail_path &&
+          !id.poster_local_path &&
+          !row.file.is_missing &&
+          onRefreshMetadata && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRefreshMetadata(row);
+              }}
+              onDoubleClick={(e) => e.stopPropagation()}
+              className="absolute bottom-1 right-1 w-7 h-7 bg-fvp-bg/85 border border-fvp-accent/70 hover:bg-fvp-accent hover:text-white text-fvp-accent rounded-full flex items-center justify-center text-[14px] shadow transition-colors"
+              title="No poster — try a TMDb metadata refresh"
+              aria-label="Refresh metadata from TMDb"
+            >
+              ↻
+            </button>
+          )}
         {/* Episode-number badge — top-left of poster when scoped into
             a series. Uses "S.E" form when the parent computed labels
             (seasons on); falls back to bare position+1 otherwise. */}

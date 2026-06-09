@@ -1449,6 +1449,45 @@ export function LibraryMode() {
             }}
             rows={rows}
             onMembershipChanged={refreshItems}
+            onRescanLibrary={() => {
+              void libraryIpc.rescanAll().then(() =>
+                showToast("Rescan queued", "info", 1500),
+              );
+            }}
+            onRemoveBrokenLinks={() => {
+              const brokenCount = rows.filter((r) => r.file.is_missing).length;
+              if (brokenCount === 0) {
+                showToast("No broken links to remove.", "info", 2500);
+                return;
+              }
+              if (
+                !window.confirm(
+                  `Remove ${brokenCount} broken library entr${brokenCount === 1 ? "y" : "ies"} (files that no longer exist on disk)?\n\nNothing is deleted from disk — this only drops the library rows.`,
+                )
+              )
+                return;
+              void libraryIpc
+                .removeBrokenLinks()
+                .then((n) => {
+                  showToast(
+                    `Removed ${n} broken link${n === 1 ? "" : "s"}.`,
+                    "info",
+                    3000,
+                  );
+                  void refreshItems();
+                })
+                .catch((err) =>
+                  showToast(`Remove broken links failed: ${err}`, "error"),
+                );
+            }}
+            onOpenAnalytics={() => setAnalyticsOpen(true)}
+            onOpenFvpWebsite={() => {
+              void import("../utils/openExternalUrl").then((m) =>
+                m.openExternalUrl("https://freedomvideoplayer.com", {
+                  trustedHostSuffixes: ["freedomvideoplayer.com"],
+                }),
+              );
+            }}
           />
           <div className="flex-1 min-h-0">
             <LibraryFilters
@@ -1573,6 +1612,13 @@ export function LibraryMode() {
                 onContextMenu={(row, x, y) =>
                   setContextMenu({ x, y, items: buildItemMenu(row) })
                 }
+                onRefreshMetadata={(row) => {
+                  actlog(
+                    "thumb-view",
+                    `refresh-metadata badge identity_id=${row.identity.id}`,
+                  );
+                  void refreshManyMetadata([row.identity.id]);
+                }}
               />
             </div>
           ) : (

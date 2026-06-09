@@ -72,6 +72,10 @@ export function CollectionsSeriesPanel({
     null,
   );
   const [draftName, setDraftName] = useState("");
+  // Inline filter for the Series list. Survives collapsing/expanding
+  // the Series section (useState lifetime = panel mount). Cleared by
+  // the "×" button in the input itself.
+  const [seriesSearch, setSeriesSearch] = useState("");
   const [renaming, setRenaming] = useState<
     | null
     | { kind: "collection"; id: number; current: string }
@@ -496,6 +500,14 @@ export function CollectionsSeriesPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeScope.kind, activeScope.id]);
 
+  // Apply the inline series filter. Cheap O(N) — series count is
+  // typically small. Case-insensitive substring match on name.
+  const filteredSeries = (() => {
+    const needle = seriesSearch.trim().toLowerCase();
+    if (!needle) return series;
+    return series.filter((s) => s.name.toLowerCase().includes(needle));
+  })();
+
   // ── Render ──────────────────────────────────────────────────────
   return (
     <div className="px-3 py-2 border-b border-fvp-border bg-fvp-surface text-xs">
@@ -659,12 +671,37 @@ export function CollectionsSeriesPanel({
               }}
             />
           )}
+          {series.length > 0 && (
+            <div className="px-1 mb-1 relative">
+              <input
+                value={seriesSearch}
+                onChange={(e) => setSeriesSearch(e.target.value)}
+                placeholder="Filter series…"
+                className="w-full bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded pl-2 pr-6 py-0.5 text-[11px] text-fvp-text outline-none"
+              />
+              {seriesSearch && (
+                <button
+                  type="button"
+                  onClick={() => setSeriesSearch("")}
+                  title="Clear filter"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-fvp-muted hover:text-fvp-text text-[12px] leading-none"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          )}
           {series.length === 0 && creating !== "series" && (
             <div className="text-[10px] text-fvp-muted italic px-1">
               No series yet.
             </div>
           )}
-          {series.map((s) => (
+          {filteredSeries.length === 0 && seriesSearch.trim() !== "" && (
+            <div className="text-[10px] text-fvp-muted italic px-1 py-1">
+              No series match "{seriesSearch}".
+            </div>
+          )}
+          {filteredSeries.map((s) => (
             <ScopeRow
               key={`ser-${s.id}`}
               reorderKind="series"

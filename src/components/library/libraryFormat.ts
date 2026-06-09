@@ -38,3 +38,41 @@ export function isInResumeRange(progressMs: number, durationMs: number): boolean
   const pct = (progressMs / durationMs) * 100;
   return pct >= 5 && pct <= 90;
 }
+
+/** Parse a "WxH" string (e.g. "1920x816") into [w, h]. Returns null
+ *  when the string isn't in that form — falls back gracefully for
+ *  marketing labels like "720p" that haven't been re-probed yet. */
+export function parseResolution(s: string | null | undefined): [number, number] | null {
+  if (!s) return null;
+  const m = s.match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+  if (!m) return null;
+  const w = parseInt(m[1]!, 10);
+  const h = parseInt(m[2]!, 10);
+  if (!w || !h) return null;
+  return [w, h];
+}
+
+/** Render an aspect ratio for a resolution string. Snaps to common
+ *  named ratios when within 2% (1.85:1, 2.35:1, 16:9, 4:3, 21:9);
+ *  otherwise formats as a decimal "N.NN:1". Returns null when the
+ *  resolution string can't be parsed. */
+export function formatAspectRatio(resolution: string | null | undefined): string | null {
+  const dims = parseResolution(resolution);
+  if (!dims) return null;
+  const [w, h] = dims;
+  const r = w / h;
+  const named: Array<[number, string]> = [
+    [16 / 9, "16:9"],
+    [4 / 3, "4:3"],
+    [21 / 9, "21:9"],
+    [2.35, "2.35:1"],
+    [2.39, "2.39:1"],
+    [1.85, "1.85:1"],
+    [1.66, "1.66:1"],
+    [1, "1:1"],
+  ];
+  for (const [val, label] of named) {
+    if (Math.abs(r - val) / val < 0.02) return label;
+  }
+  return `${r.toFixed(2)}:1`;
+}

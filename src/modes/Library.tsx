@@ -35,6 +35,7 @@ import { ReconciliationDialog } from "../components/library/ReconciliationDialog
 import { DuplicateCatcherModal } from "../components/library/DuplicateCatcherModal";
 import { PossibleDuplicatesModal } from "../components/library/PossibleDuplicatesModal";
 import { GooglePosterModal } from "../components/library/GooglePosterModal";
+import { FmrSummaryBadge } from "../components/library/FmrSummaryBadge";
 import { AnalyticsDashboard } from "../components/library/AnalyticsDashboard";
 import { AutoDetectSeriesModal } from "../components/library/AutoDetectSeriesModal";
 import { BrokenFileModal } from "../components/library/BrokenFileModal";
@@ -689,67 +690,82 @@ export function LibraryMode() {
   // backend silently drops an enrichment (e.g. TMDb 404 with no
   // identity-updated emission).
   const refreshManyMetadata = useCallback(
-    async (identityIds: number[]) => {
+    async (
+      identityIds: number[],
+    ): Promise<{ completed: number; total: number }> => {
       const ids = Array.from(new Set(identityIds));
-      if (ids.length === 0) return;
+      if (ids.length === 0) return { completed: 0, total: 0 };
       const setBulkProgress = useAppStore.getState().setBulkProgress;
       if (ids.length === 1) {
         markRefreshing(ids[0]!);
         await libraryIpc.refreshMetadata(ids[0]!);
         showToast("Metadata refresh queued.", "info", 2000);
-        return;
+        // Single-shot: we don't await the identity-updated event for the
+        // FMR summary's sake; treat as completed for reporting.
+        return { completed: 1, total: 1 };
       }
-      const pending = new Set(ids);
-      setBulkProgress({
-        label: "Refreshing metadata from TMDb",
-        completed: 0,
-        total: ids.length,
-      });
-      for (const id of ids) markRefreshing(id);
-      const unlisten = await listen<{ identity_id: number }>(
-        "library:identity-updated",
-        (e) => {
-          const id = e.payload.identity_id;
-          if (!pending.has(id)) return;
-          pending.delete(id);
-          const completed = ids.length - pending.size;
-          if (pending.size === 0) {
-            setBulkProgress(null);
-            showToast(
-              `Refreshed metadata for ${ids.length} items.`,
-              "info",
-              3000,
-            );
-            unlisten();
-          } else {
-            setBulkProgress({
-              label: "Refreshing metadata from TMDb",
-              completed,
-              total: ids.length,
-            });
-          }
-        },
-      );
-      for (const id of ids) {
-        try {
-          await libraryIpc.refreshMetadata(id);
-        } catch {
-          // Soft-fail; the safety timeout below will eventually clear.
-        }
-      }
-      window.setTimeout(
-        () => {
-          if (pending.size === 0) return;
+      return await new Promise<{ completed: number; total: number }>((resolve) => {
+        const pending = new Set(ids);
+        setBulkProgress({
+          label: "Refreshing metadata from TMDb",
+          completed: 0,
+          total: ids.length,
+        });
+        for (const id of ids) markRefreshing(id);
+        let resolved = false;
+        const settle = () => {
+          if (resolved) return;
+          resolved = true;
           setBulkProgress(null);
-          unlisten();
-          showToast(
-            `Metadata refresh finished with ${pending.size} item${pending.size === 1 ? "" : "s"} unverified.`,
-            "warn",
-            5000,
-          );
-        },
-        Math.max(120_000, ids.length * 60_000),
-      );
+          resolve({ completed: ids.length - pending.size, total: ids.length });
+        };
+        const unlistenPromise = listen<{ identity_id: number }>(
+          "library:identity-updated",
+          (e) => {
+            const id = e.payload.identity_id;
+            if (!pending.has(id)) return;
+            pending.delete(id);
+            const completed = ids.length - pending.size;
+            if (pending.size === 0) {
+              showToast(
+                `Refreshed metadata for ${ids.length} items.`,
+                "info",
+                3000,
+              );
+              void unlistenPromise.then((u) => u());
+              settle();
+            } else {
+              setBulkProgress({
+                label: "Refreshing metadata from TMDb",
+                completed,
+                total: ids.length,
+              });
+            }
+          },
+        );
+        (async () => {
+          for (const id of ids) {
+            try {
+              await libraryIpc.refreshMetadata(id);
+            } catch {
+              // Soft-fail; safety timeout below catches stuck ones.
+            }
+          }
+        })();
+        window.setTimeout(
+          () => {
+            if (pending.size === 0) return;
+            void unlistenPromise.then((u) => u());
+            showToast(
+              `Metadata refresh finished with ${pending.size} item${pending.size === 1 ? "" : "s"} unverified.`,
+              "warn",
+              5000,
+            );
+            settle();
+          },
+          Math.max(120_000, ids.length * 60_000),
+        );
+      });
     },
     [showToast],
   );
@@ -760,9 +776,9 @@ export function LibraryMode() {
   // the user sees whichever updated most recently. (Acceptable
   // trade-off; both ARE running and both will finish.)
   const runProbeBackfill = useCallback(
-    async (fileIds: number[]) => {
+    async (fileIds: number[]): Promise<{ filled: number; total: number }> => {
       const ids = Array.from(new Set(fileIds));
-      if (ids.length === 0) return;
+      if (ids.length === 0) return { filled: 0, total: 0 };
       const setBulkProgress = useAppStore.getState().setBulkProgress;
       setBulkProgress({
         label: "Probing files for runtime / resolution",
@@ -775,8 +791,7 @@ export function LibraryMode() {
           const changed = await libraryIpc.probeFile(ids[i]!);
           if (changed) filled += 1;
         } catch {
-          // Soft-fail per-file; keep going. A flaky file shouldn't
-          // halt the rest of the backlog.
+          // Soft-fail per-file; keep going.
         }
         setBulkProgress({
           label: "Probing files for runtime / resolution",
@@ -791,6 +806,7 @@ export function LibraryMode() {
         "info",
         4000,
       );
+      return { filled, total: ids.length };
     },
     [refreshItems, showToast],
   );
@@ -1471,13 +1487,13 @@ export function LibraryMode() {
               ),
             );
             const probeTargets = rows
-              .filter(
-                (r) =>
-                  !r.file.is_missing &&
-                  (!r.file.resolution ||
-                    r.file.resolution.trim() === "" ||
-                    r.identity.duration_ms <= 0),
-              )
+              .filter((r) => {
+                if (r.file.is_missing) return false;
+                const res = r.file.resolution?.trim() ?? "";
+                const needRes = res === "" || !res.includes("x");
+                const needDur = r.identity.duration_ms <= 0;
+                return needRes || needDur;
+              })
               .map((r) => r.file.id);
             if (posterTargets.length === 0 && probeTargets.length === 0) {
               showToast(
@@ -1504,11 +1520,33 @@ export function LibraryMode() {
               )
             )
               return;
+            // Seed the bottom-right summary badge immediately so the
+            // user knows the tool fired. The two backfill helpers
+            // update poster / probe counts as they finish.
+            useAppStore.getState().setFmrSummary({
+              ranAtMs: Date.now(),
+              posterTotal: posterTargets.length,
+              posterCompleted: 0,
+              probeTotal: probeTargets.length,
+              probeFilled: 0,
+            });
             if (posterTargets.length > 0) {
-              void refreshManyMetadata(posterTargets);
+              void refreshManyMetadata(posterTargets).then((result) => {
+                const cur = useAppStore.getState().fmrSummary;
+                if (!cur) return;
+                useAppStore
+                  .getState()
+                  .setFmrSummary({ ...cur, posterCompleted: result.completed });
+              });
             }
             if (probeTargets.length > 0) {
-              void runProbeBackfill(probeTargets);
+              void runProbeBackfill(probeTargets).then((result) => {
+                const cur = useAppStore.getState().fmrSummary;
+                if (!cur) return;
+                useAppStore
+                  .getState()
+                  .setFmrSummary({ ...cur, probeFilled: result.filled });
+              });
             }
           }}
         />
@@ -1938,6 +1976,7 @@ export function LibraryMode() {
           onClose={() => setGooglePosterFor(null)}
         />
       )}
+      <FmrSummaryBadge />
       {analyticsOpen && (
         <AnalyticsDashboard
           rows={rows}

@@ -3465,7 +3465,11 @@ pub async fn library_probe_file(
         )
         .map_err(|e| format!("probe lookup: {e}"))?
     };
-    let need_res = current_res.as_deref().unwrap_or("").is_empty();
+    // Treat marketing-label resolutions ("720p", "1080p", "4K") as
+    // "needs probe" so the user gets raw WxH on the next Full
+    // Metadata Refresh. They're still displayed if probing fails.
+    let res_str = current_res.as_deref().unwrap_or("");
+    let need_res = res_str.is_empty() || !res_str.contains('x');
     let need_dur = current_dur <= 0;
     if !need_res && !need_dur {
         return Ok(false); // nothing to do — already populated
@@ -3523,20 +3527,11 @@ pub async fn library_probe_file(
             }
             std::thread::sleep(std::time::Duration::from_millis(120));
         }
+        // Store raw "WxH" so the details panel can compute + display
+        // the actual aspect ratio. Filename-parsed labels like "720p"
+        // get backfilled to real dimensions on the next probe pass.
         let res = if w > 0 && h > 0 {
-            // Snap to the marketing label that matches the height bucket.
-            // Users recognize "1080p" / "720p" / "4K" faster than raw
-            // dimensions, and it matches what filename parsing produces.
-            let label = match h {
-                h if h >= 2000 => "4K".to_string(),
-                h if h >= 1400 => "1440p".to_string(),
-                h if h >= 900 => "1080p".to_string(),
-                h if h >= 650 => "720p".to_string(),
-                h if h >= 400 => "480p".to_string(),
-                h if h >= 300 => "360p".to_string(),
-                _ => format!("{w}×{h}"),
-            };
-            Some(label)
+            Some(format!("{w}x{h}"))
         } else {
             None
         };
@@ -3550,9 +3545,15 @@ pub async fn library_probe_file(
     let conn = db.lock();
     if need_res {
         if let Some(r) = probed_res {
+            // Overwrite both empty AND filename-label values so
+            // marketing labels get upgraded to raw WxH. The
+            // `instr(resolution, 'x') = 0` clause skips upgrade
+            // when the column already holds a WxH form (don't
+            // overwrite legitimate values).
             let _ = conn.execute(
                 "UPDATE library_files SET resolution = ?1
-                 WHERE id = ?2 AND (resolution IS NULL OR resolution = '')",
+                 WHERE id = ?2
+                   AND (resolution IS NULL OR resolution = '' OR instr(resolution, 'x') = 0)",
                 params![r, file_id],
             );
             changed = true;

@@ -19,6 +19,7 @@ interface PersistedSettings {
   playerShowPathOnStart?: boolean;
   googleCseApiKey?: string;
   googleCseId?: string;
+  fmrSummary?: import("../state/types").FmrSummary | null;
 }
 
 /**
@@ -56,6 +57,7 @@ export function useSettingsPersist() {
             parsed.playerShowPathOnStart ?? s.playerShowPathOnStart,
           googleCseApiKey: parsed.googleCseApiKey ?? s.googleCseApiKey,
           googleCseId: parsed.googleCseId ?? s.googleCseId,
+          fmrSummary: parsed.fmrSummary ?? s.fmrSummary,
         }));
       }
     } catch {
@@ -80,7 +82,8 @@ export function useSettingsPersist() {
         state.playerShowProfileIcon !== prev.playerShowProfileIcon ||
         state.playerShowPathOnStart !== prev.playerShowPathOnStart ||
         state.googleCseApiKey !== prev.googleCseApiKey ||
-        state.googleCseId !== prev.googleCseId;
+        state.googleCseId !== prev.googleCseId ||
+        state.fmrSummary !== prev.fmrSummary;
       if (!relevantChanged) return;
 
       const payload: PersistedSettings = {
@@ -98,6 +101,7 @@ export function useSettingsPersist() {
         playerShowPathOnStart: state.playerShowPathOnStart,
         googleCseApiKey: state.googleCseApiKey,
         googleCseId: state.googleCseId,
+        fmrSummary: state.fmrSummary,
       };
       const json = JSON.stringify(payload);
       if (json === lastSerialized) return;

@@ -92,6 +92,7 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   playerShowPathOnStart: false,
   googleCseApiKey: "",
   googleCseId: "",
+  fmrSummary: null,
   snipFilterCategory: null,
   toast: null,
   bulkProgress: null,
@@ -417,6 +418,7 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   setPlayerShowPathOnStart: (v) => set({ playerShowPathOnStart: v }),
   setGoogleCseApiKey: (v) => set({ googleCseApiKey: v }),
   setGoogleCseId: (v) => set({ googleCseId: v }),
+  setFmrSummary: (s) => set({ fmrSummary: s }),
   setSnipFilterCategory: (c) => set({ snipFilterCategory: c }),
   showToast: (message, kind = "info", durationMs = 5000) =>
     set({

@@ -4,6 +4,26 @@ export type { FreeFile } from "../ipc/types";
 
 export type AppMode = "player" | "creator" | "library" | "settings";
 
+/** Persistent summary of a Full Metadata Refresh run. Drives the
+ *  bottom-right footer badge + the detail popup. Auto-clears 8h
+ *  after the run, or when the user explicitly dismisses. */
+export interface FmrSummary {
+  /** Unix ms — when the FMR tool was kicked off. The 8-hour
+   *  auto-dismiss clock runs from here, NOT from completion. */
+  ranAtMs: number;
+  /** Count of identities queued for TMDb metadata refresh. */
+  posterTotal: number;
+  /** Count of identities that finished the TMDb refresh (got the
+   *  identity-updated event before the safety timeout). */
+  posterCompleted: number;
+  /** Count of files queued for libmpv probe (missing res/runtime). */
+  probeTotal: number;
+  /** Count of files that actually had something filled in by the
+   *  probe pass — files where mpv couldn't read either property
+   *  count toward `probeTotal` but NOT `probeFilled`. */
+  probeFilled: number;
+}
+
 export interface DetectedProfile {
   path: string;
   profile: FreeFile;
@@ -69,6 +89,11 @@ export interface AppState {
   /** Google Custom Search Engine ID (cx parameter). Required alongside
    *  the API key — both must be set for the feature to activate. */
   googleCseId: string;
+  /** Persistent summary of the most-recent Full Metadata Refresh run.
+   *  Surfaced as a small clickable badge in the bottom-right footer.
+   *  Auto-clears 8h after `ranAtMs`, or when the user clicks "OK" in
+   *  the popup detail. Survives restarts via useSettingsPersist. */
+  fmrSummary: FmrSummary | null;
   /** Active category filter for the Snip rail. null = show all. */
   snipFilterCategory: string | null;
   /** One-at-a-time transient toast (info / warn / error). */
@@ -300,6 +325,7 @@ export interface AppActions {
   setPlayerShowPathOnStart: (v: boolean) => void;
   setGoogleCseApiKey: (v: string) => void;
   setGoogleCseId: (v: string) => void;
+  setFmrSummary: (s: FmrSummary | null) => void;
   setSnipFilterCategory: (c: string | null) => void;
   showToast: (message: string, kind?: Toast["kind"], durationMs?: number) => void;
   dismissToast: () => void;

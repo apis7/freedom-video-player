@@ -3,7 +3,7 @@ import type { LibraryRow } from "../../ipc/library";
 import { libraryIpc } from "../../ipc/library";
 import { useAppStore } from "../../state/appStore";
 import { LibraryPoster } from "./LibraryPoster";
-import { formatBytes, formatRuntime } from "./libraryFormat";
+import { formatAspectRatio, formatBytes, formatRuntime } from "./libraryFormat";
 import {
   displayTitle,
   looksLike3DInTitle,
@@ -272,6 +272,12 @@ function SingleRowPanel({
       <div className="p-3 border-b border-fvp-border space-y-2 text-[11px]">
         <Stat label="Runtime" value={formatRuntime(id.duration_ms)} />
         <Stat label="Resolution" value={f.resolution ?? "—"} />
+        {formatAspectRatio(f.resolution) && (
+          <Stat
+            label="Aspect ratio"
+            value={formatAspectRatio(f.resolution)!}
+          />
+        )}
         <Stat label="Size" value={formatBytes(f.size_bytes)} />
         {id.imdb_rating !== null && (
           <Stat label="TMDb rating" value={id.imdb_rating.toFixed(1)} />

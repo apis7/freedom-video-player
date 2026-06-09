@@ -61,6 +61,14 @@ export interface AppState {
    *  over the bottom of the video on play, but only when starting from
    *  the very beginning (<1s in). Default off. */
   playerShowPathOnStart: boolean;
+  /** Google Custom Search JSON API key (user-supplied). Enables the
+   *  "Find alt poster on Google" right-click action. Stored in
+   *  localStorage; treated as a personal secret (the user's own
+   *  Google Cloud project key). */
+  googleCseApiKey: string;
+  /** Google Custom Search Engine ID (cx parameter). Required alongside
+   *  the API key — both must be set for the feature to activate. */
+  googleCseId: string;
   /** Active category filter for the Snip rail. null = show all. */
   snipFilterCategory: string | null;
   /** One-at-a-time transient toast (info / warn / error). */
@@ -290,6 +298,8 @@ export interface AppActions {
   setAutosaveDraft: (v: boolean) => void;
   setPlayerShowProfileIcon: (v: boolean) => void;
   setPlayerShowPathOnStart: (v: boolean) => void;
+  setGoogleCseApiKey: (v: string) => void;
+  setGoogleCseId: (v: string) => void;
   setSnipFilterCategory: (c: string | null) => void;
   showToast: (message: string, kind?: Toast["kind"], durationMs?: number) => void;
   dismissToast: () => void;

@@ -17,6 +17,8 @@ interface PersistedSettings {
   authorHandle?: string | null;
   playerShowProfileIcon?: boolean;
   playerShowPathOnStart?: boolean;
+  googleCseApiKey?: string;
+  googleCseId?: string;
 }
 
 /**
@@ -52,6 +54,8 @@ export function useSettingsPersist() {
             parsed.playerShowProfileIcon ?? s.playerShowProfileIcon,
           playerShowPathOnStart:
             parsed.playerShowPathOnStart ?? s.playerShowPathOnStart,
+          googleCseApiKey: parsed.googleCseApiKey ?? s.googleCseApiKey,
+          googleCseId: parsed.googleCseId ?? s.googleCseId,
         }));
       }
     } catch {
@@ -74,7 +78,9 @@ export function useSettingsPersist() {
         state.dontShowBeepShortenWarning !== prev.dontShowBeepShortenWarning ||
         state.authorHandle !== prev.authorHandle ||
         state.playerShowProfileIcon !== prev.playerShowProfileIcon ||
-        state.playerShowPathOnStart !== prev.playerShowPathOnStart;
+        state.playerShowPathOnStart !== prev.playerShowPathOnStart ||
+        state.googleCseApiKey !== prev.googleCseApiKey ||
+        state.googleCseId !== prev.googleCseId;
       if (!relevantChanged) return;
 
       const payload: PersistedSettings = {
@@ -90,6 +96,8 @@ export function useSettingsPersist() {
         authorHandle: state.authorHandle,
         playerShowProfileIcon: state.playerShowProfileIcon,
         playerShowPathOnStart: state.playerShowPathOnStart,
+        googleCseApiKey: state.googleCseApiKey,
+        googleCseId: state.googleCseId,
       };
       const json = JSON.stringify(payload);
       if (json === lastSerialized) return;

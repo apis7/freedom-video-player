@@ -146,6 +146,12 @@ export const libraryIpc = {
     invoke<FuzzyDupPair[]>("library_find_possible_duplicates"),
   renameFile: (fileId: number, newBasename: string) =>
     invoke<string>("library_rename_file", { fileId, newBasename }),
+  probeFile: (fileId: number) =>
+    invoke<boolean>("library_probe_file", { fileId }),
+  googleImageSearch: (query: string, apiKey: string, cx: string) =>
+    invoke<GoogleImage[]>("library_google_image_search", { query, apiKey, cx }),
+  applyImageUrl: (identityId: number, imageUrl: string) =>
+    invoke<string>("library_apply_image_url", { identityId, imageUrl }),
   setFlags: (
     identityId: number,
     flags: {
@@ -351,6 +357,15 @@ export interface FuzzyDupPair {
   b: { row: LibraryRow };
   /** 0..=100, rounded. Used to sort high-confidence pairs first. */
   score: number;
+}
+
+export interface GoogleImage {
+  url: string;
+  thumb_url: string;
+  width: number;
+  height: number;
+  mime: string;
+  source_page: string;
 }
 
 export interface AnalyticsDailyBucket {

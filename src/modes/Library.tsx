@@ -34,6 +34,7 @@ import { PinPromptModal } from "../components/library/PinPromptModal";
 import { ReconciliationDialog } from "../components/library/ReconciliationDialog";
 import { DuplicateCatcherModal } from "../components/library/DuplicateCatcherModal";
 import { PossibleDuplicatesModal } from "../components/library/PossibleDuplicatesModal";
+import { GooglePosterModal } from "../components/library/GooglePosterModal";
 import { AnalyticsDashboard } from "../components/library/AnalyticsDashboard";
 import { AutoDetectSeriesModal } from "../components/library/AutoDetectSeriesModal";
 import { BrokenFileModal } from "../components/library/BrokenFileModal";
@@ -148,6 +149,7 @@ export function LibraryMode() {
   const [activePairIdx, setActivePairIdx] = useState<number | null>(null);
   const [duplicateClusters, setDuplicateClusters] = useState<DuplicateCluster[] | null>(null);
   const [possibleDupPairs, setPossibleDupPairs] = useState<FuzzyDupPair[] | null>(null);
+  const [googlePosterFor, setGooglePosterFor] = useState<LibraryRow | null>(null);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [autoSeriesOpen, setAutoSeriesOpen] = useState(false);
   const [autoSeasonsOpen, setAutoSeasonsOpen] = useState<{
@@ -752,6 +754,47 @@ export function LibraryMode() {
     [showToast],
   );
 
+  // Backfill probe runner. Serial; throttles itself between items so a
+  // big batch doesn't saturate the SMB pipe. Uses the same bottom
+  // BulkProgressBar slot as refreshManyMetadata — if both run at once
+  // the user sees whichever updated most recently. (Acceptable
+  // trade-off; both ARE running and both will finish.)
+  const runProbeBackfill = useCallback(
+    async (fileIds: number[]) => {
+      const ids = Array.from(new Set(fileIds));
+      if (ids.length === 0) return;
+      const setBulkProgress = useAppStore.getState().setBulkProgress;
+      setBulkProgress({
+        label: "Probing files for runtime / resolution",
+        completed: 0,
+        total: ids.length,
+      });
+      let filled = 0;
+      for (let i = 0; i < ids.length; i += 1) {
+        try {
+          const changed = await libraryIpc.probeFile(ids[i]!);
+          if (changed) filled += 1;
+        } catch {
+          // Soft-fail per-file; keep going. A flaky file shouldn't
+          // halt the rest of the backlog.
+        }
+        setBulkProgress({
+          label: "Probing files for runtime / resolution",
+          completed: i + 1,
+          total: ids.length,
+        });
+      }
+      setBulkProgress(null);
+      void refreshItems();
+      showToast(
+        `Probe done — ${filled} of ${ids.length} got new runtime/resolution data.`,
+        "info",
+        4000,
+      );
+    },
+    [refreshItems, showToast],
+  );
+
   const buildItemMenu = useCallback(
     (row: LibraryRow): MenuItem[] => {
       // Synthetic series rows get a minimal menu — most per-file
@@ -948,6 +991,26 @@ export function LibraryMode() {
             });
           },
         },
+        ...(useAppStore.getState().googleCseApiKey &&
+        useAppStore.getState().googleCseId
+          ? [
+              {
+                kind: "item" as const,
+                label: "Find alt poster on Google…",
+                disabled: isMulti,
+                title: isMulti
+                  ? singleOnlyTitle
+                  : "Search Google for poster art and pick one to use as a custom thumbnail (uses your configured API key)",
+                onClick: () => {
+                  actlog(
+                    "menu",
+                    `google-poster identity_id=${row.identity.id}`,
+                  );
+                  setGooglePosterFor(row);
+                },
+              },
+            ]
+          : []),
         { kind: "separator" },
         {
           kind: "item",
@@ -1395,30 +1458,58 @@ export function LibraryMode() {
           }}
           onRunFullMetadataRefresh={() => {
             actlog("tools", "run full metadata refresh");
-            const targets = rows
+            const posterTargets = Array.from(
+              new Set(
+                rows
+                  .filter(
+                    (r) =>
+                      !r.identity.poster_local_path &&
+                      !r.identity.custom_thumbnail_path &&
+                      !r.file.is_missing,
+                  )
+                  .map((r) => r.identity.id),
+              ),
+            );
+            const probeTargets = rows
               .filter(
                 (r) =>
-                  !r.identity.poster_local_path &&
-                  !r.identity.custom_thumbnail_path &&
-                  !r.file.is_missing,
+                  !r.file.is_missing &&
+                  (!r.file.resolution ||
+                    r.file.resolution.trim() === "" ||
+                    r.identity.duration_ms <= 0),
               )
-              .map((r) => r.identity.id);
-            const unique = Array.from(new Set(targets));
-            if (unique.length === 0) {
+              .map((r) => r.file.id);
+            if (posterTargets.length === 0 && probeTargets.length === 0) {
               showToast(
-                "Every item already has a poster — nothing to refresh.",
+                "Every item already has a poster, runtime, and resolution — nothing to do.",
                 "info",
                 3500,
               );
               return;
             }
+            const summary: string[] = [];
+            if (posterTargets.length > 0) {
+              summary.push(
+                `${posterTargets.length} item${posterTargets.length === 1 ? "" : "s"} for TMDb metadata refresh (posters / title / cast / etc.)`,
+              );
+            }
+            if (probeTargets.length > 0) {
+              summary.push(
+                `${probeTargets.length} file${probeTargets.length === 1 ? "" : "s"} for technical probe (missing runtime or resolution)`,
+              );
+            }
             if (
               !window.confirm(
-                `Queue a TMDb metadata refresh for ${unique.length} item${unique.length === 1 ? "" : "s"} without a poster?\n\nThe backend throttles to one request at a time. Progress shows at the bottom of the window. You can keep using the app while it runs.`,
+                `Full Metadata Refresh will queue:\n\n• ${summary.join("\n• ")}\n\nBoth pass through one-at-a-time throttles. Progress shows at the bottom. You can keep using the app while it runs.`,
               )
             )
               return;
-            void refreshManyMetadata(unique);
+            if (posterTargets.length > 0) {
+              void refreshManyMetadata(posterTargets);
+            }
+            if (probeTargets.length > 0) {
+              void runProbeBackfill(probeTargets);
+            }
           }}
         />
         <Divider />
@@ -1837,6 +1928,14 @@ export function LibraryMode() {
           pairs={possibleDupPairs}
           onResolved={refreshItems}
           onClose={() => setPossibleDupPairs(null)}
+        />
+      )}
+
+      {googlePosterFor && (
+        <GooglePosterModal
+          row={googlePosterFor}
+          onResolved={refreshItems}
+          onClose={() => setGooglePosterFor(null)}
         />
       )}
       {analyticsOpen && (

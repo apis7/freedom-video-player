@@ -3246,6 +3246,336 @@ pub fn library_rename_file(
     Ok(new_path_str)
 }
 
+/// One image result from a Google Custom Search image query.
+#[derive(serde::Serialize, Clone)]
+pub struct GoogleImage {
+    /// Full-resolution image URL — what we download when the user picks
+    /// it as a custom thumbnail.
+    pub url: String,
+    /// Thumbnail (small) URL for the picker grid. Google returns these
+    /// pre-resized so we don't have to fetch every full-res image just
+    /// to render the chooser.
+    pub thumb_url: String,
+    pub width: u32,
+    pub height: u32,
+    pub mime: String,
+    pub source_page: String,
+}
+
+/// Google Custom Search JSON API — image search. Caller passes a
+/// free-form query (typically "<title> <year> movie poster"). API key
+/// + Search Engine ID come from the user's Settings; both must be set
+/// or we return an error the UI surfaces as "configure in Settings".
+///
+/// Free quota: 100 queries / day per Google Cloud project. The user
+/// will hit this on a heavy cleanup pass — we expose the upstream
+/// error verbatim so they know it's a quota issue rather than ours.
+#[tauri::command]
+pub async fn library_google_image_search(
+    query: String,
+    api_key: String,
+    cx: String,
+) -> Result<Vec<GoogleImage>, String> {
+    if api_key.trim().is_empty() || cx.trim().is_empty() {
+        return Err("Google API key + Search Engine ID not configured.".into());
+    }
+    let trimmed_q = query.trim();
+    if trimmed_q.is_empty() {
+        return Err("Empty search query.".into());
+    }
+    let q_encoded = url_encode(trimmed_q);
+    let url = format!(
+        "https://customsearch.googleapis.com/customsearch/v1?key={key}&cx={cx}&q={q}&searchType=image&num=10&safe=off",
+        key = url_encode(&api_key),
+        cx = url_encode(&cx),
+        q = q_encoded,
+    );
+    crate::log!("library:google", "image search: {trimmed_q}");
+    let resp = tauri::async_runtime::spawn_blocking(move || {
+        ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(15))
+            .call()
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?;
+    let body = match resp {
+        Ok(r) => r.into_string().map_err(|e| format!("read body: {e}"))?,
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            return Err(format!("Google CSE HTTP {code}: {body}"));
+        }
+        Err(e) => return Err(format!("HTTP error: {e}")),
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("parse: {e} (body: {body})"))?;
+    let items = parsed
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let out: Vec<GoogleImage> = items
+        .into_iter()
+        .filter_map(|it| {
+            let url = it.get("link")?.as_str()?.to_string();
+            let image = it.get("image")?;
+            let thumb_url = image.get("thumbnailLink")?.as_str()?.to_string();
+            let width = image.get("width")?.as_u64().unwrap_or(0) as u32;
+            let height = image.get("height")?.as_u64().unwrap_or(0) as u32;
+            let mime = it
+                .get("mime")
+                .and_then(|m| m.as_str())
+                .unwrap_or("image/jpeg")
+                .to_string();
+            let source_page = it
+                .get("image")
+                .and_then(|i| i.get("contextLink"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(GoogleImage {
+                url,
+                thumb_url,
+                width,
+                height,
+                mime,
+                source_page,
+            })
+        })
+        .collect();
+    crate::log!("library:google", "image search → {} result(s)", out.len());
+    Ok(out)
+}
+
+/// Minimal URL encoder — only handles characters Google CSE actually
+/// cares about. Avoids pulling in a full urlencoding crate for two
+/// callers' worth of usage.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Download an arbitrary image URL, save it into the poster-cache
+/// directory, and set it as the identity's custom_thumbnail_path so
+/// it takes precedence over the TMDb poster. Returns the cached path.
+/// Used by the Google CSE "Find alt poster" picker — same plumbing as
+/// the existing custom-thumbnail upload, just sourced from the web.
+#[tauri::command]
+pub async fn library_apply_image_url(
+    db: State<'_, LibraryDb>,
+    app: AppHandle,
+    identity_id: i64,
+    image_url: String,
+) -> Result<String, String> {
+    if !image_url.starts_with("https://") && !image_url.starts_with("http://") {
+        return Err("URL must be http(s).".into());
+    }
+    let url_clone = image_url.clone();
+    let body: Vec<u8> = tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let resp = ureq::get(&url_clone)
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+            .map_err(|e| format!("download {url_clone}: {e}"))?;
+        let mut bytes: Vec<u8> = Vec::new();
+        resp.into_reader()
+            .take(20 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("read body: {e}"))?;
+        Ok::<Vec<u8>, String>(bytes)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
+    if body.is_empty() {
+        return Err("downloaded zero bytes".into());
+    }
+    // Save into the existing poster-cache directory with a content-hash
+    // filename so re-downloading the same image is idempotent.
+    let cache_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?
+        .join("poster-cache");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("create cache dir: {e}"))?;
+    let hash = blake3::hash(&body);
+    // Sniff extension from MIME-by-magic. Default jpg.
+    let ext = if body.starts_with(b"\x89PNG") {
+        "png"
+    } else if body.starts_with(b"GIF8") {
+        "gif"
+    } else if body.len() > 12 && &body[0..4] == b"RIFF" && &body[8..12] == b"WEBP" {
+        "webp"
+    } else {
+        "jpg"
+    };
+    let filename = format!("google_{}.{ext}", hash.to_hex());
+    let dest = cache_dir.join(&filename);
+    std::fs::write(&dest, &body).map_err(|e| format!("write: {e}"))?;
+    let dest_str = dest
+        .to_str()
+        .ok_or_else(|| "cache path not utf-8".to_string())?
+        .to_string();
+    let now = now_unix();
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE library_identities
+            SET custom_thumbnail_path = ?1, manual_thumbnail = 1, last_updated_at = ?2
+            WHERE id = ?3",
+        params![dest_str, now, identity_id],
+    )
+    .map_err(|e| format!("update thumbnail: {e}"))?;
+    crate::log!(
+        "library",
+        "apply_image_url: identity {identity_id} ← {filename} ({} bytes)",
+        body.len()
+    );
+    Ok(dest_str)
+}
+
+/// Probe one file via libmpv to read its actual resolution +
+/// container-reported duration. Used by the Full Metadata Refresh
+/// backfill: many old library rows have NULL resolution (the filename
+/// didn't contain "1080p" etc.) and 0 duration (fingerprint never ran
+/// or was interrupted). Touch each file once and fill in what's
+/// missing — never overwrites an existing value, so user-curated rows
+/// stay sticky.
+///
+/// Per-file: ~1-3s over SMB. Caller throttles by serial invocation.
+#[tauri::command]
+pub async fn library_probe_file(
+    db: State<'_, LibraryDb>,
+    file_id: i64,
+) -> Result<bool, String> {
+    let (path, identity_id, current_res, current_dur): (String, i64, Option<String>, i64) = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT f.path, f.identity_id, f.resolution, i.duration_ms
+             FROM library_files f JOIN library_identities i ON i.id = f.identity_id
+             WHERE f.id = ?1",
+            params![file_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|e| format!("probe lookup: {e}"))?
+    };
+    let need_res = current_res.as_deref().unwrap_or("").is_empty();
+    let need_dur = current_dur <= 0;
+    if !need_res && !need_dur {
+        return Ok(false); // nothing to do — already populated
+    }
+    if !std::path::Path::new(&path).exists() {
+        return Ok(false);
+    }
+    // Transient libmpv handle. Same pattern fingerprint::compute uses
+    // — vo=null, ao=null, paused — so we can read width/height/duration
+    // without paying for decode setup.
+    let path_clone = path.clone();
+    let result: Result<(Option<String>, u64), String> = tauri::async_runtime::spawn_blocking(move || {
+        use libmpv2::Mpv;
+        let mpv = Mpv::with_initializer(|init| {
+            init.set_option("vo", "null")?;
+            init.set_option("ao", "null")?;
+            init.set_option("pause", true)?;
+            Ok(())
+        })
+        .map_err(|e| format!("libmpv init: {e:?}"))?;
+        let _ = mpv.set_property("msg-level", "all=fatal");
+        let handle = mpv.ctx.as_ptr();
+        // Reuse the cmd_array helper from playback module's pattern.
+        let cstrs = ["loadfile", path_clone.as_str()]
+            .iter()
+            .map(|s| std::ffi::CString::new(*s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("CString: {e}"))?;
+        let mut ptrs: Vec<*const std::os::raw::c_char> =
+            cstrs.iter().map(|s| s.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        let code = unsafe { libmpv2_sys::mpv_command(handle, ptrs.as_ptr() as *mut _) };
+        if code != 0 {
+            return Err(format!("loadfile {path_clone}: code={code}"));
+        }
+        // Poll for properties to populate. Resolution + duration usually
+        // land within ~500ms even over SMB. Cap at 8s to handle slow
+        // hosts; bail early once both are set.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut w: i64 = 0;
+        let mut h: i64 = 0;
+        let mut dur: f64 = 0.0;
+        while std::time::Instant::now() < deadline {
+            if w == 0 {
+                w = mpv.get_property::<i64>("dwidth").unwrap_or(0);
+            }
+            if h == 0 {
+                h = mpv.get_property::<i64>("dheight").unwrap_or(0);
+            }
+            if dur <= 0.0 {
+                dur = mpv.get_property::<f64>("duration").unwrap_or(0.0);
+            }
+            if w > 0 && h > 0 && dur > 0.0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        let res = if w > 0 && h > 0 {
+            // Snap to the marketing label that matches the height bucket.
+            // Users recognize "1080p" / "720p" / "4K" faster than raw
+            // dimensions, and it matches what filename parsing produces.
+            let label = match h {
+                h if h >= 2000 => "4K".to_string(),
+                h if h >= 1400 => "1440p".to_string(),
+                h if h >= 900 => "1080p".to_string(),
+                h if h >= 650 => "720p".to_string(),
+                h if h >= 400 => "480p".to_string(),
+                h if h >= 300 => "360p".to_string(),
+                _ => format!("{w}×{h}"),
+            };
+            Some(label)
+        } else {
+            None
+        };
+        let duration_ms = (dur * 1000.0) as u64;
+        Ok((res, duration_ms))
+    })
+    .await
+    .map_err(|e| format!("probe task join: {e}"))?;
+    let (probed_res, probed_dur) = result?;
+    let mut changed = false;
+    let conn = db.lock();
+    if need_res {
+        if let Some(r) = probed_res {
+            let _ = conn.execute(
+                "UPDATE library_files SET resolution = ?1
+                 WHERE id = ?2 AND (resolution IS NULL OR resolution = '')",
+                params![r, file_id],
+            );
+            changed = true;
+        }
+    }
+    if need_dur && probed_dur > 0 {
+        let _ = conn.execute(
+            "UPDATE library_identities SET duration_ms = ?1, last_updated_at = ?2
+             WHERE id = ?3 AND (duration_ms = 0 OR duration_ms IS NULL)",
+            params![probed_dur as i64, now_unix(), identity_id],
+        );
+        changed = true;
+    }
+    if changed {
+        crate::log!(
+            "library",
+            "probe_file id={file_id}: filled missing res/dur (res_filled={}, dur_filled={})",
+            need_res, need_dur
+        );
+    }
+    Ok(changed)
+}
+
 /// Bulk-remove every file row currently flagged is_missing=1. Use case:
 /// user manually deleted a bunch of files outside FVP (or via FVP's
 /// trash flow followed by a rescan that confirmed they're gone), wants

@@ -90,6 +90,8 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   autosaveDraft: true,
   playerShowProfileIcon: false,
   playerShowPathOnStart: false,
+  googleCseApiKey: "",
+  googleCseId: "",
   snipFilterCategory: null,
   toast: null,
   bulkProgress: null,
@@ -413,6 +415,8 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   setAutosaveDraft: (v) => set({ autosaveDraft: v }),
   setPlayerShowProfileIcon: (v) => set({ playerShowProfileIcon: v }),
   setPlayerShowPathOnStart: (v) => set({ playerShowPathOnStart: v }),
+  setGoogleCseApiKey: (v) => set({ googleCseApiKey: v }),
+  setGoogleCseId: (v) => set({ googleCseId: v }),
   setSnipFilterCategory: (c) => set({ snipFilterCategory: c }),
   showToast: (message, kind = "info", durationMs = 5000) =>
     set({

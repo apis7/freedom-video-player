@@ -73,6 +73,20 @@ export function SettingsMode() {
         <LibrarySettingsPanel />
       </Section>
 
+      <Section title="Google Image Search (optional)">
+        <p className="text-[11px] text-fvp-muted mb-2">
+          For the "Find alt poster on Google" right-click action in
+          Library mode. Lets you search the web for posters when TMDb
+          doesn't have what you want (obscure films, fan art, personal
+          recordings). Both fields must be set for the feature to
+          activate. Get a free key at{" "}
+          <code className="text-fvp-text">console.cloud.google.com</code>{" "}
+          (Custom Search API + a Custom Search Engine with "image search"
+          enabled). Free tier: 100 queries / day.
+        </p>
+        <GoogleCseFields />
+      </Section>
+
       <Section title="AutoSnip — subtitle language">
         <p className="text-[11px] text-fvp-muted mb-2">
           Which language wordlist AutoSnip uses when scanning subtitles. Edit
@@ -425,6 +439,70 @@ function AuthorHandleField() {
           <code className="font-mono text-fvp-text">{handle}</code>
         ) : (
           <em className="text-fvp-muted">anonymous</em>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GoogleCseFields() {
+  const apiKey = useAppStore((s) => s.googleCseApiKey);
+  const cx = useAppStore((s) => s.googleCseId);
+  const [apiLocal, setApiLocal] = useState(apiKey);
+  const [cxLocal, setCxLocal] = useState(cx);
+  const [revealKey, setRevealKey] = useState(false);
+  useEffect(() => setApiLocal(apiKey), [apiKey]);
+  useEffect(() => setCxLocal(cx), [cx]);
+  return (
+    <div className="flex flex-col gap-3">
+      <label className="flex flex-col gap-1">
+        <span className="text-[11px] text-fvp-muted">API key</span>
+        <div className="flex gap-2">
+          <input
+            type={revealKey ? "text" : "password"}
+            value={apiLocal}
+            onChange={(e) => setApiLocal(e.target.value)}
+            onBlur={() => {
+              if (apiLocal.trim() !== apiKey) {
+                useAppStore.setState({ googleCseApiKey: apiLocal.trim() });
+              }
+            }}
+            placeholder="AIzaSy…"
+            className="flex-1 bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded px-3 py-1.5 text-sm text-fvp-text outline-none font-mono"
+          />
+          <button
+            type="button"
+            onClick={() => setRevealKey((v) => !v)}
+            className="px-2 py-1 bg-fvp-bg border border-fvp-border hover:border-fvp-muted text-xs text-fvp-muted rounded"
+          >
+            {revealKey ? "Hide" : "Show"}
+          </button>
+        </div>
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[11px] text-fvp-muted">
+          Search Engine ID (cx)
+        </span>
+        <input
+          value={cxLocal}
+          onChange={(e) => setCxLocal(e.target.value)}
+          onBlur={() => {
+            if (cxLocal.trim() !== cx) {
+              useAppStore.setState({ googleCseId: cxLocal.trim() });
+            }
+          }}
+          placeholder="e.g. a12b3c4d5e6f7g8h9"
+          className="bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded px-3 py-1.5 text-sm text-fvp-text outline-none font-mono"
+        />
+      </label>
+      <div className="text-[10px] text-fvp-muted">
+        Status:{" "}
+        {apiKey && cx ? (
+          <span className="text-fvp-ok">configured — feature enabled</span>
+        ) : (
+          <span className="text-fvp-warn">
+            not configured — right-click menu item will be hidden
+          </span>
         )}
       </div>
     </div>

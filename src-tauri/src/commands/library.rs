@@ -1142,8 +1142,9 @@ pub fn library_add_to_series(
 ) -> Result<(), String> {
     crate::log!(
         "library",
-        "add_to_series series_id={series_id} adding {} identities",
-        identity_ids.len()
+        "add_to_series series_id={series_id} adding {} identities: {:?}",
+        identity_ids.len(),
+        identity_ids
     );
     let mut conn = db.lock();
     let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
@@ -1235,21 +1236,56 @@ pub fn library_remove_files(
     let mut conn = db.lock();
     let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
     for id in &file_ids {
+        // Look up identity + path for richer logging — when the
+        // delete fails it's almost always because the row isn't in
+        // library_files anymore (a rescan reaped it, or the user
+        // already deleted it via another path). Logging the lookup
+        // result tells us which.
+        let lookup: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT identity_id, path FROM library_files WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
         match tx.execute("DELETE FROM library_files WHERE id = ?1", params![id]) {
-            Ok(n) if n > 0 => summary.removed += 1,
-            Ok(_) => summary
-                .failed
-                .push(format!("file {id} not in library")),
-            Err(e) => summary.failed.push(format!("file {id}: {e}")),
+            Ok(n) if n > 0 => {
+                summary.removed += 1;
+                if let Some((identity_id, path)) = lookup {
+                    crate::log!(
+                        "library",
+                        "remove_files: deleted row file_id={id} identity_id={identity_id} path=\"{path}\""
+                    );
+                }
+            }
+            Ok(_) => {
+                crate::log!(
+                    "library",
+                    "remove_files: FAILED file_id={id} — not in library (already deleted? rescan reaped it?)"
+                );
+                summary.failed.push(format!("file {id} not in library"));
+            }
+            Err(e) => {
+                crate::log!("library", "remove_files: FAILED file_id={id}: {e}");
+                summary.failed.push(format!("file {id}: {e}"));
+            }
         }
     }
     // Drop orphan identities so their tags / collection memberships /
     // series memberships are cleaned up too (FK cascade handles those).
-    let _ = tx.execute(
-        "DELETE FROM library_identities
-         WHERE id NOT IN (SELECT DISTINCT identity_id FROM library_files)",
-        [],
-    );
+    let orphans = tx
+        .execute(
+            "DELETE FROM library_identities
+             WHERE id NOT IN (SELECT DISTINCT identity_id FROM library_files)",
+            [],
+        )
+        .unwrap_or(0);
+    if orphans > 0 {
+        crate::log!(
+            "library",
+            "remove_files: cleaned up {orphans} orphan identit(ies) (cascade dropped their tags/series/collection links)"
+        );
+    }
     tx.commit().map_err(|e| format!("commit: {e}"))?;
     Ok(summary)
 }

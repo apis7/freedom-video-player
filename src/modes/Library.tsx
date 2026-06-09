@@ -1661,9 +1661,32 @@ export function LibraryMode() {
             refreshToken={listRefreshToken}
             activeScope={activeScope}
             onScopeChange={(s) => {
+              // Diagnostic: log scope + member count so we can see at
+              // a glance which identities the new scope thinks belong
+              // to it. Catches "I scoped into series 25, why does it
+              // show Transformers?" — the log will show whether the
+              // backend actually thinks Transformers is in series 25.
+              let memberCount = 0;
+              let memberIds: number[] = [];
+              if (s.kind === "series" && s.id != null) {
+                const members = rows.filter(
+                  (r) => r.series?.series_id === s.id,
+                );
+                memberCount = members.length;
+                memberIds = members.map((r) => r.identity.id);
+              } else if (s.kind === "collection" && s.id != null) {
+                const members = rows.filter((r) =>
+                  r.collections.some((c) => c.collection_id === s.id),
+                );
+                memberCount = members.length;
+                memberIds = members.map((r) => r.identity.id);
+              }
               actlog(
                 "library",
-                `scope-change → kind=${s.kind} id=${s.id ?? "null"}`,
+                `scope-change → kind=${s.kind} id=${s.id ?? "null"} name="${s.name ?? ""}" member_count=${memberCount}` +
+                  (memberIds.length > 0 && memberIds.length <= 30
+                    ? ` identity_ids=[${memberIds.join(",")}]`
+                    : ""),
               );
               setFiltersExpanded(false);
               setActiveScope(s);
@@ -1709,6 +1732,30 @@ export function LibraryMode() {
                   trustedHostSuffixes: ["freedomvideoplayer.com"],
                 }),
               );
+            }}
+            onRefreshScopeMetadata={(kind, id) => {
+              const memberRows = rows.filter((r) => {
+                if (kind === "collection") {
+                  return r.collections.some((c) => c.collection_id === id);
+                }
+                return r.series?.series_id === id;
+              });
+              const identityIds = Array.from(
+                new Set(memberRows.map((r) => r.identity.id)),
+              );
+              if (identityIds.length === 0) {
+                showToast(
+                  "No members to refresh in this scope.",
+                  "warn",
+                  3000,
+                );
+                return;
+              }
+              actlog(
+                "scope-refresh",
+                `kind=${kind} id=${id} count=${identityIds.length}`,
+              );
+              void refreshManyMetadata(identityIds);
             }}
             onRescanScope={(kind, id) => {
               // Resolve the unique set of watched-folder roots that own

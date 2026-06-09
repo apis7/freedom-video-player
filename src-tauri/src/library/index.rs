@@ -253,6 +253,51 @@ pub fn index_file(
             id
         }
         None => {
+            // Before inserting, check whether this identity ALREADY has
+            // file rows pointing at it — and especially whether any of
+            // those are flagged is_missing. That combination is the
+            // signature of a MOVE: the file's content is unchanged
+            // (same fingerprint → same identity), but it now lives at
+            // a different path. Without explicit cleanup the user ends
+            // up with both the old (missing) and new (good) rows side-
+            // by-side, which is the source of the duplicate-rows-after-
+            // move complaints. Logging it loudly here lets the user
+            // (and us) see what the indexer just inferred — and gives
+            // a foundation for an opt-in "auto-cleanup moved files"
+            // tool down the line.
+            let existing_for_identity: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM library_files WHERE identity_id = ?1",
+                    params![identity_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let missing_for_identity: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM library_files WHERE identity_id = ?1 AND is_missing = 1",
+                    params![identity_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if existing_for_identity > 0 {
+                if missing_for_identity > 0 {
+                    crate::log!(
+                        "library:scan",
+                        "MOVE-LIKELY: inserting new file row at \"{}\" for identity {identity_id} \
+                         which has {existing_for_identity} existing row(s) (of which {missing_for_identity} flagged is_missing). \
+                         The is_missing row(s) likely point at the file's previous path.",
+                        path_str
+                    );
+                } else {
+                    crate::log!(
+                        "library:scan",
+                        "DUP-ROW: inserting new file row at \"{}\" for identity {identity_id} \
+                         which already has {existing_for_identity} existing row(s) (all present on disk). \
+                         User has the file at multiple paths.",
+                        path_str
+                    );
+                }
+            }
             conn.execute(
                 "INSERT INTO library_files (
                     path, watched_folder_id, identity_id, size_bytes,
@@ -572,14 +617,19 @@ pub fn mark_folder_files_missing(db: &LibraryDb, folder_id: i64) -> Result<(), S
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    conn.execute(
-        "UPDATE library_files
-            SET is_missing = 1,
-                missing_since = COALESCE(missing_since, ?2)
-            WHERE watched_folder_id = ?1",
-        params![folder_id, now],
-    )
-    .map_err(|e| format!("mark missing: {e}"))?;
+    let affected = conn
+        .execute(
+            "UPDATE library_files
+                SET is_missing = 1,
+                    missing_since = COALESCE(missing_since, ?2)
+                WHERE watched_folder_id = ?1",
+            params![folder_id, now],
+        )
+        .map_err(|e| format!("mark missing: {e}"))?;
+    crate::log!(
+        "library:scan",
+        "mark_folder_files_missing: flagged {affected} row(s) in folder {folder_id} as is_missing=1"
+    );
     Ok(())
 }
 

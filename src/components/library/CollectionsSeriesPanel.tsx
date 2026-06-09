@@ -44,6 +44,10 @@ interface Props {
    *  Caller resolves the unique set of watched-folder roots that own
    *  any member identity and re-enqueues each. */
   onRescanScope?: (kind: "collection" | "series", id: number) => void;
+  /** Right-click → "Refresh metadata for all members" on a collection
+   *  or series. Caller collects every identity_id in the scope and
+   *  fires the bulk refreshManyMetadata helper. */
+  onRefreshScopeMetadata?: (kind: "collection" | "series", id: number) => void;
 }
 
 const VIDEO_EXTENSIONS = [
@@ -73,6 +77,7 @@ export function CollectionsSeriesPanel({
   onOpenAnalytics,
   onOpenFvpWebsite,
   onRescanScope,
+  onRefreshScopeMetadata,
 }: Props) {
   const showToast = useAppStore((s) => s.showToast);
   const [collections, setCollections] = useState<CollectionRow[]>([]);
@@ -119,24 +124,31 @@ export function CollectionsSeriesPanel({
   }, [reload, refreshToken]);
 
   // ── Create flows ────────────────────────────────────────────────
+  // After creating a collection / series, immediately scope to it so
+  // the user lands inside the new group ready to add items — saves
+  // them a second click to find it in the sidebar.
   const createCollection = async () => {
-    if (!draftName.trim()) return;
+    const name = draftName.trim();
+    if (!name) return;
     try {
-      await libraryIpc.createCollection(draftName);
+      const newId = await libraryIpc.createCollection(name);
       setDraftName("");
       setCreating(null);
       await reload();
+      onScopeChange({ kind: "collection", id: newId, name });
     } catch (err) {
       showToast(`Create failed: ${err}`, "error");
     }
   };
   const createSeries = async () => {
-    if (!draftName.trim()) return;
+    const name = draftName.trim();
+    if (!name) return;
     try {
-      await libraryIpc.createSeries(draftName, false);
+      const newId = await libraryIpc.createSeries(name, false);
       setDraftName("");
       setCreating(null);
       await reload();
+      onScopeChange({ kind: "series", id: newId, name });
     } catch (err) {
       showToast(`Create failed: ${err}`, "error");
     }
@@ -365,6 +377,13 @@ export function CollectionsSeriesPanel({
         disabled: !onRescanScope,
         onClick: () => onRescanScope?.("collection", c.id),
       },
+      {
+        kind: "item",
+        label: "Refresh metadata for all members",
+        title: "Queue a TMDb metadata refresh for every movie in this collection.",
+        disabled: !onRefreshScopeMetadata,
+        onClick: () => onRefreshScopeMetadata?.("collection", c.id),
+      },
       { kind: "separator" },
       {
         kind: "item",
@@ -421,6 +440,13 @@ export function CollectionsSeriesPanel({
         title: "Re-walk every watched-folder root that contains an episode from this series.",
         disabled: !onRescanScope,
         onClick: () => onRescanScope?.("series", s.id),
+      },
+      {
+        kind: "item",
+        label: "Refresh metadata for all members",
+        title: "Queue a TMDb metadata refresh for every episode in this series.",
+        disabled: !onRefreshScopeMetadata,
+        onClick: () => onRefreshScopeMetadata?.("series", s.id),
       },
       { kind: "separator" },
       {

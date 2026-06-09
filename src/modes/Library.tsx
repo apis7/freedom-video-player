@@ -2145,6 +2145,7 @@ export function LibraryMode() {
             });
             void refreshItems();
           }}
+          onClose={() => setActivePairIdx(null)}
         />
       )}
 

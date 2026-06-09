@@ -15,6 +15,10 @@ import { openVideoPath } from "../../utils/openFileFlow";
 interface Props {
   pair: ProbablePair;
   onResolved: () => void;
+  /** Close the whole reconciliation flow without snoozing or
+   *  advancing. Used by the title-bar "×" button. Optional so older
+   *  callers fall back to the snooze-and-advance behavior. */
+  onClose?: () => void;
 }
 
 /** Per directive §3 cluster taxonomy. Derived from the pair signals. */
@@ -63,7 +67,7 @@ function keeperScore(row: LibraryRow): number {
  * newer file in our display order). User can flip the direction at any
  * time before confirming.
  */
-export function ReconciliationDialog({ pair, onResolved }: Props) {
+export function ReconciliationDialog({ pair, onResolved, onClose }: Props) {
   const inc = useAppStore((s) => s.incrementOpenModalCount);
   const dec = useAppStore((s) => s.decrementOpenModalCount);
   const showToast = useAppStore((s) => s.showToast);
@@ -213,10 +217,10 @@ export function ReconciliationDialog({ pair, onResolved }: Props) {
             </div>
           </div>
           <button
-            onClick={() => void snoozeAndAdvance()}
+            onClick={() => (onClose ? onClose() : void snoozeAndAdvance())}
             disabled={busy}
             className="text-fvp-muted hover:text-fvp-text text-lg leading-none disabled:opacity-50"
-            title="Decide later (snoozes for 24 hours)"
+            title="Close (doesn't snooze — pair stays in the queue)"
           >
             ×
           </button>

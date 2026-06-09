@@ -671,7 +671,10 @@ export function CollectionsSeriesPanel({
               }}
             />
           )}
-          {series.length > 0 && (
+          {/* Filter input only shown when the list is long enough that
+              scanning by eye gets tedious (10+). For shorter lists the
+              search bar would just be UI noise. */}
+          {series.length >= 10 && (
             <div className="px-1 mb-1 relative">
               <input
                 value={seriesSearch}

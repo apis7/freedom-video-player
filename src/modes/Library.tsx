@@ -131,6 +131,16 @@ export function LibraryMode() {
     scanned: number;
     total: number;
   } | null>(null);
+  // Folder IDs that currently have an active scan in flight. While a
+  // folder is being scanned every row in it is transiently flagged
+  // is_missing=1 by mark_folder_files_missing, then re-flagged as the
+  // walker finds each file. If the user happens to look at the library
+  // during that window every poster would render a red "broken" X. We
+  // suppress the broken-X visuals for any file whose watched_folder_id
+  // is in this set until the scan-done event arrives.
+  const [scanningFolderIds, setScanningFolderIds] = useState<Set<number>>(
+    () => new Set(),
+  );
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -306,15 +316,37 @@ export function LibraryMode() {
       if (cancelled) un();
       else unlisteners.push(un);
     };
+    listen<{ folder_id: number }>("library:scan-started", (e) => {
+      setScanningFolderIds((prev) => {
+        const next = new Set(prev);
+        next.add(e.payload.folder_id);
+        return next;
+      });
+    }).then(guard);
     listen<ScanProgressEvent>("library:scan-progress", (e) =>
       setScanProgress(e.payload),
     ).then(guard);
-    listen("library:scan-cancelled", () => {
+    listen<{ folder_id?: number }>("library:scan-cancelled", (e) => {
       setScanProgress(null);
+      if (typeof e.payload.folder_id === "number") {
+        const id = e.payload.folder_id;
+        setScanningFolderIds((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
       showToast("Scan cancelled.", "info", 2500);
     }).then(guard);
     listen<ScanDoneEvent>("library:scan-done", (e) => {
       setScanProgress(null);
+      setScanningFolderIds((prev) => {
+        if (!prev.has(e.payload.folder_id)) return prev;
+        const next = new Set(prev);
+        next.delete(e.payload.folder_id);
+        return next;
+      });
       if (e.payload.new_items > 0) {
         showToast(
           `Indexed ${e.payload.new_items} new item${e.payload.new_items === 1 ? "" : "s"}`,
@@ -525,11 +557,44 @@ export function LibraryMode() {
           filteredSynthetics.push(synth);
         }
       }
-      // Already-filtered — skip the final applyFilters pass.
-      return [...filteredStandalones, ...filteredSynthetics];
+      // Merge standalone movies and series tiles into a single list
+      // sorted by title (case-insensitive). Earlier behavior appended
+      // every series tile at the END so an "X-Men" series synth
+      // landed after every standalone, even ones whose title sorted
+      // later than "X". Now series tiles interleave alphabetically
+      // with the rest, matching the column view's natural sort.
+      const merged = [...filteredStandalones, ...filteredSynthetics];
+      const titleKey = (r: LibraryRow): string => {
+        if (r.__synthetic_series) return r.__synthetic_series.series_name;
+        return r.identity.movie_title ?? r.file.path;
+      };
+      merged.sort((a, b) =>
+        titleKey(a).localeCompare(titleKey(b), undefined, {
+          sensitivity: "base",
+        }),
+      );
+      return merged;
     }
     return applyFilters(pool, filters, familyViewOn);
   }, [rows, filters, familyViewOn, activeScope]);
+
+  // Visual-only mask: while a folder is being scanned, every row in
+  // it is transiently marked is_missing=1 by the orchestrator before
+  // the walker un-flags each found file. Without this layer the user
+  // sees every poster get a red broken-file X for the duration of
+  // the scan. We clear is_missing here so the views never paint that
+  // false-positive. The underlying DB row is unchanged; the next
+  // scan-done event triggers a refreshItems that fetches the
+  // post-scan truth.
+  const maskedFilteredRows = useMemo(() => {
+    if (scanningFolderIds.size === 0) return filteredRows;
+    return filteredRows.map((r) =>
+      r.file.is_missing && scanningFolderIds.has(r.file.watched_folder_id)
+        ? { ...r, file: { ...r.file, is_missing: false } }
+        : r,
+    );
+  }, [filteredRows, scanningFolderIds]);
+
   // Cache row index for fast shift-range pick.
   const filteredIndex = useMemo(() => {
     const map = new Map<number, number>();
@@ -616,8 +681,9 @@ export function LibraryMode() {
     return { labels, groups, active: true, hasSeasons: true };
   }, [activeScope, filteredRows]);
   const primaryRow = useMemo(
-    () => filteredRows.find((r) => r.file.id === primarySelectedId) ?? null,
-    [filteredRows, primarySelectedId],
+    () =>
+      maskedFilteredRows.find((r) => r.file.id === primarySelectedId) ?? null,
+    [maskedFilteredRows, primarySelectedId],
   );
 
   const handlePick = useCallback(
@@ -1744,7 +1810,7 @@ export function LibraryMode() {
           ) : prefs.viewMode === "thumbnail" ? (
             <div className="flex-1 min-h-0">
               <LibraryThumbnailView
-                rows={filteredRows}
+                rows={maskedFilteredRows}
                 selectedFileIds={selectedFileIds}
                 primarySelectedId={primarySelectedId}
                 refreshingIdentityIds={refreshingIdentityIds}
@@ -1798,7 +1864,7 @@ export function LibraryMode() {
           ) : (
             <div className="flex-1 min-h-0">
               <LibraryColumnView
-                rows={filteredRows}
+                rows={maskedFilteredRows}
                 selectedFileIds={selectedFileIds}
                 primarySelectedId={primarySelectedId}
                 refreshingIdentityIds={refreshingIdentityIds}
@@ -1878,7 +1944,7 @@ export function LibraryMode() {
 
         <LibraryDetailsPanel
           row={primaryRow}
-          selectedRows={filteredRows.filter((r) =>
+          selectedRows={maskedFilteredRows.filter((r) =>
             selectedFileIds.has(r.file.id),
           )}
           onRefreshList={() => void refreshItems()}

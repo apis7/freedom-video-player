@@ -152,6 +152,12 @@ export const libraryIpc = {
     invoke<GoogleImage[]>("library_google_image_search", { query, apiKey, cx }),
   applyImageUrl: (identityId: number, imageUrl: string) =>
     invoke<string>("library_apply_image_url", { identityId, imageUrl }),
+  setScopeNff: (kind: "collection" | "series", id: number, value: boolean) =>
+    invoke<void>("library_set_scope_nff", {
+      kind,
+      id,
+      nonFamilyFriendly: value,
+    }),
   setFlags: (
     identityId: number,
     flags: {
@@ -314,6 +320,7 @@ export interface CollectionRow {
   name: string;
   created_at: number;
   item_count: number;
+  non_family_friendly: boolean;
 }
 
 export interface SeriesRow {
@@ -323,6 +330,7 @@ export interface SeriesRow {
   created_at: number;
   item_count: number;
   watched_count: number;
+  non_family_friendly: boolean;
 }
 
 export interface DeleteSummary {

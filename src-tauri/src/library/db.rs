@@ -289,6 +289,17 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE library_identities ADD COLUMN is_extended INTEGER NOT NULL DEFAULT 0;
     "#,
+    // ── v11 — Non-family-friendly flag on collections + series ─────────
+    //
+    // Collection / series-level NFF flag. When set, the whole group
+    // hides in Family Mode (independent of its members). A group is
+    // ALSO effectively hidden when EVERY member identity is flagged
+    // non_family_friendly — that's computed at query time, not
+    // stored, since it's a derived signal.
+    r#"
+    ALTER TABLE library_collections ADD COLUMN non_family_friendly INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE library_series ADD COLUMN non_family_friendly INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Thread-safe handle around a single `Connection`. SQLite's serialized

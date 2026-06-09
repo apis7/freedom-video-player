@@ -49,8 +49,8 @@ export function MovieRouletteModal({ fileIds, poolRows, familyViewOn, onClose }:
   // Seed the reel with up to ~30 rows from the candidate pool so the
   // animation has visible variety.
   useEffect(() => {
-    reelOptions.current = pickReelOptions(poolRows, 30);
-  }, [poolRows]);
+    reelOptions.current = pickReelOptions(poolRows, 30, familyViewOn);
+  }, [poolRows, familyViewOn]);
 
   // Kick the backend pick + run the spin animation in parallel.
   useEffect(() => {
@@ -119,7 +119,7 @@ export function MovieRouletteModal({ fileIds, poolRows, familyViewOn, onClose }:
     setStage("spinning");
     setWinner(null);
     setReelIdx(0);
-    reelOptions.current = pickReelOptions(poolRows, 30);
+    reelOptions.current = pickReelOptions(poolRows, 30, familyViewOn);
     // Re-fire the effect by remounting via key (parent owns mount) — but
     // since we own the spin, just reset state and re-run the kickoff via
     // another effect would be heavier. Simplest: re-mount this modal.
@@ -251,10 +251,20 @@ function ReelFace({ row }: { row: LibraryRow | null }) {
   );
 }
 
-function pickReelOptions(rows: LibraryRow[], count: number): LibraryRow[] {
-  if (rows.length === 0) return [];
-  const shuffled = [...rows].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.min(count, rows.length));
+function pickReelOptions(
+  rows: LibraryRow[],
+  count: number,
+  familyViewOn: boolean,
+): LibraryRow[] {
+  // In Family Mode, drop NFF rows from the reel — even though the
+  // BACKEND pick already excludes them, the flashing preview would
+  // surface those posters mid-spin and defeat the whole point.
+  const eligible = familyViewOn
+    ? rows.filter((r) => !r.identity.non_family_friendly)
+    : rows;
+  if (eligible.length === 0) return [];
+  const shuffled = [...eligible].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(count, eligible.length));
 }
 
 /**

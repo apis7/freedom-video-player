@@ -161,6 +161,7 @@ export function LibraryMode() {
   const [duplicateClusters, setDuplicateClusters] = useState<DuplicateCluster[] | null>(null);
   const [possibleDupPairs, setPossibleDupPairs] = useState<FuzzyDupPair[] | null>(null);
   const [googlePosterFor, setGooglePosterFor] = useState<LibraryRow | null>(null);
+  const [familyExplainerOpen, setFamilyExplainerOpen] = useState(false);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [autoSeriesOpen, setAutoSeriesOpen] = useState(false);
   const [autoSeasonsOpen, setAutoSeasonsOpen] = useState<{
@@ -260,7 +261,7 @@ export function LibraryMode() {
   // Tools → "Look for upgrades" when they want to review pairs.
 
   const familyViewOn = librarySettings?.family_view_enabled ?? false;
-  const familyViewAllowed = librarySettings?.family_view_allowed ?? false;
+  void (librarySettings?.family_view_allowed ?? false); // kept for now — may re-introduce
 
   const refreshFolders = useCallback(async () => {
     try {
@@ -1434,6 +1435,49 @@ export function LibraryMode() {
             <path d="M3 17v-4h4" />
           </svg>
         </button>
+        {/* Family Mode toggle. Always visible. PIN required to flip
+            OFF once enabled — PIN setup is in Settings. Clicking when
+            no PIN configured surfaces the explainer modal. */}
+        <button
+          onClick={() => {
+            if (!librarySettings?.has_pin) {
+              setFamilyExplainerOpen(true);
+              return;
+            }
+            if (!familyViewOn) {
+              void libraryIpc
+                .setFamilyViewEnabled(true)
+                .then(reloadSettings)
+                .catch((err) => showToast(`${err}`, "error"));
+            } else {
+              setPinPrompt({
+                reason: "Family Mode is on. Enter the PIN to turn it off.",
+                onSuccess: () => {
+                  void libraryIpc
+                    .setFamilyViewEnabled(false)
+                    .then(reloadSettings)
+                    .catch((err) => showToast(`${err}`, "error"));
+                },
+              });
+            }
+          }}
+          className={
+            "px-2 py-1 rounded cursor-pointer border " +
+            (familyViewOn
+              ? "bg-fvp-ok/20 border-fvp-ok text-fvp-ok"
+              : "border-fvp-border text-fvp-muted hover:text-fvp-text")
+          }
+          title={
+            familyViewOn
+              ? "Family Mode ON — non-family-friendly titles hidden. PIN required to disable."
+              : librarySettings?.has_pin
+                ? "Turn Family Mode on (hides non-family-friendly titles; PIN required to turn off)"
+                : "Family Mode — click to learn how to set up"
+          }
+          aria-label="Family Mode"
+        >
+          {familyViewOn ? "🛡 Family Mode" : "🛡"}
+        </button>
         <button
           onClick={() => {
             actlog("header", "open Roulette");
@@ -1591,43 +1635,8 @@ export function LibraryMode() {
           mode={prefs.viewMode}
           onChange={(m) => setPrefs((p) => ({ ...p, viewMode: m }))}
         />
-        {familyViewAllowed && (
-          <button
-            onClick={() => {
-              if (!familyViewOn) {
-                // Turning ON: no PIN required (just enables a hide-list).
-                void libraryIpc
-                  .setFamilyViewEnabled(true)
-                  .then(reloadSettings)
-                  .catch((err) => showToast(`${err}`, "error"));
-              } else {
-                // Turning OFF: PIN-gated per directive.
-                setPinPrompt({
-                  reason: "Family View is on. Enter the PIN to turn it off.",
-                  onSuccess: () => {
-                    void libraryIpc
-                      .setFamilyViewEnabled(false)
-                      .then(reloadSettings)
-                      .catch((err) => showToast(`${err}`, "error"));
-                  },
-                });
-              }
-            }}
-            className={
-              "px-2 py-1 rounded cursor-pointer border " +
-              (familyViewOn
-                ? "bg-fvp-ok/20 border-fvp-ok text-fvp-ok"
-                : "border-fvp-border text-fvp-muted hover:text-fvp-text")
-            }
-            title={
-              familyViewOn
-                ? "Family View ON — non-family-friendly titles hidden. PIN required to disable."
-                : "Turn Family View on"
-            }
-          >
-            {familyViewOn ? "🛡 Family View" : "Family View"}
-          </button>
-        )}
+        {/* Old "Family View" button removed — folded into the header
+            icon between Rescan and Roulette so it's always visible. */}
         <div className="ml-auto flex items-center gap-3">
           {scanProgress && (
             <ScanProgressBadge progress={scanProgress} />
@@ -1659,6 +1668,7 @@ export function LibraryMode() {
             }}
             rows={rows}
             onMembershipChanged={refreshItems}
+            familyViewOn={familyViewOn}
             onRescanLibrary={() => {
               void libraryIpc.rescanAll().then(() =>
                 showToast("Rescan queued", "info", 1500),
@@ -1697,6 +1707,41 @@ export function LibraryMode() {
                   trustedHostSuffixes: ["freedomvideoplayer.com"],
                 }),
               );
+            }}
+            onRescanScope={(kind, id) => {
+              // Resolve the unique set of watched-folder roots that own
+              // a member identity, then re-enqueue each. The orchestrator
+              // serializes them.
+              const memberRows = rows.filter((r) => {
+                if (kind === "collection") {
+                  return r.collections.some((c) => c.collection_id === id);
+                }
+                return r.series?.series_id === id;
+              });
+              const folderIds = Array.from(
+                new Set(memberRows.map((r) => r.file.watched_folder_id)),
+              );
+              if (folderIds.length === 0) {
+                showToast(
+                  "No watched folders to rescan for this scope.",
+                  "warn",
+                  3000,
+                );
+                return;
+              }
+              void Promise.all(
+                folderIds.map((fid) => libraryIpc.rescanFolder(fid)),
+              )
+                .then(() =>
+                  showToast(
+                    `Rescan queued for ${folderIds.length} folder${folderIds.length === 1 ? "" : "s"}.`,
+                    "info",
+                    2500,
+                  ),
+                )
+                .catch((err) =>
+                  showToast(`Rescan failed: ${err}`, "error", 4000),
+                );
             }}
           />
           <div className="flex-1 min-h-0">
@@ -1928,18 +1973,44 @@ export function LibraryMode() {
         refreshToken={listRefreshToken}
       />
 
-      {rouletteOpen && (
-        <MovieRouletteModal
-          fileIds={Array.from(selectedFileIds)}
-          poolRows={
-            selectedFileIds.size > 0
-              ? rows.filter((r) => selectedFileIds.has(r.file.id))
-              : filteredRows
-          }
-          familyViewOn={familyViewOn}
-          onClose={() => setRouletteOpen(false)}
-        />
-      )}
+      {rouletteOpen && (() => {
+        // Pool resolution priority:
+        //   1. User has a selection → only those files
+        //   2. Active scope is a series or collection → only that
+        //      group's members (so spinning inside "Indiana Jones"
+        //      can't surprise the user with The Terminator)
+        //   3. Fallback: the whole library (already-filtered for the
+        //      view, which includes Family Mode masking)
+        let poolRows: LibraryRow[];
+        if (selectedFileIds.size > 0) {
+          poolRows = rows.filter((r) => selectedFileIds.has(r.file.id));
+        } else if (
+          activeScope.kind === "series" &&
+          activeScope.id != null
+        ) {
+          poolRows = rows.filter(
+            (r) => r.series?.series_id === activeScope.id,
+          );
+        } else if (
+          activeScope.kind === "collection" &&
+          activeScope.id != null
+        ) {
+          poolRows = rows.filter((r) =>
+            r.collections.some((c) => c.collection_id === activeScope.id),
+          );
+        } else {
+          poolRows = filteredRows;
+        }
+        const poolFileIds = poolRows.map((r) => r.file.id);
+        return (
+          <MovieRouletteModal
+            fileIds={poolFileIds}
+            poolRows={poolRows}
+            familyViewOn={familyViewOn}
+            onClose={() => setRouletteOpen(false)}
+          />
+        );
+      })()}
 
       {pinPrompt && (
         <PinPromptModal
@@ -2013,6 +2084,16 @@ export function LibraryMode() {
         />
       )}
       <FmrSummaryBadge />
+
+      {familyExplainerOpen && (
+        <FamilyModeExplainerModal
+          onClose={() => setFamilyExplainerOpen(false)}
+          onGoToSettings={() => {
+            setFamilyExplainerOpen(false);
+            useAppStore.setState({ mode: "settings" });
+          }}
+        />
+      )}
       {analyticsOpen && (
         <AnalyticsDashboard
           rows={rows}
@@ -2503,6 +2584,77 @@ function ScanProgressBadge({
       >
         ✕ Cancel
       </button>
+    </div>
+  );
+}
+
+/** Themed popup shown when the user clicks the Family Mode icon but
+ *  hasn't set up a PIN yet. Explains what Family Mode does and routes
+ *  them to Settings to configure one. Brand-consistent with the other
+ *  modals (BrokenFileModal, GooglePosterModal, etc.). */
+function FamilyModeExplainerModal({
+  onClose,
+  onGoToSettings,
+}: {
+  onClose: () => void;
+  onGoToSettings: () => void;
+}) {
+  const inc = useAppStore((s) => s.incrementOpenModalCount);
+  const dec = useAppStore((s) => s.decrementOpenModalCount);
+  useEffect(() => {
+    inc();
+    return () => dec();
+  }, [inc, dec]);
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 z-[70] flex items-center justify-center"
+      onClick={onClose}
+    >
+      <div
+        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl max-w-md w-full"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="px-5 py-3 border-b border-fvp-border flex items-center gap-3">
+          <div className="w-9 h-9 rounded-full bg-fvp-ok/20 border border-fvp-ok/60 flex items-center justify-center text-fvp-ok text-xl">
+            🛡
+          </div>
+          <div className="text-sm font-semibold text-fvp-text">
+            Family Mode — set up a PIN first
+          </div>
+        </header>
+        <div className="px-5 py-4 text-xs text-fvp-text space-y-2">
+          <p>
+            <strong>Family Mode</strong> hides every movie, collection,
+            and series flagged "Non-family-friendly" — kids browsing the
+            library only see what's appropriate. Filters, search,
+            Roulette, Suggestions, and the per-scope views (All Movies,
+            Collections, Series) all respect it.
+          </p>
+          <p>
+            Once turned on, a PIN is required to turn it off. That's the
+            only way to make sure Family Mode actually sticks.
+          </p>
+          <p className="text-fvp-muted">
+            You haven't set a PIN yet — without one Family Mode would be
+            trivially defeated. Set a 4-digit PIN in Settings → Library
+            → Family Mode, then come back here to enable it.
+          </p>
+        </div>
+        <footer className="px-5 py-3 border-t border-fvp-border flex gap-2 justify-end">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs text-fvp-text hover:bg-fvp-surface2 rounded"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onGoToSettings}
+            className="px-4 py-1.5 text-xs bg-fvp-accent text-white rounded hover:opacity-90"
+          >
+            Open Settings
+          </button>
+        </footer>
+      </div>
     </div>
   );
 }

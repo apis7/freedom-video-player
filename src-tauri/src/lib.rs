@@ -204,6 +204,7 @@ pub fn run() {
             commands::library::library_probe_file,
             commands::library::library_google_image_search,
             commands::library::library_apply_image_url,
+            commands::library::library_set_scope_nff,
             commands::library::library_list_folders,
             commands::library::library_set_folder_scan_on_startup,
             commands::library::library_rescan_all,

@@ -1,10 +1,49 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../state/appStore";
 import { playback, profileIpc } from "../ipc";
+import { libraryIpc } from "../ipc/library";
 import { loadDraftForFile } from "../hooks/useAutosaveDraft";
 import { hasUnsavedWork, confirmDiscardUnsaved } from "./unsavedWork";
 import { refreshSubtitleTracks } from "./addSubtitleFlow";
 import { pushRecentFile } from "./recentFiles";
+
+/** Best-effort: ensure the file's parent directory is a watched
+ *  library folder, so the indexer picks it up. Idempotent — does
+ *  nothing if the path is already inside an existing watched folder
+ *  (recursive or not). Silent on failure; the library is a
+ *  convenience feature, not the playback path. */
+async function ensureFileIndexed(filePath: string): Promise<void> {
+  try {
+    const folders = await libraryIpc.listFolders();
+    const normPath = filePath.replace(/\\/g, "/").toLowerCase();
+    for (const f of folders) {
+      const root = f.path.replace(/\\/g, "/").toLowerCase();
+      const rootSep = root.endsWith("/") ? root : `${root}/`;
+      if (normPath.startsWith(rootSep)) {
+        if (f.recursive) return; // already covered
+        // Non-recursive: only covers direct children. Compare parent.
+        const parentEnd = normPath.lastIndexOf("/");
+        const parent = parentEnd > 0 ? normPath.slice(0, parentEnd) : normPath;
+        if (parent === root) return;
+      }
+    }
+    // Not covered → add the file's parent as a non-recursive folder
+    // so we don't accidentally suck in a whole drive of unrelated
+    // movies. The user explicitly opted in by opening this file.
+    const lastSep = Math.max(
+      filePath.lastIndexOf("\\"),
+      filePath.lastIndexOf("/"),
+    );
+    if (lastSep <= 0) return;
+    const parentDir = filePath.slice(0, lastSep);
+    await libraryIpc.addFolder(parentDir, false);
+    console.log(`[fvp:open] auto-added library folder: ${parentDir}`);
+  } catch (err) {
+    // Non-fatal; user might have library disabled or the path is
+    // unreadable. Just log.
+    console.log(`[fvp:open] ensureFileIndexed skipped: ${err}`);
+  }
+}
 
 const VIDEO_EXTENSIONS = [
   "mkv", "mp4", "avi", "mov", "m4v", "webm", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts",
@@ -206,7 +245,18 @@ export async function openVideoPath(selected: string): Promise<void> {
   try {
     await playback.openFile(selected);
     useAppStore.setState({ currentFile: selected, playing: true });
+    // Auto-switch to Player Mode the moment a video actually loads.
+    // Covers: cli-open-file (double-click in Explorer), drag-drop,
+    // recent-files menu, BrokenFileModal recovery, etc. Library /
+    // Creator stay reachable from the title bar.
+    useAppStore.setState({ mode: "player" });
     pushRecentFile(selected);
+    // Auto-add the played file's parent directory to the library
+    // index. Runs regardless of `libraryEnabled` — the user might be
+    // in Player-only mode but still wants the library to learn the
+    // file exists. Skips when the path is already inside an existing
+    // watched folder.
+    void ensureFileIndexed(selected);
     setTimeout(() => {
       // Belt-and-suspenders — clear loading if no event fired by now.
       if (useAppStore.getState().currentFile === selected) {

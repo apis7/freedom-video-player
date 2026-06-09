@@ -68,21 +68,40 @@ export function PlayerMode() {
     return () => unlisten?.();
   }, []);
 
-  // Left-click on the libmpv HWND → toggle pause/play in Player Mode.
-  // The click lands on libmpv's native child window, never reaches the
-  // DOM, so we rely on the Rust WNDPROC subclass forwarding it as the
-  // `video-click` Tauri event. Suppressed while any modal is open so
-  // a backdrop click doesn't also pause playback.
+  // Left-click on the libmpv HWND. Single → toggle pause/play;
+  // double → toggle fullscreen. Backend emits one video-click per
+  // mouse-up; we debounce a second click that arrives within the
+  // double-click window (250ms) and re-interpret it as a double.
+  //
+  // The DELAY is intentional — without it the first click would fire
+  // pause AND the second click would fire pause again before our
+  // double-click handler ever runs (visually: pause flicker on every
+  // double-click → fullscreen). 250 ms is the Windows default.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let pendingSingle: ReturnType<typeof setTimeout> | null = null;
+    const DOUBLE_MS = 250;
     listen("video-click", () => {
       if (useAppStore.getState().openModalCount > 0) return;
       if (!useAppStore.getState().currentFile) return;
-      void playerController.togglePause();
+      if (pendingSingle !== null) {
+        // Second click within the window → it's a double.
+        clearTimeout(pendingSingle);
+        pendingSingle = null;
+        void playerController.toggleFullscreen();
+        return;
+      }
+      pendingSingle = setTimeout(() => {
+        pendingSingle = null;
+        void playerController.togglePause();
+      }, DOUBLE_MS);
     }).then((fn) => {
       unlisten = fn;
     });
-    return () => unlisten?.();
+    return () => {
+      if (pendingSingle !== null) clearTimeout(pendingSingle);
+      unlisten?.();
+    };
   }, []);
 
   const showTransport = !fullscreen || chromeVisible;

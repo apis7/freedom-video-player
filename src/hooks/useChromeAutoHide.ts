@@ -2,7 +2,13 @@ import { useEffect } from "react";
 import { useAppStore } from "../state/appStore";
 import { fvpWindow } from "../ipc";
 
-const HIDE_DELAY_MS = 6000;
+/** Delay before auto-hiding chrome AFTER no activity. The first
+ *  fullscreen-entry uses a faster delay so the transition feels
+ *  intentional (paired with the FullscreenTransitionIndicator); any
+ *  later "wake on mouse" uses the longer delay so the user has time
+ *  to actually use the controls. */
+const INITIAL_HIDE_DELAY_MS = 1700;
+const WAKE_HIDE_DELAY_MS = 4000;
 
 /**
  * In fullscreen Player Mode, auto-hides all chrome (TitleBar, MenuBar, StatusBar,
@@ -25,20 +31,23 @@ export function useChromeAutoHide() {
 
     let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const scheduleHide = () => {
+    const scheduleHide = (delay: number) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         useAppStore.setState({ chromeVisible: false });
-      }, HIDE_DELAY_MS);
+      }, delay);
     };
 
     const wake = () => {
       useAppStore.setState({ chromeVisible: true });
-      scheduleHide();
+      scheduleHide(WAKE_HIDE_DELAY_MS);
     };
 
     useAppStore.setState({ chromeVisible: true });
-    scheduleHide();
+    // First hide on fullscreen entry uses the SHORTER delay so the
+    // chrome doesn't linger awkwardly — paired with the visible
+    // transition indicator the user gets clear feedback.
+    scheduleHide(INITIAL_HIDE_DELAY_MS);
 
     window.addEventListener("mousemove", wake);
     window.addEventListener("keydown", wake);

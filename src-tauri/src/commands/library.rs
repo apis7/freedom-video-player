@@ -863,6 +863,11 @@ pub struct CollectionRow {
     pub name: String,
     pub created_at: i64,
     pub item_count: i64,
+    /// True when the user explicitly flagged the whole collection
+    /// non-family-friendly. Family Mode also hides collections whose
+    /// member set is ENTIRELY NFF — that derivation happens client-
+    /// side because the per-member NFF flags live on identities.
+    pub non_family_friendly: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -876,6 +881,8 @@ pub struct SeriesRow {
     /// "Watched / In progress / Unwatched" progress indicator in the
     /// sidebar per directive.
     pub watched_count: i64,
+    /// Same as CollectionRow's field — see above.
+    pub non_family_friendly: bool,
 }
 
 #[tauri::command]
@@ -886,7 +893,8 @@ pub fn library_list_collections(
     let mut stmt = conn
         .prepare(
             "SELECT c.id, c.name, c.created_at,
-                    (SELECT COUNT(*) FROM library_collection_items ci WHERE ci.collection_id = c.id)
+                    (SELECT COUNT(*) FROM library_collection_items ci WHERE ci.collection_id = c.id),
+                    c.non_family_friendly
              FROM library_collections c
              -- sort_position first (drag-reorder via library_reorder_collection),
              -- with NULL-positions sorted last so legacy rows stay alphabetical
@@ -901,6 +909,7 @@ pub fn library_list_collections(
                 name: r.get(1)?,
                 created_at: r.get(2)?,
                 item_count: r.get(3)?,
+                non_family_friendly: r.get::<_, i64>(4)? != 0,
             })
         })
         .map_err(|e| format!("query collections: {e}"))?;
@@ -1040,7 +1049,8 @@ pub fn library_list_series(db: State<'_, LibraryDb>) -> Result<Vec<SeriesRow>, S
                     (SELECT COUNT(*) FROM library_series_items si WHERE si.series_id = s.id),
                     (SELECT COUNT(*) FROM library_series_items si
                                        JOIN library_files f ON f.identity_id = si.identity_id
-                                       WHERE si.series_id = s.id AND f.watched = 1)
+                                       WHERE si.series_id = s.id AND f.watched = 1),
+                    s.non_family_friendly
              FROM library_series s
              ORDER BY (s.sort_position IS NULL), s.sort_position, s.name COLLATE NOCASE",
         )
@@ -1054,6 +1064,7 @@ pub fn library_list_series(db: State<'_, LibraryDb>) -> Result<Vec<SeriesRow>, S
                 created_at: r.get(3)?,
                 item_count: r.get(4)?,
                 watched_count: r.get(5)?,
+                non_family_friendly: r.get::<_, i64>(6)? != 0,
             })
         })
         .map_err(|e| format!("query series: {e}"))?;
@@ -3438,6 +3449,29 @@ pub async fn library_apply_image_url(
         body.len()
     );
     Ok(dest_str)
+}
+
+/// Flip the non_family_friendly flag on a collection or series.
+/// Family Mode reads this column to suppress whole groups.
+#[tauri::command]
+pub fn library_set_scope_nff(
+    db: State<'_, LibraryDb>,
+    kind: String,
+    id: i64,
+    non_family_friendly: bool,
+) -> Result<(), String> {
+    let table = match kind.as_str() {
+        "collection" => "library_collections",
+        "series" => "library_series",
+        _ => return Err(format!("unknown scope kind: {kind}")),
+    };
+    let conn = db.lock();
+    conn.execute(
+        &format!("UPDATE {table} SET non_family_friendly = ?1 WHERE id = ?2"),
+        params![non_family_friendly as i64, id],
+    )
+    .map_err(|e| format!("set scope nff: {e}"))?;
+    Ok(())
 }
 
 /// Probe one file via libmpv to read its actual resolution +

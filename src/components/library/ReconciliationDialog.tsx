@@ -516,6 +516,27 @@ function ComparisonCard({
 }) {
   const id = row.identity;
   const f = row.file;
+  const fallbackTitle = id.movie_title ?? f.path.split(/[\\/]/).pop() ?? "";
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(fallbackTitle);
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(fallbackTitle);
+  }, [fallbackTitle, editingTitle]);
+  const commitTitle = async () => {
+    setEditingTitle(false);
+    const trimmed = titleDraft.trim();
+    if (trimmed === fallbackTitle.trim()) return;
+    try {
+      await libraryIpc.setManualMetadata(
+        id.id,
+        "title",
+        trimmed.length === 0 ? null : trimmed,
+      );
+      onResolved();
+    } catch (err) {
+      showToast(`Couldn't update title: ${err}`, "error");
+    }
+  };
   return (
     <div
       className={
@@ -541,9 +562,36 @@ function ComparisonCard({
           alt={id.movie_title ?? ""}
         />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold text-fvp-text leading-tight">
-            {id.movie_title ?? f.path.split(/[\\/]/).pop()}
-          </div>
+          {editingTitle ? (
+            <input
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => void commitTitle()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void commitTitle();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setEditingTitle(false);
+                }
+              }}
+              className="w-full bg-fvp-bg border border-fvp-accent rounded px-2 py-0.5 text-sm font-semibold text-fvp-text outline-none"
+            />
+          ) : (
+            <div className="group/title flex items-start gap-1 text-sm font-semibold text-fvp-text leading-tight">
+              <span className="flex-1 min-w-0">{fallbackTitle}</span>
+              <button
+                type="button"
+                onClick={() => setEditingTitle(true)}
+                title="Edit title (saves to manual metadata)"
+                className="opacity-0 group-hover/title:opacity-100 text-fvp-muted hover:text-fvp-accent transition-opacity shrink-0 text-[12px]"
+              >
+                ✎
+              </button>
+            </div>
+          )}
           {id.movie_year && (
             <div className="text-[11px] text-fvp-muted">{id.movie_year}</div>
           )}

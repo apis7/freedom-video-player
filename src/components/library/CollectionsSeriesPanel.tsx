@@ -30,6 +30,9 @@ interface Props {
   rows: LibraryRow[];
   /** Parent re-fetches list/collections/series whenever members change. */
   onMembershipChanged: () => void;
+  /** When true, hide collections/series flagged non_family_friendly
+   *  AND those whose member set is entirely non-family-friendly. */
+  familyViewOn: boolean;
   /** Library-wide actions that show up in the right-click menu for
    *  All Movies / Collections / Series headers. Wired in the parent
    *  (Library.tsx) so all menu wiring goes through one place. */
@@ -37,6 +40,10 @@ interface Props {
   onRemoveBrokenLinks?: () => void;
   onOpenAnalytics?: () => void;
   onOpenFvpWebsite?: () => void;
+  /** Right-click → "Rescan member folders" on a collection or series.
+   *  Caller resolves the unique set of watched-folder roots that own
+   *  any member identity and re-enqueues each. */
+  onRescanScope?: (kind: "collection" | "series", id: number) => void;
 }
 
 const VIDEO_EXTENSIONS = [
@@ -60,10 +67,12 @@ export function CollectionsSeriesPanel({
   onScopeChange,
   rows,
   onMembershipChanged,
+  familyViewOn,
   onRescanLibrary,
   onRemoveBrokenLinks,
   onOpenAnalytics,
   onOpenFvpWebsite,
+  onRescanScope,
 }: Props) {
   const showToast = useAppStore((s) => s.showToast);
   const [collections, setCollections] = useState<CollectionRow[]>([]);
@@ -349,6 +358,25 @@ export function CollectionsSeriesPanel({
         label: "Add folder & subfolders…",
         onClick: () => void addFolderTo("collection", c.id, c.name),
       },
+      {
+        kind: "item",
+        label: "Rescan member folders",
+        title: "Re-walk every watched-folder root that contains a movie from this collection.",
+        disabled: !onRescanScope,
+        onClick: () => onRescanScope?.("collection", c.id),
+      },
+      { kind: "separator" },
+      {
+        kind: "item",
+        label: `${c.non_family_friendly ? "✓ " : "    "}Non-family-friendly`,
+        title: "Hides the whole collection in Family Mode.",
+        onClick: () => {
+          void libraryIpc
+            .setScopeNff("collection", c.id, !c.non_family_friendly)
+            .then(reload)
+            .catch((err) => showToast(`${err}`, "error"));
+        },
+      },
       { kind: "separator" },
       {
         kind: "item",
@@ -386,6 +414,25 @@ export function CollectionsSeriesPanel({
         kind: "item",
         label: "Add folder & subfolders…",
         onClick: () => void addFolderTo("series", s.id, s.name),
+      },
+      {
+        kind: "item",
+        label: "Rescan member folders",
+        title: "Re-walk every watched-folder root that contains an episode from this series.",
+        disabled: !onRescanScope,
+        onClick: () => onRescanScope?.("series", s.id),
+      },
+      { kind: "separator" },
+      {
+        kind: "item",
+        label: `${s.non_family_friendly ? "✓ " : "    "}Non-family-friendly`,
+        title: "Hides the whole series in Family Mode.",
+        onClick: () => {
+          void libraryIpc
+            .setScopeNff("series", s.id, !s.non_family_friendly)
+            .then(reload)
+            .catch((err) => showToast(`${err}`, "error"));
+        },
       },
       { kind: "separator" },
       {
@@ -500,12 +547,35 @@ export function CollectionsSeriesPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeScope.kind, activeScope.id]);
 
+  // When Family Mode is on, hide groups flagged non_family_friendly
+  // AND groups whose member set is ENTIRELY NFF (all members'
+  // identities have non_family_friendly = true). Empty groups never
+  // hide — the user might be partway through curating them.
+  const familyHidden = (kind: "collection" | "series", id: number): boolean => {
+    if (!familyViewOn) return false;
+    const members =
+      kind === "collection"
+        ? rows.filter((r) => r.collections.some((c) => c.collection_id === id))
+        : rows.filter((r) => r.series?.series_id === id);
+    if (members.length === 0) return false;
+    return members.every((r) => r.identity.non_family_friendly);
+  };
+
+  const visibleCollections = collections.filter(
+    (c) => !c.non_family_friendly && !familyHidden("collection", c.id),
+  );
+  const visibleSeries = series.filter(
+    (s) => !s.non_family_friendly && !familyHidden("series", s.id),
+  );
+
   // Apply the inline series filter. Cheap O(N) — series count is
   // typically small. Case-insensitive substring match on name.
   const filteredSeries = (() => {
     const needle = seriesSearch.trim().toLowerCase();
-    if (!needle) return series;
-    return series.filter((s) => s.name.toLowerCase().includes(needle));
+    if (!needle) return visibleSeries;
+    return visibleSeries.filter((s) =>
+      s.name.toLowerCase().includes(needle),
+    );
   })();
 
   // ── Render ──────────────────────────────────────────────────────
@@ -571,12 +641,14 @@ export function CollectionsSeriesPanel({
               }}
             />
           )}
-          {collections.length === 0 && creating !== "collection" && (
+          {visibleCollections.length === 0 && creating !== "collection" && (
             <div className="text-[10px] text-fvp-muted italic px-1">
-              No collections yet.
+              {collections.length === 0
+                ? "No collections yet."
+                : "All collections hidden by Family Mode."}
             </div>
           )}
-          {collections.map((c) => (
+          {visibleCollections.map((c) => (
             <ScopeRow
               key={`coll-${c.id}`}
               reorderKind="collection"
@@ -694,9 +766,11 @@ export function CollectionsSeriesPanel({
               )}
             </div>
           )}
-          {series.length === 0 && creating !== "series" && (
+          {visibleSeries.length === 0 && creating !== "series" && (
             <div className="text-[10px] text-fvp-muted italic px-1">
-              No series yet.
+              {series.length === 0
+                ? "No series yet."
+                : "All series hidden by Family Mode."}
             </div>
           )}
           {filteredSeries.length === 0 && seriesSearch.trim() !== "" && (

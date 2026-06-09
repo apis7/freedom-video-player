@@ -7,6 +7,7 @@ import { StatusBar } from "./components/StatusBar";
 import { CheatsheetOverlay } from "./components/CheatsheetOverlay";
 import { ToastOverlay } from "./components/Toast";
 import { BulkProgressBar } from "./components/BulkProgressBar";
+import { FullscreenTransitionIndicator } from "./components/FullscreenTransitionIndicator";
 import { LoadTimeoutModal } from "./components/LoadTimeoutModal";
 import { AboutModal } from "./components/AboutModal";
 import { SafetyBanner } from "./components/SafetyBanner";
@@ -41,6 +42,23 @@ export function App() {
   useFileDropTarget();
   useWindowStatePersist();
   useSettingsPersist();
+
+  // Auto-pause when leaving Player Mode while a video is playing.
+  // Position stays in libmpv → user can jump back to Player and hit
+  // Space to resume from where they were. Covers ALL setMode call
+  // sites (action + raw setState) by subscribing to the store.
+  useEffect(() => {
+    let prevMode = useAppStore.getState().mode;
+    const unsub = useAppStore.subscribe((state) => {
+      if (prevMode === "player" && state.mode !== "player" && state.playing) {
+        void import("./ipc").then(({ playback }) => {
+          void playback.pause();
+        });
+      }
+      prevMode = state.mode;
+    });
+    return unsub;
+  }, []);
 
   // Guard window close when autosave is off and Creator has unsaved work.
   // Only preventDefault in that case — let Tauri's wrapper handle the
@@ -131,6 +149,7 @@ export function App() {
       <CheatsheetOverlay />
       <ToastOverlay />
       <BulkProgressBar />
+      <FullscreenTransitionIndicator />
       <LoadTimeoutModal />
       <AboutModalIfVisible />
       <SafetyBanner />

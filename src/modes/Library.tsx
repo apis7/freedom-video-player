@@ -48,6 +48,7 @@ import {
 } from "../components/library/CollectionsSeriesPanel";
 import { AddToGroupModal } from "../components/library/AddToGroupModal";
 import { DeleteConfirmModal } from "../components/library/DeleteConfirmModal";
+import { FEATURE_GOOGLE_POSTER_SEARCH } from "../featureFlags";
 import type {
   DuplicateCluster,
   FuzzyDupPair,
@@ -1063,7 +1064,8 @@ export function LibraryMode() {
             });
           },
         },
-        ...(useAppStore.getState().googleCseApiKey &&
+        ...(FEATURE_GOOGLE_POSTER_SEARCH &&
+        useAppStore.getState().googleCseApiKey &&
         useAppStore.getState().googleCseId
           ? [
               {

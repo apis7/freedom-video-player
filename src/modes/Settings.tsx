@@ -73,19 +73,12 @@ export function SettingsMode() {
         <LibrarySettingsPanel />
       </Section>
 
-      <Section title="Google Image Search (optional)">
-        <p className="text-[11px] text-fvp-muted mb-2">
-          For the "Find alt poster on Google" right-click action in
-          Library mode. Lets you search the web for posters when TMDb
-          doesn't have what you want (obscure films, fan art, personal
-          recordings). Both fields must be set for the feature to
-          activate. Get a free key at{" "}
-          <code className="text-fvp-text">console.cloud.google.com</code>{" "}
-          (Custom Search API + a Custom Search Engine with "image search"
-          enabled). Free tier: 100 queries / day.
-        </p>
-        <GoogleCseFields />
-      </Section>
+      {/* "Google Image Search" panel temporarily disabled — Google
+          deprecated the relevant Custom Search Engine setup path,
+          breaking the flow for new users. Backend command + modal
+          stay in place; we'll re-enable + re-document once we have
+          a working setup path again. Set the constant in
+          src/featureFlags.ts to flip back on. */}
 
       <Section title="AutoSnip — subtitle language">
         <p className="text-[11px] text-fvp-muted mb-2">
@@ -445,7 +438,10 @@ function AuthorHandleField() {
   );
 }
 
-function GoogleCseFields() {
+// Exported so TS doesn't flag it as unused — feature temporarily
+// disabled (FEATURE_GOOGLE_POSTER_SEARCH flag). Re-enable by
+// flipping the flag and uncommenting the Section block above.
+export function _GoogleCseFields() {
   const apiKey = useAppStore((s) => s.googleCseApiKey);
   const cx = useAppStore((s) => s.googleCseId);
   const [apiLocal, setApiLocal] = useState(apiKey);

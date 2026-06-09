@@ -146,6 +146,15 @@ export function LibraryThumbnailView({
   };
 
   // Measure the container; recompute on resize.
+  //
+  // `reorderMode` is in deps because the component renders TWO
+  // different JSX trees depending on reorderMode (ReorderableGrid
+  // vs the virtualized Grid wrapped in our containerRef div). When
+  // reorderMode toggles, the containerRef div unmounts/remounts.
+  // Without re-running this effect, the new div would never be
+  // measured — `dims` would stay at its last value (potentially
+  // {0, 0} if the component first mounted in reorderMode), and
+  // the virtualized Grid would render nothing.
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -157,7 +166,7 @@ export function LibraryThumbnailView({
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [reorderMode]);
 
   // Empty-state messaging is handled by the parent so it can be
   // context-aware (empty scope vs. filter mismatch vs. no library).

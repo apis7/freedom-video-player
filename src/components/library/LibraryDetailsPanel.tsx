@@ -530,6 +530,11 @@ function BulkEditPanel({
     await applyToAll("Set custom thumbnail", (idn) =>
       libraryIpc.setCustomThumbnail(idn, picked),
     );
+    // After a bulk thumb write, EVERY visible poster needs to re-fetch
+    // its image. last_updated_at alone isn't always enough (off-screen
+    // virtualized cells, browser cache w/ same URL). The epoch bump in
+    // useAppStore forces a global cache-bust on the next render.
+    useAppStore.getState().bumpThumbnailRefreshEpoch();
   };
   const bulkClearThumbnail = async () => {
     if (
@@ -541,6 +546,7 @@ function BulkEditPanel({
     await applyToAll("Clear custom thumbnail", (idn) =>
       libraryIpc.setCustomThumbnail(idn, null),
     );
+    useAppStore.getState().bumpThumbnailRefreshEpoch();
   };
 
   return (

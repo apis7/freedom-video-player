@@ -1173,6 +1173,7 @@ export function LibraryMode() {
               );
               await libraryIpc.setCustomThumbnail(row.identity.id, picked);
               await refreshItems();
+              useAppStore.getState().bumpThumbnailRefreshEpoch();
               showToast("Custom thumbnail set.", "info", 2000);
             })();
           },

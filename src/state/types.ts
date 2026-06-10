@@ -35,6 +35,11 @@ export interface DetectedProfile {
 export interface AppState {
   mode: AppMode;
   libraryEnabled: boolean;
+  /** Monotonic counter; bumped after any bulk thumbnail write so
+   *  LibraryPoster components append it to their image URLs and bust
+   *  browser/webview caches across the whole grid (not just the row
+   *  whose details panel is currently mounted). */
+  thumbnailRefreshEpoch: number;
   currentFile: string | null;
   loading: boolean;
   playing: boolean;
@@ -275,6 +280,7 @@ export interface HistorySnapshot {
 export interface AppActions {
   setMode: (mode: AppMode) => void;
   setLibraryEnabled: (v: boolean) => void;
+  bumpThumbnailRefreshEpoch: () => void;
   togglePlay: () => void;
   toggleMute: () => void;
   toggleFullscreen: () => void;

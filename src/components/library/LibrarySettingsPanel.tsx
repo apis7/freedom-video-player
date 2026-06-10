@@ -12,7 +12,7 @@ import {
   type SnapshotStatus,
   type WatchedFolder,
 } from "../../ipc/library";
-import { PinPromptModal } from "./PinPromptModal";
+// PinPromptModal usage moved to FamilyViewPinSection.
 
 /**
  * Library section embedded in the Settings page. Manages:
@@ -36,15 +36,10 @@ export function LibrarySettingsPanel() {
   const [folders, setFolders] = useState<WatchedFolder[]>([]);
   const [showDisableLibraryConfirm, setShowDisableLibraryConfirm] =
     useState(false);
-  const [pinFlow, setPinFlow] = useState<
-    | null
-    | { kind: "set"; current: string | null }
-    | { kind: "change"; step: "verify"; }
-    | { kind: "change"; step: "new"; current: string }
-    | { kind: "clear" }
-  >(null);
-  const [newPinInput, setNewPinInput] = useState("");
-  const [confirmPinInput, setConfirmPinInput] = useState("");
+  // PIN management moved to its own section at the top of Settings
+  // — see FamilyViewPinSection. Kept here historically because the
+  // PIN was originally a library-mode toggle; user wants it prominent
+  // now so it owns the top of Settings as its own thing.
 
   const reload = useCallback(async () => {
     try {
@@ -227,67 +222,6 @@ export function LibrarySettingsPanel() {
           </button>
 
           <Divider />
-
-          <SubHeading>Family-View PIN</SubHeading>
-          <p className="text-[11px] text-fvp-muted">
-            A 4-digit speed-bump for kids — not a hardened lockdown. Required
-            to disable Family View once it&apos;s on. Reinstalling FVP wipes
-            the PIN.
-          </p>
-          {!snap.has_pin ? (
-            <button
-              onClick={() => setPinFlow({ kind: "set", current: null })}
-              className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90"
-            >
-              Set a PIN…
-            </button>
-          ) : (
-            <div className="flex gap-2 flex-wrap">
-              <span className="px-2 py-1 bg-fvp-ok/15 border border-fvp-ok text-fvp-ok text-xs rounded">
-                PIN set
-              </span>
-              <button
-                onClick={() => setPinFlow({ kind: "change", step: "verify" })}
-                className="px-3 py-1 bg-fvp-bg border border-fvp-border text-fvp-text text-xs rounded hover:border-fvp-muted"
-              >
-                Change PIN…
-              </button>
-              <button
-                onClick={() => setPinFlow({ kind: "clear" })}
-                className="px-3 py-1 bg-fvp-bg border border-fvp-border text-fvp-err text-xs rounded hover:border-fvp-err"
-              >
-                Remove PIN…
-              </button>
-            </div>
-          )}
-
-          {snap.has_pin && (
-            <>
-              <Divider />
-              <SubHeading>Family View</SubHeading>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={snap.family_view_allowed}
-                  onChange={(e) => {
-                    void libraryIpc
-                      .setFamilyViewAllowed(e.target.checked)
-                      .then(reload)
-                      .catch((err) => showToast(`${err}`, "error"));
-                  }}
-                  className="accent-fvp-accent"
-                />
-                <span>Enable Family View capability</span>
-              </label>
-              <p className="text-[11px] text-fvp-muted -mt-2 ml-6">
-                When enabled, the Family View toggle appears in the Library header.
-                Movies marked non-family-friendly are hidden from views and skipped
-                by Roulette / Suggestion / filters.
-              </p>
-            </>
-          )}
-
-          <Divider />
           <SubHeading>Display</SubHeading>
           <div className="flex items-center gap-3">
             <span className="text-xs text-fvp-muted">Clock format:</span>
@@ -386,69 +320,7 @@ export function LibrarySettingsPanel() {
         </>
       )}
 
-      {pinFlow?.kind === "set" && (
-        <SetPinFlow
-          currentPin={null}
-          newPinInput={newPinInput}
-          setNewPinInput={setNewPinInput}
-          confirmPinInput={confirmPinInput}
-          setConfirmPinInput={setConfirmPinInput}
-          onCancel={() => {
-            setPinFlow(null);
-            setNewPinInput("");
-            setConfirmPinInput("");
-          }}
-          onSaved={() => {
-            setPinFlow(null);
-            setNewPinInput("");
-            setConfirmPinInput("");
-            void reload();
-          }}
-        />
-      )}
-      {pinFlow?.kind === "change" && pinFlow.step === "verify" && (
-        <PinPromptModal
-          reason="Enter your current PIN to change it."
-          onCancel={() => setPinFlow(null)}
-          onSuccess={(current) => setPinFlow({ kind: "change", step: "new", current })}
-        />
-      )}
-      {pinFlow?.kind === "change" && pinFlow.step === "new" && (
-        <SetPinFlow
-          currentPin={pinFlow.current}
-          newPinInput={newPinInput}
-          setNewPinInput={setNewPinInput}
-          confirmPinInput={confirmPinInput}
-          setConfirmPinInput={setConfirmPinInput}
-          onCancel={() => {
-            setPinFlow(null);
-            setNewPinInput("");
-            setConfirmPinInput("");
-          }}
-          onSaved={() => {
-            setPinFlow(null);
-            setNewPinInput("");
-            setConfirmPinInput("");
-            void reload();
-          }}
-        />
-      )}
-      {pinFlow?.kind === "clear" && (
-        <PinPromptModal
-          reason="Enter your PIN to remove it. Family View will turn off too."
-          onCancel={() => setPinFlow(null)}
-          onSuccess={(current) => {
-            void libraryIpc
-              .setPin(null, current)
-              .then(() => {
-                showToast("PIN removed.", "info", 2500);
-                setPinFlow(null);
-                void reload();
-              })
-              .catch((err) => showToast(`${err}`, "error"));
-          }}
-        />
-      )}
+      {/* PIN flow modals moved to FamilyViewPinSection (at top of Settings). */}
     </section>
   );
 }
@@ -1402,124 +1274,4 @@ function HostAddressField({
     </div>
   );
 }
-
-/** Form for choosing + confirming a new 4-digit PIN. Modal layered. */
-function SetPinFlow({
-  currentPin,
-  newPinInput,
-  setNewPinInput,
-  confirmPinInput,
-  setConfirmPinInput,
-  onCancel,
-  onSaved,
-}: {
-  currentPin: string | null;
-  newPinInput: string;
-  setNewPinInput: (s: string) => void;
-  confirmPinInput: string;
-  setConfirmPinInput: (s: string) => void;
-  onCancel: () => void;
-  onSaved: () => void;
-}) {
-  const showToast = useAppStore((s) => s.showToast);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const submit = async () => {
-    if (busy) return;
-    if (newPinInput.length !== 4 || !/^\d{4}$/.test(newPinInput)) {
-      setErr("PIN must be exactly 4 digits.");
-      return;
-    }
-    if (newPinInput !== confirmPinInput) {
-      setErr("PINs don't match.");
-      return;
-    }
-    setBusy(true);
-    setErr(null);
-    try {
-      await libraryIpc.setPin(newPinInput, currentPin);
-      showToast(currentPin ? "PIN changed." : "PIN set.", "info", 2500);
-      onSaved();
-    } catch (e) {
-      setErr(`${e}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 bg-black/60 z-[65] flex items-center justify-center"
-      onClick={onCancel}
-    >
-      <div
-        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl p-5 min-w-[340px]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="text-sm font-semibold text-fvp-text mb-3">
-          {currentPin ? "Choose a new PIN" : "Set a Family-View PIN"}
-        </div>
-        <Input
-          label="New PIN"
-          value={newPinInput}
-          onChange={setNewPinInput}
-          autoFocus
-        />
-        <Input
-          label="Confirm"
-          value={confirmPinInput}
-          onChange={setConfirmPinInput}
-        />
-        {err && <div className="text-[11px] text-fvp-err mt-2">{err}</div>}
-        <div className="flex justify-end gap-2 text-xs mt-4">
-          <button
-            onClick={onCancel}
-            className="px-3 py-1.5 text-fvp-text hover:bg-fvp-surface2 rounded"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => void submit()}
-            disabled={busy}
-            className="px-3 py-1.5 bg-fvp-accent text-white rounded hover:opacity-90 disabled:opacity-50"
-          >
-            {busy ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Input({
-  label,
-  value,
-  onChange,
-  autoFocus,
-}: {
-  label: string;
-  value: string;
-  onChange: (s: string) => void;
-  autoFocus?: boolean;
-}) {
-  return (
-    <label className="block mb-2">
-      <div className="text-[10px] uppercase tracking-wider text-fvp-muted mb-1">
-        {label}
-      </div>
-      <input
-        type="password"
-        inputMode="numeric"
-        maxLength={4}
-        autoFocus={autoFocus}
-        value={value}
-        onChange={(e) =>
-          onChange(e.target.value.replace(/\D/g, "").slice(0, 4))
-        }
-        className="w-full bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded px-3 py-2 text-center text-xl tracking-[0.5em] font-mono outline-none"
-        placeholder="••••"
-      />
-    </label>
-  );
-}
+// (SetPinFlow + Input forms removed — moved to FamilyViewPinSection)

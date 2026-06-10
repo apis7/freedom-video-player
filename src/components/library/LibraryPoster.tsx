@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useState } from "react";
+import { useAppStore } from "../../state/appStore";
 import { getHostEndpoint, getLibraryMode } from "../../ipc/library";
 
 interface Props {
@@ -47,15 +48,22 @@ export function LibraryPoster({
 }: Props) {
   const source = customThumbnailPath || posterLocalPath || null;
   const [loadError, setLoadError] = useState(false);
-  // In Client mode the source path is the Host's local filesystem path
-  // (or a UNC path the Client may not have mounted). Route the image
-  // request through the Host's GET /v1/poster endpoint so it works
-  // regardless. The Host re-serves the bytes with strong Cache-Control
-  // so the webview caches them across renders.
+  // Subscribe to the global thumbnail-refresh epoch. Bumped after bulk
+  // thumbnail writes so EVERY grid poster picks up the new cacheKey,
+  // not just the cell whose details panel is currently mounted. Solves
+  // the "12 wrote successfully but only the selected one visually
+  // updated" bug. Cheap subscription — no perf concern with 1000+
+  // posters since Zustand only re-renders on value change.
+  const epoch = useAppStore((s) => s.thumbnailRefreshEpoch);
   const baseUrl = source ? resolveImageUrl(source) : null;
+  // Combine cacheKey with epoch so a bulk write reliably busts the
+  // webview's image cache even when last_updated_at lands in the same
+  // second across multiple bumped identities.
+  const effectiveKey =
+    cacheKey != null ? `${cacheKey}-${epoch}` : epoch > 0 ? `${epoch}` : null;
   const url =
-    baseUrl && cacheKey != null
-      ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}v=${cacheKey}`
+    baseUrl && effectiveKey != null
+      ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}v=${effectiveKey}`
       : baseUrl;
 
   const heightPx = Math.round(widthPx * 1.5);

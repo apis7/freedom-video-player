@@ -61,6 +61,7 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   // on, but can be disabled in Settings"). Users with no library use case
   // can flip it off; everyone else gets the Library tab automatically.
   libraryEnabled: true,
+  thumbnailRefreshEpoch: 0,
   currentFile: null,
   loading: false,
   playing: false,
@@ -151,6 +152,8 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
       return { mode };
     }),
   setLibraryEnabled: (libraryEnabled) => set({ libraryEnabled }),
+  bumpThumbnailRefreshEpoch: () =>
+    set((s) => ({ thumbnailRefreshEpoch: s.thumbnailRefreshEpoch + 1 })),
   togglePlay: () => set((s) => ({ playing: !s.playing })),
   toggleMute: () => set((s) => ({ muted: !s.muted })),
   toggleFullscreen: () => set((s) => ({ fullscreen: !s.fullscreen })),

@@ -2265,21 +2265,52 @@ pub fn set_custom_thumbnail_core(
                 let Some(parent) = media.parent() else { continue };
                 let thumb_name = format!("{stem}.fvp-thumb.{ext}");
                 let dst = parent.join(&thumb_name);
-                match std::fs::copy(src, &dst) {
-                    Ok(_) => {
+                // Retry up to 3 times with a small backoff. Windows
+                // Explorer / Search / Indexer commonly grab a brief
+                // exclusive lock on newly-written image files (for
+                // thumbnail extraction). A single attempt during that
+                // window fails with os error 32 ("being used by
+                // another process") even though the file becomes
+                // copyable a few hundred ms later.
+                let mut last_err: Option<std::io::Error> = None;
+                let mut succeeded = false;
+                for attempt in 0..3 {
+                    match std::fs::copy(src, &dst) {
+                        Ok(_) => {
+                            succeeded = true;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            if attempt < 2 {
+                                std::thread::sleep(
+                                    std::time::Duration::from_millis(
+                                        150 * (attempt + 1) as u64,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                match (succeeded, last_err) {
+                    (true, _) => {
                         copied += 1;
                         if first_thumb.is_none() {
                             first_thumb =
                                 Some(dst.to_string_lossy().into_owned());
                         }
                     }
-                    Err(e) => {
+                    (false, Some(e)) => {
                         failed += 1;
                         crate::log!(
                             "library",
-                            "set_custom_thumbnail: failed to write {}: {e}",
+                            "set_custom_thumbnail: failed to write {} after 3 retries: {e}",
                             dst.display()
                         );
+                    }
+                    (false, None) => {
+                        // Can't happen — the loop always sets last_err on error.
+                        failed += 1;
                     }
                 }
             }

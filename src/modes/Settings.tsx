@@ -1,9 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../state/appStore";
 import { HOTKEYS, keyFor } from "../state/hotkeys";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { MAX_AUTHOR_HANDLE_LEN } from "../ipc/types";
 import { LibrarySettingsPanel } from "../components/library/LibrarySettingsPanel";
+import { FamilyViewPinSection } from "../components/FamilyViewPinSection";
+
+/** Sections shown in the jump-to index at the top of Settings.
+ *  Order matters: this is the visual order down the page. */
+const SECTION_INDEX: { id: string; label: string; icon: string }[] = [
+  { id: "settings-section-family-view-pin", label: "Family-View PIN", icon: "🔒" },
+  { id: "settings-section-player-mode", label: "Player Mode", icon: "▶" },
+  { id: "settings-section-profile-creator", label: "Profile Creator", icon: "✂️" },
+  { id: "settings-section-author-handle", label: "Author handle", icon: "✍️" },
+  { id: "settings-section-library", label: "Library", icon: "📚" },
+  { id: "settings-section-autosnip-subtitle-language", label: "AutoSnip language", icon: "🌐" },
+  { id: "settings-section-autosnip-snip-padding", label: "AutoSnip padding", icon: "⏱️" },
+  { id: "settings-section-keyboard-shortcuts", label: "Keyboard shortcuts", icon: "⌨️" },
+];
 
 /**
  * Settings — first pass. Holds the toggles that have state hooks today.
@@ -20,13 +34,63 @@ export function SettingsMode() {
   const playerShowPathOnStart = useAppStore((s) => s.playerShowPathOnStart);
   const setPlayerShowPathOnStart = useAppStore((s) => s.setPlayerShowPathOnStart);
 
+  // Scroll container ref + scroll-to-top button visibility. The
+  // div below is itself the scrolling container (overflow-auto), so
+  // scrollTop here, not window.scrollY.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => setShowScrollTop(el.scrollTop > 240);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  const jumpTo = (id: string) => {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const scrollToTop = () => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   return (
-    <div className="h-full bg-fvp-bg p-6 text-fvp-text text-sm overflow-auto">
+    <div
+      ref={scrollRef}
+      className="h-full bg-fvp-bg p-6 text-fvp-text text-sm overflow-auto relative"
+    >
       <h2 className="text-lg font-semibold mb-1">Settings</h2>
-      <p className="text-xs text-fvp-muted mb-6">
+      <p className="text-xs text-fvp-muted mb-4">
         Hotkey customization, default snip padding, themes, and the full
         Settings surface arrive in a later milestone.
       </p>
+
+      {/* Jump-to index. Clicking any pill scrolls the matching section
+          into view. Visible on every Settings load — sticky enough to
+          be useful, doesn't hide on scroll because some users prefer to
+          re-navigate from the top after a deep dive. */}
+      <div className="mb-6 p-3 bg-fvp-surface border border-fvp-border rounded-lg">
+        <div className="text-[10px] uppercase tracking-wider text-fvp-muted mb-2">
+          Jump to
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {SECTION_INDEX.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => jumpTo(s.id)}
+              className="px-2.5 py-1 text-[11px] bg-fvp-bg border border-fvp-border rounded hover:border-fvp-accent hover:text-fvp-accent text-fvp-text transition-colors"
+            >
+              <span className="mr-1">{s.icon}</span>
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <FamilyViewPinSection />
 
       <Section title="Player Mode">
         <Toggle
@@ -98,6 +162,35 @@ export function SettingsMode() {
         </p>
         <PaddingControls />
       </Section>
+
+      {/* Floating scroll-to-top button. Appears once the user has
+          scrolled past ~240px (rough threshold for "they're committed
+          to the page"). Click smooth-scrolls back to the top of the
+          Settings scroll container (NOT the window — settings has its
+          own overflow). */}
+      {showScrollTop && (
+        <button
+          onClick={scrollToTop}
+          aria-label="Scroll to top of Settings"
+          className="fixed bottom-6 right-6 w-11 h-11 rounded-full bg-fvp-accent text-white shadow-2xl flex items-center justify-center hover:opacity-90 transition-opacity z-30"
+          title="Back to top"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="22"
+            height="22"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="M12 19V5" />
+            <path d="M5 12l7-7 7 7" />
+          </svg>
+        </button>
+      )}
 
       <Section title="Keyboard shortcuts">
         <p className="text-[11px] text-fvp-muted mb-2">

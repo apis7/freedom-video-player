@@ -72,10 +72,21 @@ export function LibraryPoster({
 
   const inner = showImage ? (
     <img
+      // Force unmount + remount on URL change. Some webview img
+      // implementations (notably WebView2 in Tauri) cache img DOM
+      // state across src= changes and skip re-fetch even when the
+      // URL differs. Using effectiveKey as React key tears down the
+      // element entirely so the next render creates a fresh one.
+      key={effectiveKey ?? "static"}
       src={url!}
       alt={alt}
       draggable={false}
       loading="lazy"
+      // Also reset loadError when the underlying URL changes so a
+      // previously-failed image gets a chance to retry.
+      onLoad={() => {
+        if (loadError) setLoadError(false);
+      }}
       className={
         "rounded shadow object-cover bg-fvp-bg select-none w-full h-full" +
         (isMissing ? " opacity-50 grayscale" : "")

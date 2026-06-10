@@ -153,7 +153,12 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
     }),
   setLibraryEnabled: (libraryEnabled) => set({ libraryEnabled }),
   bumpThumbnailRefreshEpoch: () =>
-    set((s) => ({ thumbnailRefreshEpoch: s.thumbnailRefreshEpoch + 1 })),
+    // Use Date.now() (millisecond timestamp) so rapid back-to-back
+    // bumps get distinctly different values. Monotonic +1 would be
+    // fine, but ms timestamps also debug well (the value tells you
+    // when the bump happened) and guarantee uniqueness across the
+    // session even after a page reload.
+    set({ thumbnailRefreshEpoch: Date.now() }),
   togglePlay: () => set((s) => ({ playing: !s.playing })),
   toggleMute: () => set((s) => ({ muted: !s.muted })),
   toggleFullscreen: () => set((s) => ({ fullscreen: !s.fullscreen })),

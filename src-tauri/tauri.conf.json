@@ -32,7 +32,11 @@
         "enable": true,
         "scope": [
           "$APPLOCALDATA/poster-cache/**",
-          "$LOCALDATA/com.fvp.desktop/poster-cache/**"
+          "$LOCALDATA/com.fvp.desktop/poster-cache/**",
+          "**/*.fvp-thumb.jpg",
+          "**/*.fvp-thumb.jpeg",
+          "**/*.fvp-thumb.png",
+          "**/*.fvp-thumb.webp"
         ]
       }
     }

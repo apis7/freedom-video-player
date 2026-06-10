@@ -110,6 +110,11 @@ pub struct SubtitleTrack {
     pub lang: Option<String>,
     pub selected: bool,
     pub external: bool,
+    /// Absolute path to the external sub file (mpv property
+    /// `external-filename`). None for embedded tracks. Used by the
+    /// Creator-mode subs row to parse the file's entries so the
+    /// timeline can render cue blocks for an autoloaded external.
+    pub external_filename: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -580,6 +585,10 @@ impl MpvPlayer {
                 external: mpv
                     .get_property(&format!("track-list/{i}/external"))
                     .unwrap_or(false),
+                external_filename: mpv
+                    .get_property(&format!("track-list/{i}/external-filename"))
+                    .ok()
+                    .filter(|s: &String| !s.is_empty()),
             });
         }
         tracks

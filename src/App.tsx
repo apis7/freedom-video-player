@@ -20,6 +20,7 @@ import { useHotkeys } from "./hooks/useHotkeys";
 import { useProfileApplication } from "./hooks/useProfileApplication";
 import { useMpvEventBridge } from "./hooks/useMpvEventBridge";
 import { useAutosaveDraft } from "./hooks/useAutosaveDraft";
+import { useLibraryMetadataPrefill } from "./hooks/useLibraryMetadataPrefill";
 import { useAudioReplaceOverlay } from "./hooks/useAudioReplaceOverlay";
 import { useFileDropTarget } from "./hooks/useFileDropTarget";
 import { useWindowStatePersist } from "./hooks/useWindowStatePersist";
@@ -49,6 +50,7 @@ export function App() {
   useProfileApplication();
   useAudioReplaceOverlay();
   useAutosaveDraft();
+  useLibraryMetadataPrefill();
   useFileDropTarget();
   useWindowStatePersist();
   useSettingsPersist();

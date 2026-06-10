@@ -10,6 +10,7 @@ import { TypedConfirmModal } from "../components/TypedConfirmModal";
 import { addSubtitleFlow } from "../utils/addSubtitleFlow";
 import { subtitlesIpc } from "../ipc";
 import { ImdbLinkModal } from "../components/ImdbLinkModal";
+import { SearchAndFlagModal } from "../components/SearchAndFlagModal";
 import { SnipGroupsModal } from "../components/SnipGroupsModal";
 import { BeepShortenModal } from "../components/BeepShortenModal";
 import { MovieInfoModal } from "../components/MovieInfoModal";
@@ -79,6 +80,13 @@ export function CreatorMode() {
     | { stage: "preview"; matches: AutoSnipMatch[] }
     | { stage: "no-subs"; videoPath: string }
   >({ stage: "idle" });
+  const [showSearchAndFlag, setShowSearchAndFlag] = useState(false);
+  useEffect(() => {
+    const handler = () => setShowSearchAndFlag(true);
+    window.addEventListener("fvp:request-search-and-flag", handler);
+    return () =>
+      window.removeEventListener("fvp:request-search-and-flag", handler);
+  }, []);
   const detectedProfiles = useAppStore((s) => s.detectedProfiles);
   const snipCount = useAppStore((s) => s.snips.length);
 
@@ -668,6 +676,9 @@ export function CreatorMode() {
       {showGroupsModal && (
         <SnipGroupsModal onClose={() => setShowGroupsModal(false)} />
       )}
+      {showSearchAndFlag && (
+        <SearchAndFlagModal onClose={() => setShowSearchAndFlag(false)} />
+      )}
       {showClearAllConfirm && (
         <TypedConfirmModal
           title="Clear all snips and markers?"
@@ -856,6 +867,20 @@ function CreatorTopToolbar({
         onClick={() => window.dispatchEvent(new CustomEvent("fvp:request-autosnip"))}
       >
         AutoSnip…
+      </ToolbarButton>
+      <ToolbarButton
+        title={
+          "Search & Flag — augments AutoSnip. Type ANY term (e.g. " +
+          "'lady suck-suck', 'dickenson') and FVP drops a flag wherever " +
+          "it appears in the subtitles. NO snips are created — just " +
+          "flags, so you can review and snip manually."
+        }
+        disabled={!hasFile}
+        onClick={() =>
+          window.dispatchEvent(new CustomEvent("fvp:request-search-and-flag"))
+        }
+      >
+        Search & Flag…
       </ToolbarButton>
       {flagCount > 0 && (
         <ToolbarButton

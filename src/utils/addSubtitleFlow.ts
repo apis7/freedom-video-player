@@ -4,6 +4,17 @@ import { subtitlesIpc } from "../ipc";
 
 const SUBTITLE_EXTENSIONS = ["srt", "vtt", "ass", "ssa", "sub", "txt"];
 
+/** Strip the trailing filename + separator from a path. Falls back
+ *  to `undefined` when the input is null / empty / has no separator
+ *  — Tauri's dialog API treats `undefined` defaultPath as "use the
+ *  OS default", which is the desired behavior in that edge case. */
+export function parentDirOf(path: string | null): string | undefined {
+  if (!path) return undefined;
+  const lastSep = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  if (lastSep <= 0) return undefined;
+  return path.slice(0, lastSep);
+}
+
 /** Open the file picker filtered to subtitle formats; load whatever the user
  *  chooses via libmpv's sub-add command. Surfaces success/failure via toast. */
 export async function addSubtitleFlow(): Promise<void> {
@@ -17,6 +28,9 @@ export async function addSubtitleFlow(): Promise<void> {
   }
   const picked = await open({
     multiple: false,
+    // Default the picker to the video's own directory so the user
+    // doesn't have to navigate every time they pick a sub file.
+    defaultPath: parentDirOf(useAppStore.getState().currentFile),
     filters: [
       { name: "Subtitles", extensions: SUBTITLE_EXTENSIONS },
       { name: "All files", extensions: ["*"] },
@@ -59,8 +73,17 @@ export async function refreshSubtitleTracks(): Promise<void> {
     useAppStore.setState({ subtitleTracks: tracks, subtitleVisible: visible });
 
     const selected = tracks.find((t) => t.selected);
-    if (selected && !selected.external) {
-      await extractAndStoreEmbedded(selected.id);
+    if (selected) {
+      if (selected.external && selected.external_filename) {
+        // mpv autoloaded an external .srt next to the video — parse it
+        // so the Creator subs row gets cue blocks. Without this, the
+        // movie plays with subs but the Creator timeline shows
+        // "No subtitles loaded" and autosnip / Search-and-Flag have
+        // nothing to scan.
+        await parseAndStoreExternal(selected.external_filename);
+      } else if (!selected.external) {
+        await extractAndStoreEmbedded(selected.id);
+      }
     }
   } catch {
     useAppStore.setState({ subtitleTracks: [] });
@@ -88,6 +111,23 @@ export async function refreshTracks(): Promise<void> {
     });
   } catch {
     // No file or libmpv not ready.
+  }
+}
+
+/** Parse an autoloaded external sub file and store its entries.
+ *  Idempotent — skips when subtitleEntries is already populated
+ *  (avoids re-parsing on every refreshSubtitleTracks call). */
+async function parseAndStoreExternal(path: string): Promise<void> {
+  if (useAppStore.getState().subtitleEntries.length > 0) return;
+  const videoPath = useAppStore.getState().currentFile;
+  if (!videoPath) return;
+  try {
+    const entries = await subtitlesIpc.parseFile(path);
+    // Guard against the file having changed during the async parse.
+    if (useAppStore.getState().currentFile !== videoPath) return;
+    useAppStore.setState({ subtitleEntries: entries });
+  } catch {
+    // Non-fatal — entries just won't show on the timeline.
   }
 }
 

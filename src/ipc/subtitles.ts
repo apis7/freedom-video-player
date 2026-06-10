@@ -6,6 +6,10 @@ export interface SubtitleTrack {
   lang: string | null;
   selected: boolean;
   external: boolean;
+  /** Path to the external sub file when `external` is true; null
+   *  otherwise. Used by Creator mode to parse the file so the
+   *  subs row renders cue blocks for autoloaded external tracks. */
+  external_filename: string | null;
 }
 
 export interface SubtitleEntry {

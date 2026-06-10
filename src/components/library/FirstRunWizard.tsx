@@ -382,6 +382,15 @@ function HowItWorksStep({
         </div>
       </div>
 
+      <div className="text-[10px] text-fvp-muted italic px-2 leading-relaxed">
+        Whichever mode you pick is changeable anytime in{" "}
+        <strong className="text-fvp-text">
+          Settings → Library → Library Networking
+        </strong>
+        . Sync and Host can even coexist on the same network — they share
+        the same NAS folder.
+      </div>
+
       <div className="flex items-center justify-between pt-1">
         <button
           onClick={onBack}
@@ -417,22 +426,22 @@ function RolePickerStep({
       </p>
       <div className="grid gap-3">
         <RoleCard
-          accent="accent"
-          icon="🖥️"
-          title="Standalone"
-          tagline="One device — fastest path"
-          detail="My library lives on this device only. No network sharing."
-          recommended
-          onClick={() => onPick("standalone")}
-          disabled={busy}
-        />
-        <RoleCard
           accent="ok"
           icon="🔄"
           title="Sync via NAS"
-          tagline="Multi-device, no always-on Host needed"
-          detail="Your library DB lives on THIS device but mirrors to a folder on your NAS every 5 minutes. Other FVP installs pull the mirror when they launch. Best when you have a NAS but no always-on FVP host. Concurrent edits use last-writer-wins."
+          tagline="Best for most people with a NAS"
+          detail="Your library DB lives LOCALLY on this device, and mirrors to a folder on your NAS every 5 minutes. Add another device later (Sync, Host, or Client) — they all stay in step via the same NAS folder. No 'always-on Host' computer required. Last-writer-wins on concurrent edits."
+          recommended
           onClick={() => onPick("sync")}
+          disabled={busy}
+        />
+        <RoleCard
+          accent="accent"
+          icon="🖥️"
+          title="Standalone"
+          tagline="One device, no network — simplest path"
+          detail="Library lives on this device only. No NAS folder, no other devices in the mix. Pick this if you don't have a NAS, or if you just want to try FVP first and decide later. You can switch to Sync or Host anytime."
+          onClick={() => onPick("standalone")}
           disabled={busy}
         />
         <RoleCard
@@ -440,7 +449,7 @@ function RolePickerStep({
           icon="📡"
           title="Library Host (live)"
           tagline="This device runs the FVP service; others connect live"
-          detail="THIS DEVICE runs the FVP library service over the LAN. Other devices connect as Clients in real time. Best when this device is always on (e.g., a desktop). Clients lock out when this device is off."
+          detail="THIS DEVICE runs the FVP library service over the LAN. Other devices connect as live Clients in real time. Also mirrors to the NAS folder so Sync-mode devices can read it. Best when this device is always on (e.g., a desktop)."
           onClick={() => onPick("host")}
           disabled={busy}
         />
@@ -453,6 +462,14 @@ function RolePickerStep({
           onClick={() => onPick("client")}
           disabled={busy}
         />
+      </div>
+      <div className="text-[10px] text-fvp-muted italic px-2 py-1 leading-relaxed">
+        Not sure yet? Any of these can be changed later in{" "}
+        <strong className="text-fvp-text">
+          Settings → Library → Library Networking
+        </strong>
+        . Your indexed library, tags, collections, and watch history are
+        kept across mode changes.
       </div>
       <div className="flex justify-start pt-1">
         <button

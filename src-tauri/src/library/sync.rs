@@ -64,10 +64,21 @@ pub fn init(db: LibraryDb) {
 }
 
 /// Returns Ok(true) when the tick performed a push or scheduled a
-/// pull; Ok(false) when not yet due or not in sync mode.
+/// pull; Ok(false) when not yet due or mode is irrelevant.
+///
+/// Fires for BOTH "sync" mode AND "host" mode:
+///   - sync mode: push local→mirror, AND pull mirror→local when
+///     newer (via restore marker, effective next launch).
+///   - host mode: push only. The Host's local DB is authoritative
+///     (it accepts live Client writes); pulling from a Sync
+///     device's mirror would clobber Client-made edits. Sync
+///     devices reading the Host-pushed mirror see the live state;
+///     Sync edits made while Host is online may be overwritten
+///     when Host pushes next (last-writer-wins; for guaranteed
+///     persistence, edits should go through the live Host).
 fn maybe_tick(db: &LibraryDb) -> Result<bool, String> {
     let (mode, home, cadence_min) = read_status(db);
-    if mode != "sync" {
+    if mode != "sync" && mode != "host" {
         return Ok(false);
     }
     let Some(home_str) = home else {
@@ -87,10 +98,10 @@ fn maybe_tick(db: &LibraryDb) -> Result<bool, String> {
     let last_push = read_setting_i64(db, SYNC_LAST_PUSH_AT_KEY);
     let next_push_due = last_push + (cadence_min * 60);
     let sync_path = home.join(SYNC_FILE_NAME);
-    // Pull check: if the sync file is meaningfully newer than the
-    // local DB, schedule a pull (effective on next launch). Skip if
-    // we've already scheduled this exact pull (marker exists).
-    if sync_path.is_file() {
+    // Pull check is sync-mode-only. Host mode is authoritative —
+    // it never pulls from the mirror, so Client-made edits to the
+    // live Host can't be reverted by a stale Sync device's push.
+    if mode == "sync" && sync_path.is_file() {
         let local_mtime = mtime_unix(db.path());
         let sync_mtime = mtime_unix(&sync_path);
         // 5-second slop to absorb clock skew on SMB.
@@ -104,10 +115,14 @@ fn maybe_tick(db: &LibraryDb) -> Result<bool, String> {
             return Ok(true);
         }
     }
-    // Push if cadence due.
+    // Push if cadence due. Fires in both sync and host modes.
     if now >= next_push_due {
         push_now(db, &sync_path)?;
         set_setting_i64(db, SYNC_LAST_PUSH_AT_KEY, now);
+        crate::log!(
+            "library:sync",
+            "push: mode={mode} → mirror written (cadence={cadence_min}min)"
+        );
         return Ok(true);
     }
     Ok(false)

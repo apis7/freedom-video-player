@@ -1,4 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import { libInvoke } from "./libraryHostClient";
+
+export {
+  setHostEndpoint,
+  setLibraryMode,
+  getLibraryMode,
+  getHostEndpoint,
+  getHostHealth,
+  readHomeDiscovery,
+  type HomeDiscoverySnapshot,
+} from "./libraryHostClient";
 
 export interface WatchedFolder {
   id: number;
@@ -117,11 +128,14 @@ export type ManualMetadataField =
   | "stars";
 
 export const libraryIpc = {
+  // Folder management — stays LOCAL even in Client mode (folder paths
+  // are Host-machine paths; the Host owns these). Clients see the
+  // current list via libInvoke("list_folders") but don't add/remove.
   addFolder: (path: string, recursive: boolean) =>
     invoke<WatchedFolder>("library_add_folder", { path, recursive }),
   removeFolder: (folderId: number, deleteItems: boolean) =>
     invoke<void>("library_remove_folder", { folderId, deleteItems }),
-  listFolders: () => invoke<WatchedFolder[]>("library_list_folders"),
+  listFolders: () => libInvoke<WatchedFolder[]>("list_folders"),
   setFolderScanOnStartup: (folderId: number, value: boolean) =>
     invoke<void>("library_set_folder_scan_on_startup", { folderId, value }),
   rescanAll: () => invoke<void>("library_rescan_all"),
@@ -129,13 +143,13 @@ export const libraryIpc = {
   scanThrottle: (on: boolean) => invoke<void>("library_scan_throttle", { on }),
   rescanFolder: (folderId: number) =>
     invoke<void>("library_rescan_folder", { folderId }),
-  listItems: () => invoke<LibraryRow[]>("library_list_items"),
+  listItems: () => libInvoke<LibraryRow[]>("list_items"),
   getRow: (fileId: number) =>
-    invoke<LibraryRow | null>("library_get_row", { fileId }),
+    libInvoke<LibraryRow | null>("get_row", { fileId }),
   getPosterBytes: (path: string) =>
     invoke<number[]>("library_get_poster_bytes", { path }),
   refreshMetadata: (identityId: number) =>
-    invoke<void>("library_refresh_metadata", { identityId }),
+    libInvoke<void>("refresh_metadata", { identityId }),
   searchByFilename: (filename: string) =>
     invoke<string[]>("library_search_by_filename", { filename }),
   relocateFile: (fileId: number, newPath: string) =>
@@ -168,7 +182,7 @@ export const libraryIpc = {
       isExtended?: boolean;
     },
   ) =>
-    invoke<void>("library_set_flags", {
+    libInvoke<void>("set_flags", {
       identityId,
       noProfileNecessary: flags.noProfileNecessary ?? null,
       priorityForProfile: flags.priorityForProfile ?? null,
@@ -177,17 +191,17 @@ export const libraryIpc = {
       isExtended: flags.isExtended ?? null,
     }),
   setTags: (identityId: number, tags: string[]) =>
-    invoke<void>("library_set_tags", { identityId, tags }),
+    libInvoke<void>("set_tags", { identityId, tags }),
   setNotes: (identityId: number, notes: string) =>
-    invoke<void>("library_set_notes", { identityId, notes }),
+    libInvoke<void>("set_notes", { identityId, notes }),
   setFamilyRating: (identityId: number, rating: number | null) =>
-    invoke<void>("library_set_family_rating", { identityId, rating }),
+    libInvoke<void>("set_family_rating", { identityId, rating }),
   setManualMetadata: (
     identityId: number,
     field: ManualMetadataField,
     value: string | null,
   ) =>
-    invoke<void>("library_set_manual_metadata", { identityId, field, value }),
+    libInvoke<void>("set_manual_metadata", { identityId, field, value }),
   roulettePick: (fileIds: number[], familyViewOn: boolean) =>
     invoke<LibraryRow | null>("library_roulette_pick", { fileIds, familyViewOn }),
   suggestNext: (familyViewOn: boolean) =>
@@ -201,11 +215,11 @@ export const libraryIpc = {
   findFileByPath: (path: string) =>
     invoke<number | null>("library_find_file_by_path", { path }),
   setWatchProgress: (fileId: number, progressMs: number) =>
-    invoke<void>("library_set_watch_progress", { fileId, progressMs }),
+    libInvoke<void>("set_watch_progress", { fileId, progressMs }),
   markWatched: (fileId: number) =>
-    invoke<void>("library_mark_watched", { fileId }),
+    libInvoke<void>("mark_watched", { fileId }),
   resetProgress: (fileId: number) =>
-    invoke<void>("library_reset_progress", { fileId }),
+    libInvoke<void>("reset_progress", { fileId }),
   hasPin: () => invoke<boolean>("library_has_pin"),
   verifyPin: (pin: string) => invoke<boolean>("library_verify_pin", { pin }),
   setPin: (newPin: string | null, currentPin: string | null) =>
@@ -216,9 +230,9 @@ export const libraryIpc = {
     invoke<void>("library_set_family_view_enabled", { enabled }),
   getSettings: () => invoke<LibrarySettingsSnapshot>("library_get_settings"),
   setClockFormat: (format: "12h" | "24h") =>
-    invoke<void>("library_set_clock_format", { format }),
+    libInvoke<void>("set_clock_format", { format }),
   setDeleteDefault: (deleteDefault: "remove" | "recycle") =>
-    invoke<void>("library_set_delete_default", { default: deleteDefault }),
+    libInvoke<void>("set_delete_default", { default: deleteDefault }),
   setPosterCacheCap: (capBytes: number) =>
     invoke<void>("library_set_poster_cache_cap", { capBytes }),
   setMode: (mode: LibraryMode) =>
@@ -273,11 +287,11 @@ export const libraryIpc = {
   trashFiles: (fileIds: number[]) =>
     invoke<DeleteSummary>("library_trash_files", { fileIds }),
   logOpen: (fileId: number) =>
-    invoke<void>("library_log_open", { fileId }),
+    libInvoke<void>("log_open", { fileId }),
   reorderCollections: (orderedIds: number[]) =>
-    invoke<void>("library_reorder_collection", { orderedIds }),
+    libInvoke<void>("reorder_collection", { orderedIds }),
   reorderSeriesList: (orderedIds: number[]) =>
-    invoke<void>("library_reorder_series", { orderedIds }),
+    libInvoke<void>("reorder_series", { orderedIds }),
   reorderCollectionItems: (collectionId: number, orderedIdentityIds: number[]) =>
     invoke<void>("library_reorder_collection_items", {
       collectionId,
@@ -305,28 +319,28 @@ export const libraryIpc = {
   refreshProfileStatus: (videoPath: string) =>
     invoke<void>("library_refresh_profile_status", { videoPath }),
   listCollections: () =>
-    invoke<CollectionRow[]>("library_list_collections"),
+    libInvoke<CollectionRow[]>("list_collections"),
   createCollection: (name: string) =>
-    invoke<number>("library_create_collection", { name }),
+    libInvoke<number>("create_collection", { name }),
   renameCollection: (collectionId: number, newName: string) =>
-    invoke<void>("library_rename_collection", { collectionId, newName }),
+    libInvoke<void>("rename_collection", { collectionId, newName }),
   deleteCollection: (collectionId: number) =>
-    invoke<void>("library_delete_collection", { collectionId }),
+    libInvoke<void>("delete_collection", { collectionId }),
   addToCollection: (collectionId: number, identityIds: number[]) =>
-    invoke<void>("library_add_to_collection", { collectionId, identityIds }),
+    libInvoke<void>("add_to_collection", { collectionId, identityIds }),
   removeFromCollection: (collectionId: number, identityIds: number[]) =>
-    invoke<void>("library_remove_from_collection", { collectionId, identityIds }),
-  listSeries: () => invoke<SeriesRow[]>("library_list_series"),
+    libInvoke<void>("remove_from_collection", { collectionId, identityIds }),
+  listSeries: () => libInvoke<SeriesRow[]>("list_series"),
   createSeries: (name: string, hasSeasons: boolean) =>
-    invoke<number>("library_create_series", { name, hasSeasons }),
+    libInvoke<number>("create_series", { name, hasSeasons }),
   renameSeries: (seriesId: number, newName: string) =>
-    invoke<void>("library_rename_series", { seriesId, newName }),
+    libInvoke<void>("rename_series", { seriesId, newName }),
   deleteSeries: (seriesId: number) =>
-    invoke<void>("library_delete_series", { seriesId }),
+    libInvoke<void>("delete_series", { seriesId }),
   addToSeries: (seriesId: number, identityIds: number[]) =>
-    invoke<void>("library_add_to_series", { seriesId, identityIds }),
+    libInvoke<void>("add_to_series", { seriesId, identityIds }),
   removeFromSeries: (seriesId: number, identityIds: number[]) =>
-    invoke<void>("library_remove_from_series", { seriesId, identityIds }),
+    libInvoke<void>("remove_from_series", { seriesId, identityIds }),
 };
 
 export interface CollectionRow {

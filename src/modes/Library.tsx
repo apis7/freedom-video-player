@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { LibraryNetworkingBanner } from "../components/library/LibraryNetworkingBanner";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../state/appStore";
@@ -1385,6 +1386,7 @@ export function LibraryMode() {
 
   return (
     <div className="h-full bg-fvp-bg text-fvp-text flex flex-col">
+      <LibraryNetworkingBanner />
       <header className="px-4 py-2 border-b border-fvp-border bg-fvp-surface flex items-center gap-2 flex-wrap text-xs">
         <h2 className="text-sm font-semibold mr-2">Library</h2>
         <button

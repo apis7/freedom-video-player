@@ -252,6 +252,7 @@ pub fn run() {
             commands::library::library_rotate_auth_token,
             commands::library::library_host_server_status,
             commands::library::library_test_host_connection,
+            commands::library::library_read_home_discovery,
             commands::library::library_set_poster_cache_cap,
             commands::library::library_find_probable_pairs,
             commands::library::library_transfer_curation,

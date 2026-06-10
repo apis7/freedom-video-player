@@ -3,6 +3,9 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../../state/appStore";
 import {
   libraryIpc,
+  readHomeDiscovery,
+  setHostEndpoint,
+  setLibraryMode,
   type HostConnectionTestResult,
   type HostServerStatus,
   type LibrarySettingsSnapshot,
@@ -42,7 +45,32 @@ export function LibrarySettingsPanel() {
 
   const reload = useCallback(async () => {
     try {
-      setSnap(await libraryIpc.getSettings());
+      const fresh = await libraryIpc.getSettings();
+      setSnap(fresh);
+      // Re-wire the libInvoke routing whenever mode or endpoint can
+      // change. This makes mid-session role switches take effect
+      // without an app relaunch.
+      setLibraryMode(fresh.library_mode);
+      if (fresh.library_mode === "client") {
+        let endpoint: { url: string; token: string } | null = null;
+        if (fresh.home_folder_path && fresh.home_folder_exists) {
+          try {
+            const d = await readHomeDiscovery();
+            if (d) endpoint = { url: d.host_url, token: d.token };
+          } catch {
+            /* fall back to manual */
+          }
+        }
+        if (!endpoint && fresh.host_address && fresh.host_auth_token) {
+          endpoint = {
+            url: fresh.host_address,
+            token: fresh.host_auth_token,
+          };
+        }
+        setHostEndpoint(endpoint);
+      } else {
+        setHostEndpoint(null);
+      }
       setFolders(await libraryIpc.listFolders());
     } catch (err) {
       showToast(`Load library settings failed: ${err}`, "error");
@@ -91,7 +119,22 @@ export function LibrarySettingsPanel() {
         <input
           type="checkbox"
           checked={libraryEnabled}
-          onChange={(e) => setLibraryEnabled(e.target.checked)}
+          onChange={(e) => {
+            // Turning OFF is destructive-ish (hides Library tab, abandons
+            // any in-progress work in Library Mode). Confirm so a stray
+            // click doesn't silently lose context. Turning ON is safe.
+            if (!e.target.checked) {
+              const ok = window.confirm(
+                "Turn off Library Mode?\n\n" +
+                  "The Library tab will disappear and FVP will boot " +
+                  "straight into Player Mode. Your indexed library, " +
+                  "tags, and collections are kept — re-enabling brings " +
+                  "them back as they were.",
+              );
+              if (!ok) return;
+            }
+            setLibraryEnabled(e.target.checked);
+          }}
           className="accent-fvp-accent"
         />
         <span>Enable Library Mode</span>
@@ -500,18 +543,19 @@ function LibraryNetworkingSection({
 
   return (
     <>
-      <SubHeading>Library Networking (Alpha — Phase 1 of 3)</SubHeading>
+      <SubHeading>Library Networking</SubHeading>
       <div className="text-[11px] text-fvp-muted space-y-1">
         <p>
-          Share your library across multiple devices (Windows / Mac / iOS /
-          Android) via a designated <strong>home folder</strong> on a network
-          share. Phase 1 (this build) ships settings + folder bootstrap only —
-          the actual Host/Client networking lands in the next update.
+          Share one library across multiple devices (Windows now; Mac / iOS /
+          Android coming) via a designated <strong>home folder</strong> on a
+          network share. One device acts as the <strong>Host</strong> (its DB
+          is the source of truth); others connect as <strong>Clients</strong>{" "}
+          over the LAN. Clients auto-discover the Host from the home folder.
         </p>
         <p className="italic">
-          The library DB itself stays local to the Host device for safety
-          (SQLite over SMB corrupts) — the home folder holds the shared
-          poster cache, auth token, and Host discovery info.
+          The library DB itself stays local to the Host (SQLite over SMB
+          corrupts) — the home folder holds the shared poster cache, auth
+          token, and Host discovery info.
         </p>
       </div>
 
@@ -667,40 +711,122 @@ function LibraryNetworkingSection({
       )}
 
       {snap.library_mode === "client" && (
-        <div className="space-y-1.5">
-          <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
-            Host address
-          </div>
-          <HostAddressField
-            current={snap.host_address}
-            onSaved={async (v) => {
-              try {
-                await libraryIpc.setHostAddress(v);
-                await reload();
-                showToast(v ? "Host address saved." : "Host cleared.", "info", 1500);
-              } catch (err) {
-                showToast(`${err}`, "error");
-              }
-            }}
-          />
-          <p className="text-[10px] text-fvp-muted">
-            E.g. <code>http://192.168.1.7:42171</code>. Phase 2b will
-            auto-discover the Host via the home folder&apos;s
-            <code> host-discovery.json</code>.
-          </p>
-          <ClientTestConnectionRow
-            url={snap.host_address}
-            token={snap.host_auth_token}
-          />
-        </div>
+        <ClientModeSection snap={snap} reload={reload} />
       )}
     </>
   );
 }
 
-/** Hit the configured Host URL's /v1/health and report what came back.
- *  Phase 2a's smoke test for the Client-side networking — proves the
- *  wire works before we re-route the whole IPC layer in Phase 2b. */
+/**
+ * Client mode UI. Auto-discovery first: if a `host-discovery.json` +
+ * `auth-token` pair is readable from the home folder, we offer the
+ * user a one-click "Use this Host" button that wires the address and
+ * token. Manual entry stays available as a fallback (e.g., if you
+ * want to point a Client at a Host on a different LAN segment).
+ */
+function ClientModeSection({
+  snap,
+  reload,
+}: {
+  snap: LibrarySettingsSnapshot;
+  reload: () => Promise<void>;
+}) {
+  const showToast = useAppStore((s) => s.showToast);
+  const [discovery, setDiscovery] = useState<
+    | { host_url: string; token: string; fvp_version: string | null; protocol: number | null; updated_at: number | null }
+    | null
+  >(null);
+  const [busyDiscover, setBusyDiscover] = useState(false);
+
+  useEffect(() => {
+    if (!snap.home_folder_path || !snap.home_folder_exists) {
+      setDiscovery(null);
+      return;
+    }
+    setBusyDiscover(true);
+    readHomeDiscovery()
+      .then((d) => setDiscovery(d))
+      .catch(() => setDiscovery(null))
+      .finally(() => setBusyDiscover(false));
+  }, [snap.home_folder_path, snap.home_folder_exists, snap.host_address]);
+
+  const useDiscovered = async () => {
+    if (!discovery) return;
+    try {
+      await libraryIpc.setHostAddress(discovery.host_url);
+      // Token isn't stored locally — the auto-discovery path re-reads
+      // it from the home folder at boot. But we still cache it in the
+      // session so the test button works immediately.
+      setHostEndpoint({ url: discovery.host_url, token: discovery.token });
+      await reload();
+      showToast(`Connected to ${discovery.host_url}`, "info", 2000);
+    } catch (err) {
+      showToast(`${err}`, "error");
+    }
+  };
+
+  const effectiveUrl = snap.host_address || discovery?.host_url || null;
+  const effectiveToken = snap.host_auth_token || discovery?.token || null;
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
+        Host address
+      </div>
+
+      {/* Auto-discovery card. Only shown when we successfully read
+          the discovery file — otherwise the manual field is the
+          primary surface. */}
+      {discovery ? (
+        <div className="px-2 py-1.5 bg-fvp-accent/10 border border-fvp-accent rounded space-y-1">
+          <div className="text-[11px] font-semibold text-fvp-text">
+            🔎 Auto-discovered from home folder:
+          </div>
+          <code className="block text-[11px] break-all text-fvp-text">
+            {discovery.host_url}
+          </code>
+          <div className="text-[10px] text-fvp-muted">
+            FVP {discovery.fvp_version ?? "?"} · protocol v
+            {discovery.protocol ?? "?"} · auth token attached
+          </div>
+          <button
+            onClick={() => void useDiscovered()}
+            className="px-2 py-1 mt-1 text-[11px] bg-fvp-accent text-white rounded hover:opacity-90"
+          >
+            Use this Host
+          </button>
+        </div>
+      ) : (
+        busyDiscover && (
+          <div className="text-[11px] text-fvp-muted italic">
+            Checking home folder for Host discovery info…
+          </div>
+        )
+      )}
+
+      <HostAddressField
+        current={snap.host_address}
+        onSaved={async (v) => {
+          try {
+            await libraryIpc.setHostAddress(v);
+            await reload();
+            showToast(v ? "Host address saved." : "Host cleared.", "info", 1500);
+          } catch (err) {
+            showToast(`${err}`, "error");
+          }
+        }}
+      />
+      <p className="text-[10px] text-fvp-muted">
+        Manual entry — e.g. <code>http://192.168.1.7:42171</code>. Use
+        when no home folder is set, or to override auto-discovery.
+      </p>
+
+      <ClientTestConnectionRow url={effectiveUrl} token={effectiveToken} />
+    </div>
+  );
+}
+
+/** Hit the configured Host URL's /v1/health and report what came back. */
 function ClientTestConnectionRow({
   url,
   token,

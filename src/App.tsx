@@ -26,6 +26,12 @@ import { useWindowStatePersist } from "./hooks/useWindowStatePersist";
 import { useSettingsPersist } from "./hooks/useSettingsPersist";
 import { hasUnsavedWork, confirmDiscardUnsaved } from "./utils/unsavedWork";
 import { openVideoPath, openFreeFile } from "./utils/openFileFlow";
+import {
+  libraryIpc,
+  readHomeDiscovery,
+  setHostEndpoint,
+  setLibraryMode,
+} from "./ipc/library";
 
 export function App() {
   const mode = useAppStore((s) => s.mode);
@@ -58,6 +64,53 @@ export function App() {
       prevMode = state.mode;
     });
     return unsub;
+  }, []);
+
+  // Library Networking boot: read the current mode + endpoint
+  // configuration once at startup so every libraryIpc.* call routes
+  // correctly. Falls back to manual host_address/host_auth_token if the
+  // home folder's discovery files aren't readable. Errors are
+  // swallowed — networking failure here just means Client mode won't
+  // work; the Settings UI will show the issue.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const snap = await libraryIpc.getSettings();
+        setLibraryMode(snap.library_mode);
+        if (snap.library_mode === "client") {
+          // Prefer auto-discovery from home folder; fall back to manual
+          // settings if discovery file is absent/unreadable.
+          let endpoint: { url: string; token: string } | null = null;
+          if (snap.home_folder_path && snap.home_folder_exists) {
+            try {
+              const d = await readHomeDiscovery();
+              if (d) endpoint = { url: d.host_url, token: d.token };
+            } catch (e) {
+              console.log(`[fvp] auto-discovery failed: ${e}`);
+            }
+          }
+          if (!endpoint && snap.host_address && snap.host_auth_token) {
+            endpoint = {
+              url: snap.host_address,
+              token: snap.host_auth_token,
+            };
+          }
+          setHostEndpoint(endpoint);
+          console.log(
+            `[fvp] Library Networking: mode=client endpoint=${
+              endpoint ? endpoint.url : "(none)"
+            }`,
+          );
+        } else {
+          setHostEndpoint(null);
+          console.log(
+            `[fvp] Library Networking: mode=${snap.library_mode}`,
+          );
+        }
+      } catch (e) {
+        console.log(`[fvp] Library Networking boot failed: ${e}`);
+      }
+    })();
   }, []);
 
   // Guard window close when autosave is off and Creator has unsaved work.

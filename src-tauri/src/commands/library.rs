@@ -424,9 +424,16 @@ pub fn library_rescan_folder(
 /// joins (microseconds even for thousands of rows).
 #[tauri::command]
 pub fn library_list_items(db: State<'_, LibraryDb>) -> Result<Vec<LibraryRow>, String> {
+    list_items_core(&db)
+}
+
+/// Core of list_items — callable from the HTTP host server too.
+/// Returns the fully-assembled rows (file + identity + tags +
+/// collections + series + profile status) the UI consumes directly.
+pub fn list_items_core(db: &LibraryDb) -> Result<Vec<LibraryRow>, String> {
     let started = std::time::Instant::now();
     crate::log!("library", "list_items: begin");
-    let rows = crate::library::index::list_files_with_identity(&db)?;
+    let rows = crate::library::index::list_files_with_identity(db)?;
     let conn = db.lock();
     crate::log!(
         "library",
@@ -434,15 +441,6 @@ pub fn library_list_items(db: State<'_, LibraryDb>) -> Result<Vec<LibraryRow>, S
         rows.len(),
         started.elapsed()
     );
-
-    // has_free_sibling now travels on the LibraryFile row from the
-    // initial JOIN (see list_files_with_identity), so no second-pass
-    // SELECT is needed. profile_status_from_row consults the cached
-    // field directly.
-    //
-    // Bulk-load tags / collections / series in three queries instead of
-    // 3N+1 (3 per row × 1224 rows = 3672 prepared statements). Group
-    // results by identity_id in HashMaps and join in-memory.
     let joins_started = std::time::Instant::now();
     let tags_by_identity = load_all_tags(&conn)?;
     let collections_by_identity = load_all_collection_memberships(&conn)?;
@@ -452,7 +450,6 @@ pub fn library_list_items(db: State<'_, LibraryDb>) -> Result<Vec<LibraryRow>, S
         "list_items: bulk-loaded tags/collections/series in {:?}",
         joins_started.elapsed()
     );
-
     let mut out = Vec::with_capacity(rows.len());
     for (file, identity) in rows {
         let tags = tags_by_identity
@@ -2881,6 +2878,90 @@ pub fn library_test_host_connection(
             })
         }
     }
+}
+
+/// Auto-discovery for Client mode: read `host-discovery.json` +
+/// `auth-token` from the configured home folder and return a usable
+/// endpoint Clients can dial without typing anything. Returns None
+/// when no home folder is set or the discovery file is missing /
+/// malformed (so the UI can fall back to manual entry).
+#[derive(serde::Serialize)]
+pub struct HomeDiscoverySnapshot {
+    pub host_url: String,    // e.g. "http://192.168.1.7:42171"
+    pub token: String,
+    pub fvp_version: Option<String>,
+    pub protocol: Option<u32>,
+    pub updated_at: Option<i64>,
+}
+
+#[tauri::command]
+pub fn library_read_home_discovery(
+    db: State<'_, LibraryDb>,
+) -> Result<Option<HomeDiscoverySnapshot>, String> {
+    let home = {
+        let conn = db.lock();
+        crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?
+    };
+    let Some(home_str) = home else {
+        return Ok(None);
+    };
+    let home = std::path::Path::new(&home_str);
+    if !home.is_dir() {
+        crate::log!(
+            "library:host",
+            "read_home_discovery: home folder unreachable at {home_str}"
+        );
+        return Ok(None);
+    }
+    let disc_path = home.join("host-discovery.json");
+    let token_path = home.join("auth-token");
+    let disc_bytes = match std::fs::read(&disc_path) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log!(
+                "library:host",
+                "read_home_discovery: missing/unreadable host-discovery.json: {e}"
+            );
+            return Ok(None);
+        }
+    };
+    let token = match std::fs::read_to_string(&token_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            crate::log!(
+                "library:host",
+                "read_home_discovery: missing/unreadable auth-token: {e}"
+            );
+            return Ok(None);
+        }
+    };
+    let disc: serde_json::Value =
+        serde_json::from_slice(&disc_bytes).map_err(|e| format!("parse discovery: {e}"))?;
+    let host = disc.get("host").and_then(|v| v.as_str()).unwrap_or("");
+    let port = disc
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(crate::library::host_server::DEFAULT_HOST_PORT as u64) as u16;
+    if host.is_empty() || token.is_empty() {
+        crate::log!(
+            "library:host",
+            "read_home_discovery: discovery file present but host/token empty"
+        );
+        return Ok(None);
+    }
+    Ok(Some(HomeDiscoverySnapshot {
+        host_url: format!("http://{host}:{port}"),
+        token,
+        fvp_version: disc
+            .get("fvp_version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        protocol: disc
+            .get("protocol")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32),
+        updated_at: disc.get("updated_at").and_then(|v| v.as_i64()),
+    }))
 }
 
 fn mint_auth_token() -> String {

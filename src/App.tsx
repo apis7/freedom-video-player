@@ -10,6 +10,8 @@ import { BulkProgressBar } from "./components/BulkProgressBar";
 import { FullscreenTransitionIndicator } from "./components/FullscreenTransitionIndicator";
 import { LoadTimeoutModal } from "./components/LoadTimeoutModal";
 import { AboutModal } from "./components/AboutModal";
+import { ReportErrorModal } from "./components/ReportErrorModal";
+import { FeatureRequestModal } from "./components/FeatureRequestModal";
 import { SafetyBanner } from "./components/SafetyBanner";
 import { PlayerMode } from "./modes/Player";
 import { CreatorMode } from "./modes/Creator";
@@ -244,6 +246,8 @@ export function App() {
       <FullscreenTransitionIndicator />
       <LoadTimeoutModal />
       <AboutModalIfVisible />
+      <ReportErrorModal />
+      <FeatureRequestModal />
       <SafetyBanner />
       {showFirstRunWizard && (
         <FirstRunWizard onDismiss={() => setShowFirstRunWizard(false)} />

@@ -1,4 +1,5 @@
 pub mod autosnip;
+pub mod diagnostics;
 pub mod library;
 pub mod peaks;
 pub mod playback;

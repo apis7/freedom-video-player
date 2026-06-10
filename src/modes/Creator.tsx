@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../state/appStore";
 import { TransportBar } from "../components/TransportBar";
+import { HotkeyTicker } from "../components/HotkeyTicker";
 import { ContextMenu, type MenuItem } from "../components/ContextMenu";
 import { ExportProfileModal } from "../components/ExportProfileModal";
 import { ProfilePickerModal } from "../components/ProfilePickerModal";
@@ -3327,6 +3328,7 @@ function CreatorStatusBar() {
       <span>·</span>
       <span>Preview (T): {abToggleOn ? "ON" : "OFF"}</span>
       <span className="flex-1" />
+      <HotkeyTicker />
       <span>autosave: {autosaveDraft ? "on" : "off"}</span>
     </footer>
   );

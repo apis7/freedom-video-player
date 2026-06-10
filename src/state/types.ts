@@ -135,6 +135,13 @@ export interface AppState {
   extractingSubtitles: boolean;
   /** About modal visibility — shown via Help → About FVP. */
   aboutVisible: boolean;
+  /** Help → Report Error modal. Can also be opened by the global
+   *  ErrorBoundary as a "soft crash" handler — pre-fills `body` with
+   *  the caught error message in that case. */
+  reportErrorVisible: boolean;
+  reportErrorPrefill: string | null;
+  /** Help → Feature Request modal. */
+  featureRequestVisible: boolean;
   /** Audio + video track snapshots (similar to subtitleTracks). */
   audioTracks: import("../ipc/subtitles").SubtitleTrack[];
   videoTracks: import("../ipc/subtitles").SubtitleTrack[];

@@ -470,6 +470,24 @@ function buildItemsFor(menu: string): MenuItem[] {
         { kind: "separator" },
         {
           kind: "item",
+          label: "Report error…",
+          title:
+            "Send a description of an error you hit. Includes the last 200 lines of terminal output (you can opt out).",
+          onClick: () =>
+            useAppStore.setState({
+              reportErrorVisible: true,
+              reportErrorPrefill: null,
+            }),
+        },
+        {
+          kind: "item",
+          label: "Feature request…",
+          title: "Suggest a feature or improvement.",
+          onClick: () => useAppStore.setState({ featureRequestVisible: true }),
+        },
+        { kind: "separator" },
+        {
+          kind: "item",
           label: "About FVP",
           onClick: () => useAppStore.setState({ aboutVisible: true }),
         },

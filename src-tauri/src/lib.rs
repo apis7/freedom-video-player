@@ -4,7 +4,7 @@ mod console_attach;
 mod fingerprint;
 mod library;
 #[macro_use]
-mod logging;
+pub mod logging;
 mod peaks;
 mod playback;
 mod profile;
@@ -133,6 +133,56 @@ pub fn run() {
                                     .unwrap_or(0)
                                 }
                             );
+                            // Sync-mode restore (consume_restore_marker just above)
+                            // overwrites the local DB with library-sync.db from the
+                            // home folder — including any phantom rows that live
+                            // inside `#recycle` / `$RECYCLE.BIN` / `.Trash` etc. The
+                            // walk() now skips those folders going forward, but the
+                            // restored DB still contains them, so the user sees the
+                            // same NAS-recycle ghosts re-appear after every delete.
+                            // Strip them out unconditionally on open — the scan
+                            // would never have added them in the first place.
+                            {
+                                let conn = db.lock();
+                                let rows: Vec<(i64, String)> = conn
+                                    .prepare("SELECT id, path FROM library_files")
+                                    .and_then(|mut s| {
+                                        s.query_map([], |r| {
+                                            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                                        })
+                                        .and_then(|it| it.collect())
+                                    })
+                                    .unwrap_or_default();
+                                let to_purge: Vec<i64> = rows
+                                    .into_iter()
+                                    .filter(|(_, p)| {
+                                        library::index::path_is_in_recycle_bin(p)
+                                    })
+                                    .map(|(id, _)| id)
+                                    .collect();
+                                if !to_purge.is_empty() {
+                                    let placeholders =
+                                        std::iter::repeat("?").take(to_purge.len())
+                                            .collect::<Vec<_>>().join(",");
+                                    let sql = format!(
+                                        "DELETE FROM library_files WHERE id IN ({placeholders})"
+                                    );
+                                    let params: Vec<&dyn rusqlite::ToSql> = to_purge
+                                        .iter()
+                                        .map(|i| i as &dyn rusqlite::ToSql)
+                                        .collect();
+                                    match conn.execute(&sql, params.as_slice()) {
+                                        Ok(n) => log!(
+                                            "library",
+                                            "recycle-bin purge: removed {n} row(s) whose path lives under #recycle / $RECYCLE.BIN / .Trash (would have been re-added otherwise via sync restore)"
+                                        ),
+                                        Err(e) => log!(
+                                            "library",
+                                            "recycle-bin purge: DELETE failed: {e}"
+                                        ),
+                                    }
+                                }
+                            }
                             // Spin up the scan orchestrator (watchers +
                             // indexer worker). It reattaches notify
                             // watchers for every folder already in the DB
@@ -201,6 +251,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::diagnostics::get_recent_log_lines,
+            commands::diagnostics::submit_report,
             commands::playback::open_file,
             commands::playback::play,
             commands::playback::pause,

@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { actlog } from "../utils/actlog";
+import { useAppStore } from "../state/appStore";
 
 interface Props {
   children: ReactNode;
@@ -11,9 +12,14 @@ interface State {
 /**
  * Top-level React error boundary. Without this, a render error in any
  * descendant unmounts the entire tree and the user sees a blank
- * white screen with nothing in the terminal. Now: error is forwarded
- * to the [fvp:ui] terminal log AND a recovery panel is shown so the
- * user can switch modes or reload.
+ * white screen with nothing in the terminal. Behaviour:
+ *
+ *   1. Forward the error to the [fvp:ui] terminal log.
+ *   2. Open the Help → Report Error modal pre-filled with the error
+ *      message + component stack so the user can describe what they
+ *      were doing instead of staring at a crash screen.
+ *   3. Render a recovery panel underneath so reload/recover stays
+ *      reachable even if the user dismisses the report.
  */
 export class UiErrorBoundary extends Component<Props, State> {
   state: State = { err: null };
@@ -29,6 +35,22 @@ export class UiErrorBoundary extends Component<Props, State> {
     );
     // eslint-disable-next-line no-console
     console.error("ReactErrorBoundary caught:", error, info);
+    // (A.1) Catch: instead of letting the recovery screen be the only
+    // option, also pop the Report Error modal pre-filled with details.
+    // Best-effort — if the store itself is broken, we just rely on the
+    // recovery panel.
+    try {
+      useAppStore.setState({
+        reportErrorVisible: true,
+        reportErrorPrefill:
+          `${error.message}\n\nComponent stack:${info.componentStack ?? "(none)"}` +
+          (error.stack
+            ? `\n\nStack (top 8):\n${error.stack.split("\n").slice(0, 8).join("\n")}`
+            : ""),
+      });
+    } catch {
+      /* ignore */
+    }
   }
 
   render() {

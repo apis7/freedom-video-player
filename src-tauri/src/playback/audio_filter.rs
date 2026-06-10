@@ -242,61 +242,76 @@ fn mute_dialogue_chain(mode: &str, intensity: u8) -> String {
     }
 }
 
-/// Audio-blur chain. Three presets.
+/// Audio-blur chain. Three presets — all tuned to make SPEECH
+/// unrecognizable, not merely "muffled-but-readable." Earlier passes
+/// were too gentle and the user could still hear specific words
+/// (including the swearing the snip was supposed to scrub). These
+/// chains aim for "you can tell something is happening, but you can't
+/// identify any word."
 ///
-/// - "muffled"       → lowpass + reverb. Most natural; least obvious.
-/// - "garbled_grain" → aggressive modulation that mangles phonemes
-///   (chorus + flanger + vibrato cluster — TRUE granular reversal
-///   requires custom DSP, this approximates the destructive effect).
-/// - "garbled_phase" → FFT phase scramble. Spectral envelope preserved.
+/// - "muffled"       → very-low lowpass + highpass + dense echo. Kills
+///   the 1–4 kHz band where consonants live.
+/// - "garbled_grain" → vibrato + flanger + chorus + tremolo + bitcrush.
+///   Drunken/swimmy texture; formant structure scrambled per cycle.
+/// - "garbled_phase" → FFT scramble of BOTH magnitude AND phase per
+///   bin, plus lowpass to nuke fricative bands. Spectral envelope is
+///   destroyed (was preserved in v1 — that's why words were still
+///   identifiable: timbre survives a phase-only scramble).
 fn audio_blur_chain(mode: &str, intensity: u8) -> String {
     let i = (intensity as f64 / 100.0).clamp(0.0, 1.0);
     match mode {
         "garbled_grain" => {
-            // Aggressive modulation cluster — vibrato + flanger + chorus.
-            // Speech intelligibility collapses fast; music survives as
-            // a smeared, drunken texture.
-            //  - vibrato: pitch warble (depth scales with intensity)
-            //  - flanger: comb-filter sweep
-            //  - chorus:  triple-voice smear
-            let depth = 0.3 + 0.7 * i; // 0.3 → 1.0
-            let f_hz = 5.0 + 10.0 * i; // 5 → 15 Hz
+            // Stack of modulators that each shred a different cue:
+            //  - vibrato:  pitch warble (formant tracking → chaos)
+            //  - flanger:  comb-filter sweep (cancels narrow bands)
+            //  - chorus:   multi-voice smear (phoneme onset blur)
+            //  - tremolo:  amplitude chop (syllable boundaries gone)
+            //  - acrusher: bit-depth reduction (granular harshness)
+            // Intensity scales depth + rate aggressively.
+            let depth = 0.6 + 0.4 * i; // 0.6 → 1.0 (was 0.3..1.0)
+            let f_hz = 9.0 + 11.0 * i; // 9 → 20 Hz (was 5..15)
+            let trem_f = 18.0 + 12.0 * i; // 18 → 30 Hz syllable shredder
+            let bits = (8.0 - 4.0 * i).round() as u32; // 8 → 4 bit
             format!(
                 "vibrato=f={f_hz:.2}:d={depth:.3},\
-                 flanger=delay=5:depth=2:width=70:speed=0.6,\
-                 chorus=0.5:0.9:60|70|80:0.4|0.45|0.5:0.4|0.5|0.6:2|2.5|3"
+                 flanger=delay=20:depth=10:width=95:speed=2.5,\
+                 chorus=0.6:0.9:50|60|70|80:0.4|0.45|0.5|0.55:0.5|0.6|0.7|0.8:2|2.5|3|3.5,\
+                 tremolo=f={trem_f:.2}:d=0.9,\
+                 acrusher=level_in=1:level_out=1:bits={bits}:mode=log:mix=0.7"
             )
         }
         "garbled_phase" => {
-            // FFT phase scramble — randomize the phase of each bin while
-            // keeping the magnitude. Magnitude → timbre survives. Phase
-            // → temporal structure (phoneme onsets) destroyed.
-            //
-            // afftfilt's expressions: `real` and `imag` get a per-bin
-            // complex-pair output. We compute magnitude=hypot(re,im) and
-            // re-emit with a random phase (random(0) → uniform [0,1] per
-            // bin). `i` mixes between original (i=0) and full scramble
-            // (i=1) by interpolating phase.
-            //
-            // Implementation note: afftfilt evaluates real/imag at
-            // every frame for every bin; expressions can reference
-            // `re`, `im`, and helpers like `random(n)`.
-            let _ = i; // intensity reserved for partial-scramble; full for v1
-            "afftfilt=real='hypot(re,im)*cos(random(0)*2*PI)':\
-             imag='hypot(re,im)*sin(random(0)*2*PI)'"
+            // FFT scramble of BOTH magnitude AND phase. The v1 version
+            // only randomized phase, which preserves the spectral
+            // envelope — the listener's brain reconstructs vowels from
+            // the magnitudes and "hears" the word. Multiplying the
+            // magnitude by random(1) before re-emitting destroys that
+            // cue too. Follow-up lowpass kills the 4–8 kHz fricative
+            // band (s/sh/f) so consonants are unrecoverable.
+            let _ = i;
+            "afftfilt=real='hypot(re,im)*random(1)*cos(random(0)*2*PI)':\
+             imag='hypot(re,im)*random(1)*sin(random(0)*2*PI)',\
+             lowpass=f=1500,\
+             aecho=0.6:0.5:40|80:0.6|0.4"
                 .to_string()
         }
         _ => {
-            // muffled — lowpass + echo (reverb-ish).
-            // Cutoff slides 1600 Hz at intensity 0 → 300 Hz at intensity 100.
-            // Below ~800 Hz, consonants are gone and speech is
-            // unintelligible while music character largely survives.
-            let cutoff = (1600.0 - 1300.0 * i).round() as u32;
-            // Reverb delay + decay scale with intensity.
-            let delay_ms = (30.0 + 50.0 * i).round() as u32;
-            let decay = 0.4 + 0.4 * i;
+            // "muffled" — the underwater preset. Drop the lowpass cutoff
+            // hard (down to 220 Hz at full intensity — was 300) and add
+            // a highpass so the result isn't a wall of sub-bass. Pile on
+            // two echo stages with offset delays for a chamber feel.
+            // Net effect at intensity 100: the listener can tell someone
+            // is speaking but cannot pick out individual phonemes.
+            let cutoff = (1200.0 - 980.0 * i).round() as u32; // 1200 → 220 Hz
+            let hp = 90; // remove sub rumble
+            let d1 = (40.0 + 60.0 * i).round() as u32; // 40 → 100 ms
+            let d2 = (90.0 + 100.0 * i).round() as u32; // 90 → 190 ms
+            let decay1 = 0.65 + 0.25 * i;
+            let decay2 = 0.45 + 0.35 * i;
             format!(
-                "lowpass=f={cutoff},aecho=0.7:0.7:{delay_ms}:{decay:.2}"
+                "highpass=f={hp},\
+                 lowpass=f={cutoff},\
+                 aecho=0.75:0.8:{d1}|{d2}:{decay1:.2}|{decay2:.2}"
             )
         }
     }

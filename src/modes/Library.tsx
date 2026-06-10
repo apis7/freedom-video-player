@@ -4,6 +4,11 @@ import {
   LibraryLockoutOverlay,
   useShouldLockLibrary,
 } from "../components/library/LibraryLockoutOverlay";
+import { getLibraryMode } from "../ipc/library";
+
+function libraryHasMode(m: "standalone" | "host" | "client"): boolean {
+  return getLibraryMode() === m;
+}
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../state/appStore";
@@ -1867,12 +1872,24 @@ export function LibraryMode() {
           {!initialLoadComplete ? (
             <LibraryLoadingState />
           ) : folders.length === 0 ? (
-            <EmptyState
-              title="No watched folders yet"
-              message="Add a folder in Settings → Library to start indexing your collection."
-              actionLabel="Open Library settings"
-              onAction={() => useAppStore.setState({ mode: "settings" })}
-            />
+            // Client mode: the Host's watched-folders list is what
+            // drives `folders`. An empty list here means the HOST
+            // hasn't indexed anything yet — point the user at the
+            // Host, not at this device's Settings.
+            useAppStore.getState().libraryEnabled &&
+            (libraryHasMode("client") ? (
+              <EmptyState
+                title="Connected to Host — no folders indexed yet"
+                message="The Library Host hasn't added any watched folders. Have the person managing the Host open Settings → Library and add at least one folder."
+              />
+            ) : (
+              <EmptyState
+                title="No watched folders yet"
+                message="Add a folder in Settings → Library to start indexing your collection."
+                actionLabel="Open Library settings"
+                onAction={() => useAppStore.setState({ mode: "settings" })}
+              />
+            ))
           ) : filteredRows.length === 0 ? (
             // Context-aware empty state. Empty collection/series gets a
             // useful "add a folder" CTA; filter-mismatch gets a "clear

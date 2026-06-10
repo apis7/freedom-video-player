@@ -250,6 +250,13 @@ pub fn library_search_by_filename(
     db: State<'_, LibraryDb>,
     filename: String,
 ) -> Result<Vec<String>, String> {
+    search_by_filename_core(&db, filename)
+}
+
+pub fn search_by_filename_core(
+    db: &LibraryDb,
+    filename: String,
+) -> Result<Vec<String>, String> {
     crate::log!("library", "search_by_filename: \"{filename}\"");
     let needle = filename.to_lowercase();
     let folders: Vec<(String, bool)> = {
@@ -2194,6 +2201,14 @@ pub fn library_set_custom_thumbnail(
     identity_id: i64,
     path: Option<String>,
 ) -> Result<(), String> {
+    set_custom_thumbnail_core(&db, identity_id, path)
+}
+
+pub fn set_custom_thumbnail_core(
+    db: &LibraryDb,
+    identity_id: i64,
+    path: Option<String>,
+) -> Result<(), String> {
     let now = now_unix();
     // When the user provides a source path, copy it next to EVERY video
     // file under this identity. Filename pattern is
@@ -2641,9 +2656,18 @@ pub fn library_set_mode(
         let home = crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?;
         (mode.clone(), token, home)
     };
-    // Server lifecycle: only running when mode == "host".
+    // Server lifecycle: only running when mode == "host". When the
+    // CURRENT mode change includes a tear_down, give the previous
+    // axum task a moment to release the port before bring_up tries
+    // to bind again. Cheap and avoids a silent EADDRINUSE.
     match current_mode.as_str() {
-        "host" => bring_up(&db, &supervisor, &token, home.as_deref(), &app),
+        "host" => {
+            if supervisor.is_running() {
+                tear_down(&supervisor);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            bring_up(&db, &supervisor, &token, home.as_deref(), &app);
+        }
         _ => tear_down(&supervisor),
     }
     Ok(())
@@ -2702,7 +2726,24 @@ pub fn library_set_home_folder(
             // whole reason the user is moving the home).
             if let Some(prev) = previous_home.as_deref() {
                 let prev_pb = std::path::PathBuf::from(prev);
-                let same = prev_pb.canonicalize().ok() == pb.canonicalize().ok();
+                // Prefer canonical comparison, but UNC paths often
+                // can't canonicalize (the SMB share may be momentarily
+                // unreachable, or canonicalize returns the extended-
+                // length form on Windows). Fall back to a normalized
+                // string compare so a momentary share blip doesn't
+                // make us SKIP migration thinking it's the same path.
+                let same = match (prev_pb.canonicalize(), pb.canonicalize()) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => {
+                        let norm = |p: &std::path::Path| {
+                            p.to_string_lossy()
+                                .replace('\\', "/")
+                                .trim_end_matches('/')
+                                .to_lowercase()
+                        };
+                        norm(&prev_pb) == norm(&pb)
+                    }
+                };
                 if !same && prev_pb.is_dir() {
                     let (copied, failed) = migrate_home_folder_contents(&prev_pb, &pb);
                     crate::log!(
@@ -2827,6 +2868,11 @@ pub fn library_rotate_auth_token(
             "rotate_auth_token: bouncing server with new token"
         );
         tear_down(&supervisor);
+        // Give the previous axum task a moment to drain + release the
+        // TCP socket before binding again on the same port. Without
+        // this the bind can race and fail with EADDRINUSE, leaving the
+        // Host silently down until next launch.
+        std::thread::sleep(std::time::Duration::from_millis(250));
         bring_up(&db, &supervisor, &tok, home.as_deref(), &app);
     }
     crate::log!("library", "rotate_auth_token: minted new token (len={})", tok.len());
@@ -3126,6 +3172,24 @@ pub fn library_snapshot_reveal_dir(
         std::fs::create_dir_all(&dir).map_err(|e| format!("create: {e}"))?;
     }
     library_reveal_in_explorer(dir.to_string_lossy().into_owned())
+}
+
+/// Schedule a restore-from-snapshot for the NEXT app launch. The user
+/// has to restart FVP for the restore to complete (the live SQLite
+/// handle prevents a hot swap). On next launch, the boot sequence
+/// stashes the current DB as `library-pre-restore-<timestamp>.db` then
+/// copies the snapshot over `library.db`.
+#[tauri::command]
+pub fn library_snapshot_schedule_restore(
+    db: State<'_, LibraryDb>,
+    snapshot_path: String,
+) -> Result<(), String> {
+    crate::log!(
+        "library:snapshot",
+        "schedule_restore from \"{snapshot_path}\""
+    );
+    let p = std::path::PathBuf::from(&snapshot_path);
+    crate::library::snapshot::schedule_restore(&db, &p)
 }
 
 fn mint_auth_token() -> String {

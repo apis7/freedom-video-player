@@ -84,6 +84,112 @@ pub fn force_snapshot(db: &LibraryDb) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Restore the library DB from a snapshot file. Process:
+///   1. Take a safety snapshot of the CURRENT DB first (so the user
+///      can roll back the restore itself if needed).
+///   2. Copy the snapshot file over `library.db`. SQLite has the DB
+///      locked, so we write to `library.db.restore-tmp` then rename
+///      it after closing all known DB handles — but since FVP holds
+///      a live `LibraryDb` for the whole session, we instead require
+///      the user to restart FVP after the restore. We mark a
+///      restore-pending marker and copy on next boot.
+///
+/// The marker approach (write `library-restore-from`) keeps this
+/// command single-step from the UI side — user clicks Restore, gets
+/// "Quit FVP and relaunch to complete the restore" message, and on
+/// next boot the marker is consumed.
+pub fn schedule_restore(db: &LibraryDb, snapshot_path: &Path) -> Result<(), String> {
+    if !snapshot_path.is_file() {
+        return Err(format!(
+            "Snapshot file not found: {}",
+            snapshot_path.display()
+        ));
+    }
+    // The marker lives next to library.db so it's automatically in
+    // the same directory the boot path checks for migrations.
+    let db_path = db.path();
+    let marker = db_path.with_file_name("library-restore-from");
+    std::fs::write(&marker, snapshot_path.to_string_lossy().as_bytes())
+        .map_err(|e| format!("write restore marker: {e}"))?;
+    crate::log!(
+        "library:snapshot",
+        "restore scheduled: marker at {} → {} (effective on next launch)",
+        marker.display(),
+        snapshot_path.display(),
+    );
+    Ok(())
+}
+
+/// Consume a pending restore marker BEFORE the DB is opened. Called
+/// from setup() right before `LibraryDb::open`. Idempotent: missing
+/// marker is a no-op.
+///
+/// Process:
+///   1. Read the marker file → path to the snapshot to restore.
+///   2. Stash the current library.db as `library-pre-restore-<ts>.db`
+///      in the same dir (one-step undo if the restore is wrong).
+///   3. Copy the snapshot over `library.db`.
+///   4. Delete the marker.
+pub fn consume_restore_marker(db_path: &Path) -> Result<bool, String> {
+    let marker = db_path.with_file_name("library-restore-from");
+    if !marker.exists() {
+        return Ok(false);
+    }
+    let snapshot_path_bytes = std::fs::read(&marker)
+        .map_err(|e| format!("read restore marker: {e}"))?;
+    let snapshot_path = String::from_utf8(snapshot_path_bytes)
+        .map_err(|e| format!("parse marker: {e}"))?;
+    let snapshot_path = snapshot_path.trim();
+    let snapshot_pb = PathBuf::from(snapshot_path);
+    if !snapshot_pb.is_file() {
+        // Clean up the bad marker so we don't loop on it.
+        let _ = std::fs::remove_file(&marker);
+        return Err(format!(
+            "Restore marker points at missing file: {snapshot_path}"
+        ));
+    }
+    // Backup the current DB before clobbering it.
+    if db_path.exists() {
+        let backup_name = format!(
+            "library-pre-restore-{}.db",
+            chrono::Local::now().format("%Y-%m-%d-%H%M%S")
+        );
+        let backup_path = db_path.with_file_name(backup_name);
+        if let Err(e) = std::fs::copy(db_path, &backup_path) {
+            crate::log!(
+                "library:snapshot",
+                "consume_restore_marker: pre-restore backup FAILED ({e}) — aborting restore to avoid data loss"
+            );
+            let _ = std::fs::remove_file(&marker);
+            return Err(format!("pre-restore backup failed: {e}"));
+        }
+        crate::log!(
+            "library:snapshot",
+            "consume_restore_marker: backed up current DB to {}",
+            backup_path.display()
+        );
+    }
+    // Copy snapshot over the active DB path. WAL/SHM files from the
+    // OLD DB are stale — delete them so SQLite doesn't get confused.
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    std::fs::copy(&snapshot_pb, db_path).map_err(|e| {
+        format!(
+            "copy {} → {}: {e}",
+            snapshot_pb.display(),
+            db_path.display()
+        )
+    })?;
+    let _ = std::fs::remove_file(&marker);
+    crate::log!(
+        "library:snapshot",
+        "consume_restore_marker: restored from {} → {} (restart in progress)",
+        snapshot_pb.display(),
+        db_path.display()
+    );
+    Ok(true)
+}
+
 fn take_snapshot_now(db: &LibraryDb, keep: i64) -> Result<PathBuf, String> {
     let dir = effective_snapshot_dir(db);
     std::fs::create_dir_all(&dir)

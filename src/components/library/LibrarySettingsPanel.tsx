@@ -608,12 +608,43 @@ function SnapshotBackupSection() {
           {status.entries.map((e) => (
             <div
               key={e.filename}
-              className="flex justify-between gap-2 text-[11px] font-mono px-2 py-0.5 bg-fvp-bg border border-fvp-border rounded"
+              className="flex items-center justify-between gap-2 text-[11px] font-mono px-2 py-0.5 bg-fvp-bg border border-fvp-border rounded"
             >
               <span className="truncate">{e.filename}</span>
               <span className="text-fvp-muted shrink-0">
                 {(e.size_bytes / 1024 / 1024).toFixed(1)} MB
               </span>
+              <button
+                onClick={() => {
+                  // Restore is a NEXT-LAUNCH operation because the
+                  // live SQLite handle prevents a hot swap. Confirm
+                  // first since the user is about to overwrite their
+                  // current library (the boot path stashes the
+                  // pre-restore DB as a safety net regardless).
+                  const ok = window.confirm(
+                    `Restore from ${e.filename}?\n\n` +
+                      `This will OVERWRITE your current library with this snapshot when FVP next launches.\n\n` +
+                      `Your current library will be saved as library-pre-restore-<timestamp>.db in the same folder, so you can roll the restore back manually if needed.\n\n` +
+                      `Profiles (.free) and custom thumbnails next to your videos are NOT affected.`,
+                  );
+                  if (!ok) return;
+                  void libraryIpc
+                    .snapshotScheduleRestore(e.path)
+                    .then(() => {
+                      showToast(
+                        `Restore scheduled — restart FVP to complete.`,
+                        "info",
+                        6000,
+                      );
+                      void refresh();
+                    })
+                    .catch((err) => showToast(`${err}`, "error"));
+                }}
+                className="px-2 py-0.5 text-[10px] text-fvp-accent hover:bg-fvp-accent/10 rounded shrink-0"
+                title="Schedule a restore from this snapshot — completes on next launch"
+              >
+                Restore…
+              </button>
             </div>
           ))}
         </div>

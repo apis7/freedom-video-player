@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getHostEndpoint,
   getHostHealth,
@@ -22,11 +22,43 @@ import {
  */
 export function LibraryNetworkingBanner() {
   const [, force] = useState(0);
+  const [hostInfo, setHostInfo] = useState<{
+    fvpVersion: string | null;
+    protocol: number | null;
+    latencyMs: number;
+  } | null>(null);
+  const probedFor = useRef<string | null>(null);
 
   useEffect(() => {
     const t = window.setInterval(() => force((n) => n + 1), 4000);
     return () => window.clearInterval(t);
   }, []);
+
+  // Probe /v1/health ONCE per host endpoint URL so the "Connected to…"
+  // pill can show the FVP version + protocol the Host reported. Re-
+  // probes when the endpoint URL changes. Cheap (one HTTP call), and
+  // information already exposed unauthenticated.
+  useEffect(() => {
+    const ep = getHostEndpoint();
+    if (!ep || getLibraryMode() !== "client") {
+      setHostInfo(null);
+      probedFor.current = null;
+      return;
+    }
+    if (probedFor.current === ep.url) return;
+    probedFor.current = ep.url;
+    void libraryIpc
+      .testHostConnection(ep.url, ep.token)
+      .then((r) => {
+        if (!r.reachable) return;
+        setHostInfo({
+          fvpVersion: r.fvp_version,
+          protocol: r.protocol,
+          latencyMs: r.elapsed_ms,
+        });
+      })
+      .catch(() => setHostInfo(null));
+  });
 
   const mode = getLibraryMode();
   if (mode !== "client") return null;
@@ -74,6 +106,12 @@ export function LibraryNetworkingBanner() {
   return (
     <div className="bg-fvp-ok/10 border-b border-fvp-ok/40 text-fvp-ok text-[11px] px-3 py-1 flex items-center gap-2">
       <span>✓ Library Host: {endpoint.url}</span>
+      {hostInfo && (
+        <span className="text-fvp-ok/80">
+          · FVP {hostInfo.fvpVersion ?? "?"} · protocol v
+          {hostInfo.protocol ?? "?"} · {hostInfo.latencyMs}ms
+        </span>
+      )}
     </div>
   );
 }

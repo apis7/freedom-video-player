@@ -155,7 +155,7 @@ export const libraryIpc = {
     invoke<number[]>("library_get_poster_bytes", { path }),
   refreshMetadata: (identityId: number) =>
     libInvoke<void>("refresh_metadata", { identityId }),
-  searchByFilename: (filename: string) =>
+  searchByFilenameLocal: (filename: string) =>
     invoke<string[]>("library_search_by_filename", { filename }),
   relocateFile: (fileId: number, newPath: string) =>
     libInvoke<void>("relocate_file", { fileId, newPath }),
@@ -256,6 +256,8 @@ export const libraryIpc = {
     invoke<void>("library_snapshot_set_cadence_days", { days }),
   snapshotTakeNow: () => invoke<string>("library_snapshot_take_now"),
   snapshotRevealDir: () => invoke<void>("library_snapshot_reveal_dir"),
+  snapshotScheduleRestore: (snapshotPath: string) =>
+    invoke<void>("library_snapshot_schedule_restore", { snapshotPath }),
   hostServerStatus: () =>
     invoke<HostServerStatus>("library_host_server_status"),
   testHostConnection: (url: string, token: string | null) =>
@@ -285,10 +287,21 @@ export const libraryIpc = {
     }),
   findDuplicates: () =>
     libInvoke<DuplicateCluster[]>("find_duplicates"),
+  // setCustomThumbnail: routes through libInvoke so it hits the Host's
+  // disk in Client mode (the Host copies the picked image to sibling
+  // `.fvp-thumb.<ext>` files next to each video). The PATH the Client
+  // sends must be reachable from the HOST — typically a UNC path on the
+  // same network share. A local-to-the-Client path will fail with a
+  // clear "source not found" from the Host.
   setCustomThumbnail: (identityId: number, path: string | null) =>
-    invoke<void>("library_set_custom_thumbnail", { identityId, path }),
+    libInvoke<void>("set_custom_thumbnail", { identityId, path }),
+  // revealInExplorer stays local — opens the Client's Explorer to the
+  // (likely UNC) path. If the Client doesn't have the share mounted,
+  // Explorer surfaces its own error; we don't redirect this to the Host.
   revealInExplorer: (path: string) =>
     invoke<void>("library_reveal_in_explorer", { path }),
+  searchByFilename: (filename: string) =>
+    libInvoke<string[]>("search_by_filename", { filename }),
   applyTmdbId: (identityId: number, tmdbId: number) =>
     libInvoke<void>("apply_tmdb_id", { identityId, tmdbId }),
   smartTmdbSearch: (groupKind: "collection" | "series", groupId: number) =>

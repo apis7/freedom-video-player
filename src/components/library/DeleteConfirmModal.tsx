@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { useAppStore } from "../../state/appStore";
-import { libraryIpc, type LibraryRow } from "../../ipc/library";
+import {
+  getLibraryMode,
+  libraryIpc,
+  type LibraryRow,
+} from "../../ipc/library";
 
 interface Props {
   rows: LibraryRow[];
@@ -70,6 +74,12 @@ export function DeleteConfirmModal({
   );
   const hasNetworkFiles = networkRows.length > 0;
   const allNetworkFiles = networkRows.length === rows.length;
+  // Client mode: the actual deletion runs on the HOST'S machine. Make
+  // sure the user understands that — file paths displayed here are
+  // Host-perspective paths, and "send to Recycle Bin" lands in the
+  // HOST'S recycle bin, not theirs. Surface a banner so this isn't
+  // silent.
+  const isClient = getLibraryMode() === "client";
 
   const confirm = async () => {
     if (busy) return;
@@ -120,6 +130,14 @@ export function DeleteConfirmModal({
           </div>
         </header>
 
+        {isClient && (
+          <div className="mx-5 mt-3 px-3 py-2 bg-fvp-warn/10 border border-fvp-warn text-fvp-warn text-[11px] rounded">
+            <strong>Client mode:</strong> this delete runs on the{" "}
+            <strong>Host machine</strong>. "Send to Recycle Bin" lands in the
+            HOST's recycle bin, not yours. "Remove from Library" drops the
+            row from the Host's DB.
+          </div>
+        )}
         <div className="px-5 py-3 max-h-[180px] overflow-y-auto text-[11px] text-fvp-muted space-y-0.5">
           {rows.slice(0, 8).map((r) => (
             <div key={r.file.id} className="truncate font-mono">

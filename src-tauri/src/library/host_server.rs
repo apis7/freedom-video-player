@@ -200,7 +200,12 @@ pub fn write_discovery_file(
         fvp_version: env!("CARGO_PKG_VERSION"),
         updated_at: now,
     };
-    let json = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    // Don't fall back to an empty string on serialization failure —
+    // an empty file silently breaks Client auto-discovery. Map it to
+    // a real I/O error so the caller can log and surface.
+    let json = serde_json::to_string_pretty(&payload).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("serialize discovery: {e}"))
+    })?;
     std::fs::write(home.join("host-discovery.json"), json)?;
     crate::log!(
         "library:host",
@@ -414,6 +419,8 @@ async fn ipc_dispatch(
         "transfer_curation" => call_transfer_curation(&state.db, args),
         "relocate_file" => call_relocate_file(&state.db, args),
         "rename_file" => call_rename_file(&state.db, args),
+        "search_by_filename" => call_search_by_filename(&state.db, args),
+        "set_custom_thumbnail" => call_set_custom_thumbnail(&state.db, args),
         _ => {
             crate::log!(
                 "library:host",
@@ -1501,6 +1508,23 @@ fn call_relocate_file(db: &LibraryDb, args: Value) -> Result<Value, String> {
         "library:host",
         "relocate_file: file_id={file_id} → {new_path}"
     );
+    Ok(json!({"ok": true}))
+}
+
+fn call_search_by_filename(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let filename = arg_str(&args, "filename")?;
+    let results = crate::commands::library::search_by_filename_core(db, filename)?;
+    serde_json::to_value(results).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_set_custom_thumbnail(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let identity_id = arg_i64(&args, "identity_id")?;
+    let path = arg_opt_str(&args, "path");
+    // The path arg, when Some, MUST be readable from the Host's
+    // filesystem (NOT the Client's). The Tauri command surface
+    // documents this; if a Client passes a Client-local path, the
+    // Host returns "Source file not found" which the UI surfaces.
+    crate::commands::library::set_custom_thumbnail_core(db, identity_id, path)?;
     Ok(json!({"ok": true}))
 }
 

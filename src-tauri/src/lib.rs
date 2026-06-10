@@ -96,6 +96,27 @@ pub fn run() {
             match app.path().app_local_data_dir() {
                 Ok(dir) => {
                     let db_path = dir.join("library.db");
+                    // Restore marker (from Settings → Restore from
+                    // snapshot) is consumed BEFORE the DB is opened.
+                    // The Tauri command writes the marker; the boot
+                    // sequence completes the restore. Idempotent on
+                    // a clean launch (no marker → no-op).
+                    match library::snapshot::consume_restore_marker(&db_path) {
+                        Ok(true) => {
+                            log!(
+                                "library:snapshot",
+                                "restore-from-snapshot completed at {}",
+                                db_path.display()
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            log!(
+                                "library:snapshot",
+                                "restore marker consumption FAILED: {e} (continuing with existing DB)"
+                            );
+                        }
+                    }
                     match library::LibraryDb::open(&db_path) {
                         Ok(db) => {
                             log!(
@@ -269,6 +290,7 @@ pub fn run() {
             commands::library::library_snapshot_set_cadence_days,
             commands::library::library_snapshot_take_now,
             commands::library::library_snapshot_reveal_dir,
+            commands::library::library_snapshot_schedule_restore,
             commands::library::library_set_poster_cache_cap,
             commands::library::library_find_probable_pairs,
             commands::library::library_transfer_curation,

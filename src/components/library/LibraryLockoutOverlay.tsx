@@ -120,12 +120,16 @@ export function LibraryLockoutOverlay({
   }, []);
 
   // If a list_items call elsewhere succeeded, getHostConnectivity is
-  // now "ready" — bow out so the normal Library renders.
+  // now "ready" — bow out so the normal Library renders. Subscribed
+  // to stateVersion via useSyncExternalStore above, so this fires
+  // when host state actually changes (NOT every render — empty deps
+  // here without that subscription would loop).
+  const stateVersion = getHostStateVersion();
   useEffect(() => {
     if (getHostConnectivity() === "ready") {
       onResolved();
     }
-  });
+  }, [stateVersion, onResolved]);
 
   const health = getHostHealth();
   const ep = getHostEndpoint();

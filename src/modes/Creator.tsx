@@ -3351,7 +3351,7 @@ function actionLabelByType(t: SnipAction["type"]): string {
     case "beep":
       return "Beep";
     case "mute_dialogue":
-      return "Mute dialogue";
+      return "Remove dialogue";
     case "audio_blur":
       return "Audio blur";
   }

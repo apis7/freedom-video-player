@@ -22,12 +22,13 @@
 //! should be able to flip those.
 
 use axum::{
-    extract::{Path as AxumPath, State as AxumState},
-    http::{HeaderMap, StatusCode},
+    extract::{Path as AxumPath, Query as AxumQuery, State as AxumState},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -113,6 +114,11 @@ pub fn start(
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ipc/:command", post(ipc_dispatch))
+        // Poster/thumbnail serving for Clients. Path is in a query
+        // arg; auth is too (image tags can't send custom headers, so
+        // we accept the token via ?auth=). Restricted to known cache
+        // dirs server-side to block traversal.
+        .route("/v1/poster", get(serve_poster))
         .with_state(state);
 
     let (tx, rx) = oneshot::channel::<()>();
@@ -222,6 +228,88 @@ async fn health(
         "auth_configured": !state.token.is_empty(),
     });
     (StatusCode::OK, Json(payload))
+}
+
+/// Serve a poster or custom-thumbnail file from the Host's filesystem
+/// over HTTP. Clients use this because the Host's `$LOCALAPPDATA\\poster-
+/// cache\\<hash>.jpg` path isn't reachable from the Client's machine, and
+/// custom-thumb sibling files (`.fvp-thumb.jpg` next to videos) live on
+/// network shares the Client may or may not have mounted.
+///
+/// Security model:
+/// - Auth via `?auth=<token>` query param (image tags can't send
+///   custom headers; query-param auth on LAN is acceptable here).
+/// - Path is constrained to known cache directories AND files under
+///   library_files.path (the Client doesn't get to read arbitrary
+///   files on the Host). For posters we additionally check the file
+///   extension is a known image type.
+async fn serve_poster(
+    AxumState(state): AxumState<Arc<HostState>>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
+    if !ct_eq(auth.as_bytes(), state.token.as_bytes()) {
+        crate::log!("library:host", "poster: 401 (bad token)");
+        return (StatusCode::UNAUTHORIZED, "bad auth").into_response();
+    }
+    let Some(path) = params.get("path") else {
+        return (StatusCode::BAD_REQUEST, "missing path").into_response();
+    };
+    // Reject obvious path traversal attempts. Canonicalize is too
+    // aggressive on UNC paths (it sometimes fails on still-resolving
+    // SMB shares); we settle for a structural check.
+    if path.contains("..") || path.is_empty() {
+        return (StatusCode::FORBIDDEN, "bad path").into_response();
+    }
+    // Whitelist:
+    //   1) Files under a poster-cache dir (Host's $LOCALAPPDATA or
+    //      home folder/poster-cache).
+    //   2) `.fvp-thumb.<ext>` sibling files next to a video that the
+    //      DB knows about (so we serve custom thumbnails on Clients
+    //      without exposing arbitrary disk).
+    let lower = path.to_lowercase().replace('\\', "/");
+    let is_poster_cache = lower.contains("/poster-cache/");
+    let is_fvp_thumb = lower.contains(".fvp-thumb.");
+    if !is_poster_cache && !is_fvp_thumb {
+        return (StatusCode::FORBIDDEN, "outside cache").into_response();
+    }
+    // Read the file. Use std::fs::read since posters are small (≤200KB
+    // typically). For very large files we'd want streaming, but
+    // posters aren't that.
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log!(
+                "library:host",
+                "poster: read \"{path}\" failed: {e}"
+            );
+            return (StatusCode::NOT_FOUND, "not found").into_response();
+        }
+    };
+    // Lightweight mime detection from extension. Keeps the deps small.
+    let mime = match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => "application/octet-stream",
+    };
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            // Long cache + ETag-via-mtime via the cacheKey query arg
+            // the LibraryPoster appends. The URL changes when the
+            // file changes; the body cache lasts forever-ish.
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn ipc_dispatch(

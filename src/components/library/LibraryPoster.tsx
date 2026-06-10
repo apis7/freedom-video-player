@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useState } from "react";
+import { getHostEndpoint, getLibraryMode } from "../../ipc/library";
 
 interface Props {
   /** Custom thumbnail set by the user (takes precedence over TMDb poster). */
@@ -46,7 +47,12 @@ export function LibraryPoster({
 }: Props) {
   const source = customThumbnailPath || posterLocalPath || null;
   const [loadError, setLoadError] = useState(false);
-  const baseUrl = source ? convertFileSrc(source) : null;
+  // In Client mode the source path is the Host's local filesystem path
+  // (or a UNC path the Client may not have mounted). Route the image
+  // request through the Host's GET /v1/poster endpoint so it works
+  // regardless. The Host re-serves the bytes with strong Cache-Control
+  // so the webview caches them across renders.
+  const baseUrl = source ? resolveImageUrl(source) : null;
   const url =
     baseUrl && cacheKey != null
       ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}v=${cacheKey}`
@@ -120,4 +126,30 @@ export function LibraryPoster({
       )}
     </div>
   );
+}
+
+/**
+ * Build the URL for an image whose absolute path lives on the Host. In
+ * Host or Standalone mode that's the local filesystem (use Tauri's
+ * asset:// protocol). In Client mode the path likely points at a
+ * directory the Client can't see, so we route through the Host's
+ * GET /v1/poster endpoint instead — auth via query param because
+ * <img> tags can't send custom headers.
+ *
+ * Falls back to asset:// when Client mode lacks a configured endpoint
+ * (the lockout overlay should already be covering the user in that
+ * case, but rendering an asset:// URL is still less broken than null).
+ */
+function resolveImageUrl(absolutePath: string): string {
+  if (getLibraryMode() === "client") {
+    const ep = getHostEndpoint();
+    if (ep) {
+      const base = ep.url.replace(/\/+$/, "");
+      return (
+        `${base}/v1/poster?path=${encodeURIComponent(absolutePath)}` +
+        `&auth=${encodeURIComponent(ep.token)}`
+      );
+    }
+  }
+  return convertFileSrc(absolutePath);
 }

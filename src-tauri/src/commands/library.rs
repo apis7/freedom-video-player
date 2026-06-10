@@ -2651,14 +2651,30 @@ pub fn library_set_mode(
 
 /// Set the home folder. When the path is Some, bootstrap the on-disk
 /// structure (poster-cache/, README.txt, auth-token file, host-discovery
-/// placeholder). When None, just clears the setting — files left on the
-/// share intact so other installs still see them.
+/// placeholder). When changing FROM an existing path TO a new one, the
+/// `poster-cache/` directory is copied over so the user doesn't lose
+/// cached posters.
+///
+/// IMPORTANT: the library DB itself is NEVER on the home folder (SQLite
+/// over SMB corrupts). Switching the home folder does not lose your
+/// library, tags, collections, series, watch history, profiles, or
+/// custom thumbnails — those all live elsewhere:
+///   - DB: $LOCALAPPDATA on the Host
+///   - profiles (.free): next to each video file
+///   - custom thumbs (.fvp-thumb.jpg): next to each video file
+///   - poster cache: in the home folder (migrated on change)
 #[tauri::command]
 pub fn library_set_home_folder(
     db: State<'_, LibraryDb>,
     supervisor: State<'_, HostSupervisor>,
     path: Option<String>,
 ) -> Result<(), String> {
+    // Read the PREVIOUS home folder before we change anything, so we
+    // can migrate contents when the user picks a new one.
+    let previous_home: Option<String> = {
+        let conn = db.lock();
+        crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?
+    };
     match path.as_deref() {
         None => {
             crate::log!("library", "set_home_folder → cleared");
@@ -2677,6 +2693,25 @@ pub fn library_set_home_folder(
             }
             if !pb.is_dir() {
                 return Err(format!("Path is not a directory: {p}"));
+            }
+            // Migrate the poster cache from the OLD home folder if there
+            // was one and it's different from the new one. Best-effort —
+            // log + continue on copy failures. We don't BLOCK on this
+            // because (a) posters can be re-fetched from TMDb anyway,
+            // and (b) the old folder may already be unreachable (the
+            // whole reason the user is moving the home).
+            if let Some(prev) = previous_home.as_deref() {
+                let prev_pb = std::path::PathBuf::from(prev);
+                let same = prev_pb.canonicalize().ok() == pb.canonicalize().ok();
+                if !same && prev_pb.is_dir() {
+                    let (copied, failed) = migrate_home_folder_contents(&prev_pb, &pb);
+                    crate::log!(
+                        "library",
+                        "set_home_folder: migrated {copied} file(s) from \"{}\" to \"{}\" ({failed} failed)",
+                        prev_pb.display(),
+                        pb.display(),
+                    );
+                }
             }
             crate::log!("library", "set_home_folder → {p}");
             let conn = db.lock();
@@ -3029,6 +3064,74 @@ fn write_auth_token_file(
 ) -> std::io::Result<()> {
     let p = home.join("auth-token");
     std::fs::write(p, token.as_bytes())
+}
+
+/// Best-effort copy of the home folder's user-data contents from old
+/// to new. Skips the discovery + token files (the new bootstrap step
+/// rewrites those with fresh values). Returns (copied, failed) counts.
+///
+/// Currently copies:
+///   - `poster-cache/` (all .jpg/.png files inside)
+/// Future expansion: shared settings, custom-thumbnail vault, etc.
+fn migrate_home_folder_contents(
+    old: &std::path::Path,
+    new: &std::path::Path,
+) -> (u32, u32) {
+    let mut copied = 0u32;
+    let mut failed = 0u32;
+    let cache_src = old.join("poster-cache");
+    if cache_src.is_dir() {
+        let cache_dst = new.join("poster-cache");
+        if let Err(e) = std::fs::create_dir_all(&cache_dst) {
+            crate::log!(
+                "library",
+                "migrate_home_folder_contents: create new cache dir failed: {e}"
+            );
+            failed += 1;
+        } else {
+            // Walk only one level deep — the cache is flat (one file
+            // per hash). Avoids recursion-into-symlinks surprises on
+            // network shares.
+            match std::fs::read_dir(&cache_src) {
+                Ok(it) => {
+                    for ent in it.flatten() {
+                        let from = ent.path();
+                        if !from.is_file() {
+                            continue;
+                        }
+                        let Some(name) = from.file_name() else { continue };
+                        let to = cache_dst.join(name);
+                        // Skip if the destination already exists (idempotent
+                        // re-runs don't churn).
+                        if to.exists() {
+                            continue;
+                        }
+                        match std::fs::copy(&from, &to) {
+                            Ok(_) => copied += 1,
+                            Err(e) => {
+                                failed += 1;
+                                crate::log!(
+                                    "library",
+                                    "migrate_home_folder_contents: copy {} → {} failed: {e}",
+                                    from.display(),
+                                    to.display(),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    crate::log!(
+                        "library",
+                        "migrate_home_folder_contents: read_dir {} failed: {e}",
+                        cache_src.display(),
+                    );
+                    failed += 1;
+                }
+            }
+        }
+    }
+    (copied, failed)
 }
 
 /// Create / refresh the on-share structure: README.txt, poster-cache/,

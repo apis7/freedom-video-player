@@ -57,7 +57,7 @@ blake3 = "1"
 # other FVP installs (Clients) can hit the same library over the LAN.
 # Tauri 2 already runs a tokio runtime — we add it explicitly so axum
 # can pick up the right features without depending on transitive flags.
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 # LAN IP detection for the host-discovery.json we drop in the home
 # folder — clients read it to know where the Host is listening.

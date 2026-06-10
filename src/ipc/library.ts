@@ -7,8 +7,13 @@ export {
   getLibraryMode,
   getHostEndpoint,
   getHostHealth,
+  getHostConnectivity,
+  resetHostHealth,
+  subscribeHostState,
+  getHostStateVersion,
   readHomeDiscovery,
   type HomeDiscoverySnapshot,
+  type HostConnectivity,
 } from "./libraryHostClient";
 
 export interface WatchedFolder {
@@ -128,21 +133,21 @@ export type ManualMetadataField =
   | "stars";
 
 export const libraryIpc = {
-  // Folder management — stays LOCAL even in Client mode (folder paths
-  // are Host-machine paths; the Host owns these). Clients see the
-  // current list via libInvoke("list_folders") but don't add/remove.
+  // Folder management — paths are Host-machine paths in Client mode
+  // (the Host's filesystem is the source of truth). Clients pass UNC
+  // paths the Host can resolve.
   addFolder: (path: string, recursive: boolean) =>
-    invoke<WatchedFolder>("library_add_folder", { path, recursive }),
+    libInvoke<WatchedFolder>("add_folder", { path, recursive }),
   removeFolder: (folderId: number, deleteItems: boolean) =>
-    invoke<void>("library_remove_folder", { folderId, deleteItems }),
+    libInvoke<void>("remove_folder", { folderId, deleteItems }),
   listFolders: () => libInvoke<WatchedFolder[]>("list_folders"),
   setFolderScanOnStartup: (folderId: number, value: boolean) =>
-    invoke<void>("library_set_folder_scan_on_startup", { folderId, value }),
-  rescanAll: () => invoke<void>("library_rescan_all"),
-  scanCancel: () => invoke<void>("library_scan_cancel"),
-  scanThrottle: (on: boolean) => invoke<void>("library_scan_throttle", { on }),
+    libInvoke<void>("set_folder_scan_on_startup", { folderId, value }),
+  rescanAll: () => libInvoke<void>("rescan_all"),
+  scanCancel: () => libInvoke<void>("scan_cancel"),
+  scanThrottle: (on: boolean) => libInvoke<void>("scan_throttle", { on }),
   rescanFolder: (folderId: number) =>
-    invoke<void>("library_rescan_folder", { folderId }),
+    libInvoke<void>("rescan_folder", { folderId }),
   listItems: () => libInvoke<LibraryRow[]>("list_items"),
   getRow: (fileId: number) =>
     libInvoke<LibraryRow | null>("get_row", { fileId }),
@@ -167,7 +172,7 @@ export const libraryIpc = {
   applyImageUrl: (identityId: number, imageUrl: string) =>
     invoke<string>("library_apply_image_url", { identityId, imageUrl }),
   setScopeNff: (kind: "collection" | "series", id: number, value: boolean) =>
-    invoke<void>("library_set_scope_nff", {
+    libInvoke<void>("set_scope_nff", {
       kind,
       id,
       nonFamilyFriendly: value,
@@ -207,13 +212,13 @@ export const libraryIpc = {
   suggestNext: (familyViewOn: boolean) =>
     invoke<LibraryRow | null>("library_suggest_next", { familyViewOn }),
   dismissSuggestion: (identityId: number) =>
-    invoke<void>("library_dismiss_suggestion", { identityId }),
+    libInvoke<void>("dismiss_suggestion", { identityId }),
   profileCreatorSuggest: (familyViewOn: boolean) =>
     invoke<LibraryRow | null>("library_profile_creator_suggest", { familyViewOn }),
   clearDriftWarning: (fileId: number) =>
-    invoke<void>("library_clear_drift_warning", { fileId }),
+    libInvoke<void>("clear_drift_warning", { fileId }),
   findFileByPath: (path: string) =>
-    invoke<number | null>("library_find_file_by_path", { path }),
+    libInvoke<number | null>("find_file_by_path", { path }),
   setWatchProgress: (fileId: number, progressMs: number) =>
     libInvoke<void>("set_watch_progress", { fileId, progressMs }),
   markWatched: (fileId: number) =>
@@ -293,17 +298,17 @@ export const libraryIpc = {
   reorderSeriesList: (orderedIds: number[]) =>
     libInvoke<void>("reorder_series", { orderedIds }),
   reorderCollectionItems: (collectionId: number, orderedIdentityIds: number[]) =>
-    invoke<void>("library_reorder_collection_items", {
+    libInvoke<void>("reorder_collection_items", {
       collectionId,
       orderedIdentityIds,
     }),
   reorderSeriesItems: (seriesId: number, orderedIdentityIds: number[]) =>
-    invoke<void>("library_reorder_series_items", {
+    libInvoke<void>("reorder_series_items", {
       seriesId,
       orderedIdentityIds,
     }),
   setSeriesHasSeasons: (seriesId: number, hasSeasons: boolean) =>
-    invoke<void>("library_set_series_has_seasons", { seriesId, hasSeasons }),
+    libInvoke<void>("set_series_has_seasons", { seriesId, hasSeasons }),
   analytics: (days: number, tag: string | null) =>
     invoke<AnalyticsSnapshot>("library_analytics", { days, tag }),
   setSeriesItemSeason: (
@@ -311,13 +316,13 @@ export const libraryIpc = {
     identityId: number,
     season: number | null,
   ) =>
-    invoke<void>("library_set_series_item_season", {
+    libInvoke<void>("set_series_item_season", {
       seriesId,
       identityId,
       season,
     }),
   refreshProfileStatus: (videoPath: string) =>
-    invoke<void>("library_refresh_profile_status", { videoPath }),
+    libInvoke<void>("refresh_profile_status", { videoPath }),
   listCollections: () =>
     libInvoke<CollectionRow[]>("list_collections"),
   createCollection: (name: string) =>

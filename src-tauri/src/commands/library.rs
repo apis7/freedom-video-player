@@ -40,7 +40,11 @@ impl HostSupervisor {
 
 /// Boot-time bring-up: if this install was configured as Host last
 /// session, start the server now. Called once during `setup`.
-pub fn supervisor_boot(db: &LibraryDb, supervisor: &HostSupervisor) {
+pub fn supervisor_boot(
+    db: &LibraryDb,
+    supervisor: &HostSupervisor,
+    app: &AppHandle,
+) {
     let (mode, token, home) = {
         let conn = db.lock();
         (
@@ -70,7 +74,7 @@ pub fn supervisor_boot(db: &LibraryDb, supervisor: &HostSupervisor) {
         );
         return;
     };
-    bring_up(db, supervisor, &tok, home.as_deref());
+    bring_up(db, supervisor, &tok, home.as_deref(), app);
 }
 
 /// Start the host server and (when a home folder is configured)
@@ -81,12 +85,18 @@ fn bring_up(
     supervisor: &HostSupervisor,
     token: &str,
     home: Option<&str>,
+    app: &AppHandle,
 ) {
     if supervisor.is_running() {
         crate::log!("library:host", "bring_up: server already running, no-op");
         return;
     }
-    match host_server::start(db.clone(), token.to_string(), DEFAULT_HOST_PORT) {
+    match host_server::start(
+        db.clone(),
+        token.to_string(),
+        DEFAULT_HOST_PORT,
+        app.clone(),
+    ) {
         Ok(handle) => {
             let addr = handle.addr();
             supervisor.replace(Some(handle));
@@ -2562,6 +2572,7 @@ pub fn library_get_settings(
 pub fn library_set_mode(
     db: State<'_, LibraryDb>,
     supervisor: State<'_, HostSupervisor>,
+    app: AppHandle,
     mode: String,
 ) -> Result<(), String> {
     if mode != "standalone" && mode != "host" && mode != "client" {
@@ -2594,7 +2605,7 @@ pub fn library_set_mode(
     };
     // Server lifecycle: only running when mode == "host".
     match current_mode.as_str() {
-        "host" => bring_up(&db, &supervisor, &token, home.as_deref()),
+        "host" => bring_up(&db, &supervisor, &token, home.as_deref(), &app),
         _ => tear_down(&supervisor),
     }
     Ok(())
@@ -2713,6 +2724,7 @@ pub fn library_set_host_address(
 pub fn library_rotate_auth_token(
     db: State<'_, LibraryDb>,
     supervisor: State<'_, HostSupervisor>,
+    app: AppHandle,
 ) -> Result<String, String> {
     let tok = mint_auth_token();
     let (mode, home) = {
@@ -2742,7 +2754,7 @@ pub fn library_rotate_auth_token(
             "rotate_auth_token: bouncing server with new token"
         );
         tear_down(&supervisor);
-        bring_up(&db, &supervisor, &tok, home.as_deref());
+        bring_up(&db, &supervisor, &tok, home.as_deref(), &app);
     }
     crate::log!("library", "rotate_auth_token: minted new token (len={})", tok.len());
     Ok(tok)

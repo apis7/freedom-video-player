@@ -52,6 +52,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 struct HostState {
     db: LibraryDb,
     token: String,
+    // AppHandle is needed by handlers that go through the
+    // orchestrator (add_folder, rescan, etc.) — those emit Tauri
+    // events. Cheap to clone.
+    app: tauri::AppHandle,
 }
 
 /// Live handle to a running host server. Holding it keeps the
@@ -88,6 +92,7 @@ pub fn start(
     db: LibraryDb,
     token: String,
     port: u16,
+    app: tauri::AppHandle,
 ) -> Result<HostServerHandle, String> {
     // Bind synchronously with std so we can fail fast + report the
     // real bound port back to the caller before any async work
@@ -104,7 +109,7 @@ pub fn start(
     let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
         .map_err(|e| format!("convert to tokio listener: {e}"))?;
 
-    let state = Arc::new(HostState { db, token });
+    let state = Arc::new(HostState { db, token, app });
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ipc/:command", post(ipc_dispatch))
@@ -284,6 +289,25 @@ async fn ipc_dispatch(
         // ── settings ─────────────────────────────────────────────────
         "set_clock_format" => call_set_clock_format(&state.db, args),
         "set_delete_default" => call_set_delete_default(&state.db, args),
+        // ── folder management (Host-machine paths) ───────────────────
+        "add_folder" => call_add_folder(&state.db, &state.app, args),
+        "remove_folder" => call_remove_folder(&state.db, args),
+        "set_folder_scan_on_startup" => call_set_folder_scan_on_startup(&state.db, args),
+        "rescan_all" => call_rescan_all(args),
+        "rescan_folder" => call_rescan_folder(&state.db, args),
+        "scan_cancel" => call_scan_cancel(args),
+        "scan_throttle" => call_scan_throttle(args),
+        // ── scope-level + series-detail edits ────────────────────────
+        "set_scope_nff" => call_set_scope_nff(&state.db, args),
+        "set_series_has_seasons" => call_set_series_has_seasons(&state.db, args),
+        "set_series_item_season" => call_set_series_item_season(&state.db, args),
+        "reorder_collection_items" => call_reorder_collection_items(&state.db, args),
+        "reorder_series_items" => call_reorder_series_items(&state.db, args),
+        // ── library hygiene + per-row ────────────────────────────────
+        "clear_drift_warning" => call_clear_drift_warning(&state.db, args),
+        "find_file_by_path" => call_find_file_by_path(&state.db, args),
+        "refresh_profile_status" => call_refresh_profile_status(&state.db, args),
+        "dismiss_suggestion" => call_dismiss_suggestion(&state.db, args),
         _ => {
             crate::log!(
                 "library:host",
@@ -891,6 +915,291 @@ fn call_set_delete_default(db: &LibraryDb, args: Value) -> Result<Value, String>
     }
     let conn = db.lock();
     crate::library::db::set_setting(&conn, "delete_default", &default)?;
+    Ok(json!({"ok": true}))
+}
+
+// ── Folder management + scan ops ─────────────────────────────────────
+
+fn call_add_folder(
+    db: &LibraryDb,
+    app: &tauri::AppHandle,
+    args: Value,
+) -> Result<Value, String> {
+    let path = arg_str(&args, "path")?;
+    let recursive = arg_opt_bool(&args, "recursive").unwrap_or(true);
+    let pb = std::path::PathBuf::from(&path);
+    if !pb.is_dir() {
+        return Err(format!("Not a folder (from Host's perspective): {path}"));
+    }
+    let recursive_i: i64 = if recursive { 1 } else { 0 };
+    let added_at = now_unix();
+    // Reject overlapping recursive watchers (same protection the
+    // Tauri command applies).
+    {
+        let conn = db.lock();
+        let mut stmt = conn
+            .prepare("SELECT path FROM watched_folders WHERE recursive = 1")
+            .map_err(|e| format!("prepare overlap: {e}"))?;
+        let existing: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("query overlap: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let new_norm = pb.to_string_lossy().replace('\\', "/").to_lowercase();
+        for ex in &existing {
+            let ex_norm = ex.replace('\\', "/").to_lowercase();
+            if ex_norm == new_norm {
+                continue;
+            }
+            let ex_with_sep = if ex_norm.ends_with('/') {
+                ex_norm.clone()
+            } else {
+                format!("{ex_norm}/")
+            };
+            if new_norm.starts_with(&ex_with_sep) {
+                return Err(format!(
+                    "Already watched via \"{ex}\" (recursive)."
+                ));
+            }
+        }
+    }
+    let folder_id: i64 = {
+        let conn = db.lock();
+        match conn.query_row(
+            "SELECT id FROM watched_folders WHERE path = ?1",
+            rusqlite::params![&path],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(id) => id,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                conn.execute(
+                    "INSERT INTO watched_folders(path, recursive, added_at, scan_on_startup) VALUES (?1, ?2, ?3, 0)",
+                    rusqlite::params![&path, recursive_i, added_at],
+                ).map_err(|e| format!("insert: {e}"))?;
+                conn.last_insert_rowid()
+            }
+            Err(e) => return Err(format!("query: {e}")),
+        }
+    };
+    crate::library::orchestrator::on_folder_added(
+        folder_id,
+        pb,
+        recursive,
+        app.clone(),
+    );
+    Ok(json!({
+        "id": folder_id,
+        "path": path,
+        "recursive": recursive,
+        "added_at": added_at,
+        "scan_on_startup": false,
+    }))
+}
+
+fn call_remove_folder(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let folder_id = arg_i64(&args, "folder_id")?;
+    let delete_items = arg_opt_bool(&args, "delete_items").unwrap_or(false);
+    crate::library::orchestrator::on_folder_removed(folder_id);
+    if delete_items {
+        crate::library::orchestrator::purge_folder_files(db, folder_id)?;
+    }
+    let conn = db.lock();
+    conn.execute(
+        "DELETE FROM watched_folders WHERE id = ?1",
+        rusqlite::params![folder_id],
+    )
+    .map_err(|e| format!("delete folder: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_set_folder_scan_on_startup(
+    db: &LibraryDb,
+    args: Value,
+) -> Result<Value, String> {
+    let folder_id = arg_i64(&args, "folder_id")?;
+    let value = args.get("value").and_then(|v| v.as_bool()).unwrap_or(false);
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE watched_folders SET scan_on_startup = ?1 WHERE id = ?2",
+        rusqlite::params![value as i64, folder_id],
+    )
+    .map_err(|e| format!("set: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_rescan_all(_args: Value) -> Result<Value, String> {
+    crate::library::orchestrator::enqueue_scan_all();
+    Ok(json!({"ok": true}))
+}
+
+fn call_rescan_folder(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let folder_id = arg_i64(&args, "folder_id")?;
+    let (path, recursive): (String, i64) = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path, recursive FROM watched_folders WHERE id = ?1",
+            rusqlite::params![folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| format!("lookup: {e}"))?
+    };
+    crate::library::orchestrator::enqueue_scan_folder(
+        folder_id,
+        std::path::PathBuf::from(path),
+        recursive != 0,
+    );
+    Ok(json!({"ok": true}))
+}
+
+fn call_scan_cancel(_args: Value) -> Result<Value, String> {
+    crate::library::orchestrator::request_scan_cancel();
+    Ok(json!({"ok": true}))
+}
+
+fn call_scan_throttle(args: Value) -> Result<Value, String> {
+    let on = args.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+    crate::library::orchestrator::request_scan_throttle(on);
+    Ok(json!({"ok": true}))
+}
+
+// ── Scope / series-detail / reorder ──────────────────────────────────
+
+fn call_set_scope_nff(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let kind = arg_str(&args, "kind")?;
+    let id = arg_i64(&args, "id")?;
+    let non_family_friendly =
+        args.get("non_family_friendly").and_then(|v| v.as_bool()).unwrap_or(false);
+    let table = match kind.as_str() {
+        "collection" => "library_collections",
+        "series" => "library_series",
+        _ => return Err(format!("unknown scope kind: {kind}")),
+    };
+    let conn = db.lock();
+    conn.execute(
+        &format!("UPDATE {table} SET non_family_friendly = ?1 WHERE id = ?2"),
+        rusqlite::params![non_family_friendly as i64, id],
+    )
+    .map_err(|e| format!("set scope nff: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_set_series_has_seasons(
+    db: &LibraryDb,
+    args: Value,
+) -> Result<Value, String> {
+    let series_id = arg_i64(&args, "series_id")?;
+    let has_seasons =
+        args.get("has_seasons").and_then(|v| v.as_bool()).unwrap_or(false);
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE library_series SET has_seasons = ?1 WHERE id = ?2",
+        rusqlite::params![has_seasons as i64, series_id],
+    )
+    .map_err(|e| format!("set has_seasons: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_set_series_item_season(
+    db: &LibraryDb,
+    args: Value,
+) -> Result<Value, String> {
+    let series_id = arg_i64(&args, "series_id")?;
+    let identity_id = arg_i64(&args, "identity_id")?;
+    let season = arg_opt_i64(&args, "season");
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE library_series_items SET season = ?1 WHERE series_id = ?2 AND identity_id = ?3",
+        rusqlite::params![season, series_id, identity_id],
+    )
+    .map_err(|e| format!("set season: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_reorder_collection_items(
+    db: &LibraryDb,
+    args: Value,
+) -> Result<Value, String> {
+    let collection_id = arg_i64(&args, "collection_id")?;
+    let ordered = arg_i64_array(&args, "ordered_identity_ids")?;
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
+    for (pos, id) in ordered.iter().enumerate() {
+        tx.execute(
+            "UPDATE library_collection_items SET position = ?1 WHERE collection_id = ?2 AND identity_id = ?3",
+            rusqlite::params![pos as i64, collection_id, id],
+        )
+        .map_err(|e| format!("update: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_reorder_series_items(
+    db: &LibraryDb,
+    args: Value,
+) -> Result<Value, String> {
+    let series_id = arg_i64(&args, "series_id")?;
+    let ordered = arg_i64_array(&args, "ordered_identity_ids")?;
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
+    for (pos, id) in ordered.iter().enumerate() {
+        tx.execute(
+            "UPDATE library_series_items SET position = ?1 WHERE series_id = ?2 AND identity_id = ?3",
+            rusqlite::params![pos as i64, series_id, id],
+        )
+        .map_err(|e| format!("update: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+// ── Misc per-row ─────────────────────────────────────────────────────
+
+fn call_clear_drift_warning(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let file_id = arg_i64(&args, "file_id")?;
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE library_files SET drift_warning = 0 WHERE id = ?1",
+        rusqlite::params![file_id],
+    )
+    .map_err(|e| format!("clear: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_find_file_by_path(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let path = arg_str(&args, "path")?;
+    let conn = db.lock();
+    let result = conn.query_row(
+        "SELECT id FROM library_files WHERE path = ?1",
+        rusqlite::params![path],
+        |r| r.get::<_, i64>(0),
+    );
+    match result {
+        Ok(id) => Ok(json!(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Value::Null),
+        Err(e) => Err(format!("find_file_by_path: {e}")),
+    }
+}
+
+fn call_refresh_profile_status(
+    db: &LibraryDb,
+    args: Value,
+) -> Result<Value, String> {
+    let video_path = arg_str(&args, "video_path")?;
+    crate::library::index::refresh_free_siblings_for_path(db, &video_path)?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_dismiss_suggestion(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let identity_id = arg_i64(&args, "identity_id")?;
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO library_suggestion_dismissals(identity_id, dismissed_at)
+         VALUES (?1, ?2)
+         ON CONFLICT(identity_id) DO UPDATE SET dismissed_at = excluded.dismissed_at",
+        rusqlite::params![identity_id, now_unix()],
+    )
+    .map_err(|e| format!("dismiss: {e}"))?;
     Ok(json!({"ok": true}))
 }
 

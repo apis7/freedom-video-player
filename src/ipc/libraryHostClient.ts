@@ -28,7 +28,24 @@ interface Endpoint {
 let cachedEndpoint: Endpoint | null = null;
 let lastFailureAt: number | null = null;
 let lastFailureMessage: string | null = null;
-const FAIL_BACKOFF_MS = 3000;
+let lastSuccessAt: number | null = null;
+// Bumped on every state change so React components can subscribe via
+// useSyncExternalStore without polling. Cheap counter, monotonic.
+let stateVersion = 0;
+const stateListeners = new Set<() => void>();
+function notify() {
+  stateVersion += 1;
+  for (const l of stateListeners) l();
+}
+export function subscribeHostState(cb: () => void): () => void {
+  stateListeners.add(cb);
+  return () => {
+    stateListeners.delete(cb);
+  };
+}
+export function getHostStateVersion(): number {
+  return stateVersion;
+}
 
 export function setHostEndpoint(e: Endpoint | null) {
   cachedEndpoint = e;
@@ -36,22 +53,56 @@ export function setHostEndpoint(e: Endpoint | null) {
     lastFailureAt = null;
     lastFailureMessage = null;
   }
+  // Don't reset lastSuccessAt — it's per-session, useful for the
+  // "have we ever connected" check that decides lockout vs banner.
+  notify();
 }
 export function getHostEndpoint(): Endpoint | null {
   return cachedEndpoint;
 }
+
+/**
+ * Three-state connectivity for the UI:
+ *   - "ready"   : recent success, no recent failure → normal Library.
+ *   - "stale"   : we had a success this session, but the most recent
+ *                 call failed → show banner over working stale data.
+ *   - "offline" : never successfully connected this session (or no
+ *                 endpoint configured at all) → show LOCKOUT in
+ *                 Client mode; we have nothing reliable to render.
+ */
+export type HostConnectivity = "ready" | "stale" | "offline";
+
+export function getHostConnectivity(): HostConnectivity {
+  if (!cachedEndpoint) return "offline";
+  if (lastSuccessAt === null) return "offline";
+  if (lastFailureAt !== null && lastFailureAt > lastSuccessAt) {
+    return "stale";
+  }
+  return "ready";
+}
+
 export function getHostHealth(): {
-  online: boolean;
+  connectivity: HostConnectivity;
   lastFailureAt: number | null;
   lastFailureMessage: string | null;
+  lastSuccessAt: number | null;
 } {
   return {
-    online:
-      lastFailureAt === null ||
-      Date.now() - lastFailureAt > FAIL_BACKOFF_MS * 10,
+    connectivity: getHostConnectivity(),
     lastFailureAt,
     lastFailureMessage,
+    lastSuccessAt,
   };
+}
+
+/** Reset success state — used by App.tsx boot wiring so we always
+ *  re-establish a successful call on launch before counting as
+ *  connected. */
+export function resetHostHealth() {
+  lastSuccessAt = null;
+  lastFailureAt = null;
+  lastFailureMessage = null;
+  notify();
 }
 
 /** Convert camelCase keys to snake_case so the Host dispatcher (which
@@ -100,17 +151,22 @@ export async function clientCall<T>(
       const msg = `Host ${command}: ${resp.status} ${txt}`;
       lastFailureAt = Date.now();
       lastFailureMessage = msg;
+      notify();
       throw new Error(msg);
     }
-    // Reset failure markers on success.
+    // Success: clear failure marker, stamp lastSuccessAt so the
+    // lockout/banner can distinguish "never connected" from "blip".
     lastFailureAt = null;
     lastFailureMessage = null;
+    lastSuccessAt = Date.now();
+    notify();
     return (await resp.json()) as T;
   } catch (e) {
     if (!(e instanceof Error) || !e.message.startsWith("Host ")) {
       const msg = `Host unreachable (${command}): ${e}`;
       lastFailureAt = Date.now();
       lastFailureMessage = msg;
+      notify();
       throw new Error(msg);
     }
     throw e;

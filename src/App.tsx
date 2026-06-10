@@ -29,6 +29,7 @@ import { openVideoPath, openFreeFile } from "./utils/openFileFlow";
 import {
   libraryIpc,
   readHomeDiscovery,
+  resetHostHealth,
   setHostEndpoint,
   setLibraryMode,
 } from "./ipc/library";
@@ -76,6 +77,10 @@ export function App() {
     void (async () => {
       try {
         const snap = await libraryIpc.getSettings();
+        // Fresh session — clear any cached "last success" from a
+        // previous run so the lockout overlay only flips green AFTER
+        // we actually round-trip the Host this session.
+        resetHostHealth();
         setLibraryMode(snap.library_mode);
         if (snap.library_mode === "client") {
           // Prefer auto-discovery from home folder; fall back to manual

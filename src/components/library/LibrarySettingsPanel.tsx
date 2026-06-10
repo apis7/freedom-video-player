@@ -33,6 +33,8 @@ export function LibrarySettingsPanel() {
 
   const [snap, setSnap] = useState<LibrarySettingsSnapshot | null>(null);
   const [folders, setFolders] = useState<WatchedFolder[]>([]);
+  const [showDisableLibraryConfirm, setShowDisableLibraryConfirm] =
+    useState(false);
   const [pinFlow, setPinFlow] = useState<
     | null
     | { kind: "set"; current: string | null }
@@ -115,30 +117,46 @@ export function LibrarySettingsPanel() {
         </p>
       </div>
 
-      <label className="flex items-center gap-2 cursor-pointer">
+      <label
+        className="flex items-center gap-2 cursor-pointer"
+        onClickCapture={(e) => {
+          // Window.confirm proved unreliable inside the WebView2 host
+          // (the toggle would flip and confirm wouldn't pop). Use a
+          // proper React modal instead; intercept the click on the
+          // LABEL (which is what fires the checkbox toggle in HTML)
+          // so we can show the modal BEFORE the input's checked state
+          // mutates. Turning ON is safe so it bypasses this path.
+          if (libraryEnabled) {
+            e.preventDefault();
+            e.stopPropagation();
+            setShowDisableLibraryConfirm(true);
+          }
+        }}
+      >
         <input
           type="checkbox"
           checked={libraryEnabled}
-          onChange={(e) => {
-            // Turning OFF is destructive-ish (hides Library tab, abandons
-            // any in-progress work in Library Mode). Confirm so a stray
-            // click doesn't silently lose context. Turning ON is safe.
-            if (!e.target.checked) {
-              const ok = window.confirm(
-                "Turn off Library Mode?\n\n" +
-                  "The Library tab will disappear and FVP will boot " +
-                  "straight into Player Mode. Your indexed library, " +
-                  "tags, and collections are kept — re-enabling brings " +
-                  "them back as they were.",
-              );
-              if (!ok) return;
-            }
-            setLibraryEnabled(e.target.checked);
-          }}
+          // Real toggle path runs only when the modal is bypassed (the
+          // "turning on" case). When turning off, the label's
+          // onClickCapture short-circuits before onChange ever runs.
+          onChange={(e) => setLibraryEnabled(e.target.checked)}
           className="accent-fvp-accent"
         />
         <span>Enable Library Mode</span>
       </label>
+      {showDisableLibraryConfirm && (
+        <ConfirmModal
+          title="Turn off Library Mode?"
+          body="The Library tab will disappear and FVP will boot straight into Player Mode. Your indexed library, tags, and collections are kept — re-enabling brings them back as they were."
+          confirmLabel="Turn off"
+          confirmKind="danger"
+          onCancel={() => setShowDisableLibraryConfirm(false)}
+          onConfirm={() => {
+            setLibraryEnabled(false);
+            setShowDisableLibraryConfirm(false);
+          }}
+        />
+      )}
       <p className="text-[11px] text-fvp-muted -mt-2 ml-6">
         When off, the Library tab is hidden and FVP boots straight into Player Mode.
       </p>
@@ -428,6 +446,64 @@ export function LibrarySettingsPanel() {
         />
       )}
     </section>
+  );
+}
+
+/** Lightweight in-app confirm dialog. window.confirm proved
+ *  unreliable in WebView2 in some configurations — this one always
+ *  fires and matches the rest of FVP's modal styling. */
+function ConfirmModal({
+  title,
+  body,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  confirmKind = "primary",
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  body: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  confirmKind?: "primary" | "danger";
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 z-[65] flex items-center justify-center"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-fvp-surface border border-fvp-border rounded-lg shadow-2xl p-5 max-w-md"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-sm font-semibold text-fvp-text mb-2">{title}</div>
+        <div className="text-xs text-fvp-muted mb-4 whitespace-pre-line">
+          {body}
+        </div>
+        <div className="flex justify-end gap-2 text-xs">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 text-fvp-text hover:bg-fvp-surface2 rounded"
+            autoFocus
+          >
+            {cancelLabel}
+          </button>
+          <button
+            onClick={onConfirm}
+            className={
+              "px-3 py-1.5 rounded text-white hover:opacity-90 " +
+              (confirmKind === "danger"
+                ? "bg-fvp-err"
+                : "bg-fvp-accent")
+            }
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

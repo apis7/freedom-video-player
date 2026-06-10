@@ -131,7 +131,11 @@ pub fn run() {
                             // mid-session route through `host_supervisor`
                             // which holds the live HostServerHandle.
                             let supervisor = commands::library::HostSupervisor::default();
-                            commands::library::supervisor_boot(&db, &supervisor);
+                            commands::library::supervisor_boot(
+                                &db,
+                                &supervisor,
+                                app.app_handle(),
+                            );
                             app.manage(supervisor);
                             app.manage(db);
                         }

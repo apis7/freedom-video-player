@@ -45,7 +45,9 @@ export function LibraryNetworkingBanner() {
   }
 
   const health = getHostHealth();
-  if (!health.online) {
+  // "ready" → quiet success pill; "stale" → red banner with retry;
+  // "offline" → no banner here (the parent shows the LOCKOUT instead).
+  if (health.connectivity === "stale") {
     return (
       <div className="bg-fvp-err/15 border-b border-fvp-err text-fvp-err text-xs px-3 py-1.5 flex items-center gap-2">
         <span className="font-semibold">⚠ Library Host offline</span>

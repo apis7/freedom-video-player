@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { LibraryNetworkingBanner } from "../components/library/LibraryNetworkingBanner";
+import {
+  LibraryLockoutOverlay,
+  useShouldLockLibrary,
+} from "../components/library/LibraryLockoutOverlay";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../state/appStore";
@@ -115,6 +119,11 @@ function savePrefs(prefs: LibraryUiPrefs) {
  */
 export function LibraryMode() {
   const showToast = useAppStore((s) => s.showToast);
+  // Client-mode safety gate: when we can't reach the Host, show a
+  // full-area lockout instead of broken-link rows. Player Mode and
+  // Profile Creator still work because mode switching is outside
+  // this component's tree.
+  const shouldLock = useShouldLockLibrary();
 
   const [folders, setFolders] = useState<WatchedFolder[]>([]);
   const [rows, setRows] = useState<LibraryRow[]>([]);
@@ -1383,6 +1392,14 @@ export function LibraryMode() {
 
   // pickFolder used to live here; folder management moved to Settings →
   // Library. The header's folder-plus icon now opens Settings.
+
+  if (shouldLock) {
+    return (
+      <div className="h-full bg-fvp-bg text-fvp-text flex flex-col">
+        <LibraryLockoutOverlay onResolved={() => void refreshItems()} />
+      </div>
+    );
+  }
 
   return (
     <div className="h-full bg-fvp-bg text-fvp-text flex flex-col">

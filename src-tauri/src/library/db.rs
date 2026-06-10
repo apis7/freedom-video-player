@@ -300,6 +300,29 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE library_collections ADD COLUMN non_family_friendly INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE library_series ADD COLUMN non_family_friendly INTEGER NOT NULL DEFAULT 0;
     "#,
+    // ── v12 — per-folder mtime signature cache ─────────────────────────
+    //
+    // Lets the scanner skip subtrees whose directory mtime + child count
+    // are unchanged since the last scan. Without this, every rescan
+    // stat()s every file under the root — on a 1100-file NAS share that
+    // is ~10 seconds of pure no-op IO. With this, an unchanged subtree
+    // is one mtime stat + a bulk UPDATE that clears is_missing for the
+    // files we already know about, no readdir, no per-file stat.
+    //
+    // rel_path is stored relative to the watched folder root (forward-
+    // slash normalised) so signatures survive a watched-folder rename.
+    // Empty string represents the root itself.
+    r#"
+    CREATE TABLE folder_signatures (
+        watched_folder_id INTEGER NOT NULL REFERENCES watched_folders(id) ON DELETE CASCADE,
+        rel_path TEXT NOT NULL,
+        mtime_unix INTEGER NOT NULL,
+        child_count INTEGER NOT NULL,
+        last_scanned_at INTEGER NOT NULL,
+        PRIMARY KEY (watched_folder_id, rel_path)
+    );
+    CREATE INDEX idx_folder_signatures_folder ON folder_signatures(watched_folder_id);
+    "#,
 ];
 
 /// Thread-safe handle around a single `Connection`. SQLite's serialized

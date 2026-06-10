@@ -17,12 +17,13 @@
 //! can show a spinner / "N new items" toast without polling.
 
 use crate::library::db::LibraryDb;
+use crate::library::folder_sig;
 use crate::library::index;
 use notify::event::{EventKind, ModifyKind};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use rusqlite::params;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -52,6 +53,31 @@ pub static PLAYBACK_HOLDS_FILE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_playback_holds_file(v: bool) {
     PLAYBACK_HOLDS_FILE.store(v, Ordering::Relaxed);
+}
+
+/// Returns true when a file path belongs to one of FVP's own bookkeeping
+/// artefacts (sync mirror, snapshot backups). Used to filter notify
+/// events so our own writes don't trigger a library rescan loop.
+fn is_self_write(p: &std::path::Path) -> bool {
+    let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+    // sync.rs writes:
+    //   library-sync.db, library-sync.db-wal, library-sync.db-shm,
+    //   plus host-discovery.json next to it in host mode.
+    if lower.starts_with("library-sync.db") || lower == "host-discovery.json" {
+        return true;
+    }
+    // snapshot.rs writes weekly backups named e.g.
+    //   library-snapshot-2026-06-10-161023.db (+ -wal / -shm)
+    // and the pre-restore safety copy is library-pre-restore-*.db.
+    if (lower.starts_with("library-snapshot-") || lower.starts_with("library-pre-restore-"))
+        && (lower.ends_with(".db") || lower.ends_with(".db-wal") || lower.ends_with(".db-shm"))
+    {
+        return true;
+    }
+    false
 }
 
 /// Per-loop cancellation flag for the currently-running scan. The UI
@@ -94,6 +120,16 @@ struct State {
     /// timestamp are ignored — kills the SMB-read-triggers-rescan
     /// feedback loop. Updated by `run_scan_folder` after each pass.
     last_scan_completed_at: HashMap<i64, Instant>,
+    /// Folder ids whose ScanFolder job is currently queued OR
+    /// running. A second enqueue for the same folder_id while the
+    /// first hasn't finished is a no-op — that prevents notify
+    /// bursts (or rapid manual rescans) from piling up a tower of
+    /// identical scans behind the worker. Cleared by the worker as
+    /// soon as the job starts.
+    queued_folders: HashSet<i64>,
+    /// True when a `ScanAll` job is queued OR running. Same idea: a
+    /// second ScanAll while one is in flight is a no-op.
+    scan_all_in_flight: bool,
 }
 
 struct Orchestrator {
@@ -113,14 +149,22 @@ pub fn init(app: AppHandle, db: LibraryDb) {
     let state: Arc<Mutex<State>> = Arc::new(Mutex::new(State::default()));
     let worker_app = app.clone();
     let worker_db = db.clone();
+    let worker_state = state.clone();
     thread::spawn(move || {
         while let Ok(job) = rx.recv() {
             match job {
                 Job::ScanFolder { folder_id, path, recursive } => {
+                    // Remove from the queued set BEFORE running so a
+                    // legitimate "user added another file mid-scan"
+                    // notify can re-queue once we finish — without
+                    // this, the in-flight folder would be locked out
+                    // for the entire scan duration.
                     run_scan_folder(&worker_app, &worker_db, folder_id, &path, recursive);
+                    worker_state.lock().queued_folders.remove(&folder_id);
                 }
                 Job::ScanAll { startup_only } => {
                     run_scan_all(&worker_app, &worker_db, startup_only);
+                    worker_state.lock().scan_all_in_flight = false;
                 }
             }
         }
@@ -137,22 +181,54 @@ pub fn init(app: AppHandle, db: LibraryDb) {
         .send(Job::ScanAll { startup_only: true });
 }
 
-/// Queue a re-scan of one folder.
+/// Queue a re-scan of one folder. Coalesces: if a scan for this
+/// folder_id is already queued or running, this call is a no-op and
+/// the in-flight scan picks up any newly-changed files anyway.
 pub fn enqueue_scan_folder(folder_id: i64, path: PathBuf, recursive: bool) {
     let Some(o) = ORCHESTRATOR.get() else { return };
+    {
+        let mut s = o.state.lock();
+        if !s.queued_folders.insert(folder_id) {
+            // Already queued / running — coalesce.
+            crate::log!(
+                "library:scan",
+                "enqueue_scan_folder({folder_id}): COALESCED (a scan for this folder is already in flight)"
+            );
+            return;
+        }
+    }
     let _ = o.job_tx.send(Job::ScanFolder { folder_id, path, recursive });
 }
 
 /// Queue a re-scan of every watched folder. Manual command path —
-/// always scans every folder regardless of scan_on_startup.
+/// always scans every folder regardless of scan_on_startup. Coalesces
+/// the same way: a second ScanAll while one is running is a no-op.
 pub fn enqueue_scan_all() {
     let Some(o) = ORCHESTRATOR.get() else { return };
+    {
+        let mut s = o.state.lock();
+        if s.scan_all_in_flight {
+            crate::log!(
+                "library:scan",
+                "enqueue_scan_all: COALESCED (a ScanAll is already in flight)"
+            );
+            return;
+        }
+        s.scan_all_in_flight = true;
+    }
     let _ = o.job_tx.send(Job::ScanAll { startup_only: false });
 }
 
 /// Queue the boot-time pass — only folders flagged scan_on_startup=1.
 pub fn enqueue_scan_startup() {
     let Some(o) = ORCHESTRATOR.get() else { return };
+    {
+        let mut s = o.state.lock();
+        if s.scan_all_in_flight {
+            return;
+        }
+        s.scan_all_in_flight = true;
+    }
     let _ = o.job_tx.send(Job::ScanAll { startup_only: true });
 }
 
@@ -188,6 +264,20 @@ pub fn watch_folder(folder_id: i64, path: PathBuf, app: AppHandle) -> Result<(),
                     | EventKind::Modify(ModifyKind::Name(_))
             );
             if !interesting {
+                return;
+            }
+            // Filter OUR OWN writes. The sync module pushes
+            // `library-sync.db` (+ its WAL / SHM sidecars) to the
+            // home folder every cadence_minutes. When the home folder
+            // IS the watched folder root, that push fires a notify
+            // event that the orchestrator was happily turning into a
+            // full library rescan — the user reported "I added one
+            // movie and the whole library re-scans every 5 minutes."
+            // Sync's own DB and the snapshot backups it writes next
+            // to it are never video files and never indexed, so
+            // ignoring events on them is safe.
+            let any_self_write = ev.paths.iter().any(|p| is_self_write(p));
+            if any_self_write {
                 return;
             }
             let now = Instant::now();
@@ -307,13 +397,37 @@ fn run_scan_folder(
     }
     crate::log!("library:scan", "enumerating videos under {}", path.display());
     let enumerate_start = Instant::now();
-    let files = index::enumerate_videos(path, recursive, 8);
+    // Smart enumeration: walk the tree, but skip per-file work for
+    // directories whose mtime + child_count match the cached
+    // signature. Cold cache (first scan) = everything dirty, same
+    // behaviour as before. Warm cache + no on-disk changes = zero
+    // dirty files, just a tree of mtime stats.
+    let max_depth = if recursive { 8 } else { 1 };
+    let cached_signatures = folder_sig::load_signatures(db, folder_id);
+    let cached_count = cached_signatures.len();
+    let smart = folder_sig::smart_enumerate(path, max_depth, &cached_signatures);
+    let files: Vec<std::path::PathBuf> = smart.dirty_files.clone();
     let total = files.len();
+    let total_dirs = smart.new_signatures.len();
+    let clean_dir_count = smart.clean_dirs.len();
+    let dirty_dir_count = smart.dirty_dirs.len();
     crate::log!(
         "library:scan",
-        "enumerated {total} video files in {:?}",
+        "smart-enumerate: {total_dirs} dirs ({clean_dir_count} clean, {dirty_dir_count} dirty) — {total} dirty file(s) need indexing — cache had {cached_count} prior signature(s) — walk took {:?}",
         enumerate_start.elapsed()
     );
+    // Bulk-clear is_missing for every file row whose parent dir was
+    // matched as clean — we KNOW those files are still present and
+    // unchanged, no per-file stat needed.
+    let bulk_clear_started = Instant::now();
+    let bulk_cleared = bulk_mark_present_in_clean_dirs(db, folder_id, &smart.clean_dirs);
+    if bulk_cleared > 0 {
+        crate::log!(
+            "library:scan",
+            "bulk-marked {bulk_cleared} file row(s) present (in {clean_dir_count} clean dir(s)) in {:?} — skipped per-file stat",
+            bulk_clear_started.elapsed()
+        );
+    }
     // Fresh scan — clear any stale cancel flag the user may have set.
     SCAN_CANCEL.store(false, Ordering::Relaxed);
     let mut new_items = 0u32;
@@ -400,11 +514,31 @@ fn run_scan_folder(
         new_items,
         skipped_unchanged
     );
-    // After every scan, refresh the cached has_free_sibling column for
-    // every file in this folder. This is the one expensive .free dir
-    // walk; subsequent list_items calls read from the DB only.
-    if let Err(e) = index::refresh_free_siblings(db, folder_id) {
-        crate::log!("library", "refresh_free_siblings failed: {e}");
+    // Persist the freshly-computed directory signatures so the next
+    // scan can skip whatever didn't change. Done UNCONDITIONALLY — a
+    // partial scan (user cancelled) still produced valid signatures
+    // for the dirs it visited, and future scans of those dirs will
+    // still benefit from the cache.
+    if let Err(e) = folder_sig::save_signatures(db, folder_id, &smart.new_signatures) {
+        crate::log!("library", "save folder signatures failed: {e}");
+    }
+    // After every scan, refresh has_free_sibling. When the smart
+    // walker reported any dirty dirs we still run the full sweep —
+    // because moving a video into a NEW directory means the OLD dir
+    // also needs its .free state recomputed. But when the smart walk
+    // says "nothing changed at all" (zero dirty dirs AND zero dirty
+    // files), the .free sweep would be 100% no-op and we skip it,
+    // which is where the biggest no-op-scan savings come from.
+    let nothing_changed = smart.dirty_dirs.is_empty() && total == 0;
+    if !nothing_changed {
+        if let Err(e) = index::refresh_free_siblings(db, folder_id) {
+            crate::log!("library", "refresh_free_siblings failed: {e}");
+        }
+    } else {
+        crate::log!(
+            "library:scan",
+            "refresh_free_siblings: SKIPPED (smart-cache: nothing changed)"
+        );
     }
     let _ = app.emit(
         "library:scan-done",
@@ -507,6 +641,124 @@ pub fn on_folder_added(folder_id: i64, path: PathBuf, recursive: bool, app: AppH
 /// FK drop the files / clean up identities the caller no longer needs.
 pub fn on_folder_removed(folder_id: i64) {
     unwatch_folder(folder_id);
+}
+
+/// Clear `is_missing` (and `missing_since`) for every library_files
+/// row whose path lives directly under one of the given directories.
+/// Used by the smart scanner: a directory's mtime + child count
+/// matched the cached signature, so we already know every file in
+/// it is still there — no need to re-stat each one.
+///
+/// Returns the number of rows updated. Uses path-prefix matching in
+/// memory (single SELECT pulls all rows for the folder; we group by
+/// parent and bulk-update by id), which is cheaper than emitting one
+/// UPDATE per clean dir.
+fn bulk_mark_present_in_clean_dirs(
+    db: &LibraryDb,
+    folder_id: i64,
+    clean_dirs: &[PathBuf],
+) -> u32 {
+    if clean_dirs.is_empty() {
+        return 0;
+    }
+    use std::collections::HashSet;
+    let clean_set: HashSet<String> = clean_dirs
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    // Snapshot every file row for this folder, then filter in Rust.
+    let rows: Vec<(i64, String)> = {
+        let conn = db.lock();
+        let mut stmt = match conn
+            .prepare("SELECT id, path FROM library_files WHERE watched_folder_id = ?1")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                crate::log!("library", "bulk-mark prep: {e}");
+                return 0;
+            }
+        };
+        stmt.query_map(params![folder_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+        .unwrap_or_default()
+    };
+
+    let mut to_clear: Vec<i64> = Vec::new();
+    for (id, path) in rows {
+        let parent = match std::path::Path::new(&path).parent() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => continue,
+        };
+        if clean_set.contains(&parent) {
+            to_clear.push(id);
+        }
+    }
+    if to_clear.is_empty() {
+        return 0;
+    }
+
+    // Chunked UPDATE — SQLite's expression-tree limit means we don't
+    // want to slap thousands of `?N` placeholders in one go.
+    let mut total: u32 = 0;
+    let conn = db.lock();
+    for chunk in to_clear.chunks(500) {
+        let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE library_files
+                SET is_missing = 0,
+                    missing_since = NULL
+              WHERE id IN ({placeholders})
+                AND (is_missing = 1 OR missing_since IS NOT NULL)"
+        );
+        let params_vec: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        match conn.execute(&sql, params_vec.as_slice()) {
+            Ok(n) => total += n as u32,
+            Err(e) => {
+                crate::log!("library", "bulk-mark UPDATE failed: {e}");
+                break;
+            }
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod self_write_tests {
+    use super::is_self_write;
+    use std::path::PathBuf;
+
+    #[test]
+    fn matches_sync_db_and_sidecars() {
+        assert!(is_self_write(&PathBuf::from("\\\\NAS\\Movies\\library-sync.db")));
+        assert!(is_self_write(&PathBuf::from("\\\\NAS\\Movies\\library-sync.db-wal")));
+        assert!(is_self_write(&PathBuf::from("\\\\NAS\\Movies\\library-sync.db-shm")));
+    }
+
+    #[test]
+    fn matches_snapshot_and_safety_backups() {
+        assert!(is_self_write(&PathBuf::from(
+            "C:\\Users\\u\\AppData\\com.fvp.desktop\\library-snapshot-2026-06-10-161023.db"
+        )));
+        assert!(is_self_write(&PathBuf::from(
+            "C:\\AppData\\com.fvp.desktop\\library-pre-restore-2026-06-10-161023.db"
+        )));
+    }
+
+    #[test]
+    fn matches_host_discovery() {
+        assert!(is_self_write(&PathBuf::from("\\\\NAS\\Movies\\host-discovery.json")));
+    }
+
+    #[test]
+    fn does_not_match_real_videos() {
+        assert!(!is_self_write(&PathBuf::from("\\\\NAS\\Movies\\Eagle Eye 2008.mp4")));
+        assert!(!is_self_write(&PathBuf::from("/library/movies/library-stuff.mkv")));
+        assert!(!is_self_write(&PathBuf::from("\\\\NAS\\Movies\\Random.db.mkv")));
+    }
 }
 
 /// Drop ALL files from a folder regardless of their on-disk presence.

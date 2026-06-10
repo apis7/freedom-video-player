@@ -19,6 +19,7 @@
 pub mod db;
 pub mod enrich;
 pub mod fingerprint;
+pub mod folder_sig;
 pub mod host_server;
 pub mod index;
 pub mod metadata;

@@ -84,6 +84,10 @@ windows-sys = { version = "0.59", features = [
 #   ed25519-dalek (.free signing)
 #   img_hash (perceptual frame hash)
 
+[dev-dependencies]
+# Scratch filesystem trees for the folder_sig + index tests.
+tempfile = "3"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

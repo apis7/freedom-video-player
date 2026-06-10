@@ -284,6 +284,7 @@ pub fn run() {
             commands::library::library_host_server_status,
             commands::library::library_test_host_connection,
             commands::library::library_read_home_discovery,
+            commands::library::library_diagnose_home_folder,
             commands::library::library_snapshot_status,
             commands::library::library_snapshot_set_enabled,
             commands::library::library_snapshot_set_keep_count,

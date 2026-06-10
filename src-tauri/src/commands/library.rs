@@ -3012,6 +3012,141 @@ pub fn library_test_host_connection(
     }
 }
 
+/// Full diagnostic of the home folder + discovery state. Used by the
+/// lockout overlay and Settings panel to give the user a CLEAR
+/// explanation of what's wrong — distinguishing "folder unreachable"
+/// from "folder reachable but no Host has registered yet" from
+/// "everything's fine, Host is just offline."
+#[derive(serde::Serialize)]
+pub struct HomeFolderDiagnosis {
+    pub home_folder_set: bool,
+    pub home_folder_path: Option<String>,
+    pub home_folder_reachable: bool,
+    pub discovery_file_exists: bool,
+    /// True when the file exists but is the bootstrap placeholder
+    /// (host field is null/empty). Indicates the folder was set up
+    /// but no Host has registered yet.
+    pub discovery_file_is_placeholder: bool,
+    pub auth_token_file_exists: bool,
+    pub auth_token_nonempty: bool,
+    pub host_address: Option<String>,
+    /// Human-readable summary of what's wrong (or "ok"). Safe to
+    /// display directly in the UI.
+    pub summary: String,
+    /// Machine-readable action tag for the UI to gate buttons on.
+    /// One of: "ready" | "fix_home_folder" | "become_host" |
+    /// "wait_for_host" | "set_home_folder".
+    pub suggested_action: String,
+}
+
+#[tauri::command]
+pub fn library_diagnose_home_folder(
+    db: State<'_, LibraryDb>,
+) -> Result<HomeFolderDiagnosis, String> {
+    let home: Option<String> = {
+        let conn = db.lock();
+        crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?
+    };
+    let Some(home_str) = home else {
+        return Ok(HomeFolderDiagnosis {
+            home_folder_set: false,
+            home_folder_path: None,
+            home_folder_reachable: false,
+            discovery_file_exists: false,
+            discovery_file_is_placeholder: false,
+            auth_token_file_exists: false,
+            auth_token_nonempty: false,
+            host_address: None,
+            summary: "No home folder set yet. Pick one in Settings to enable sharing.".into(),
+            suggested_action: "set_home_folder".into(),
+        });
+    };
+    let home = std::path::Path::new(&home_str);
+    let reachable = home.is_dir();
+    if !reachable {
+        return Ok(HomeFolderDiagnosis {
+            home_folder_set: true,
+            home_folder_path: Some(home_str.clone()),
+            home_folder_reachable: false,
+            discovery_file_exists: false,
+            discovery_file_is_placeholder: false,
+            auth_token_file_exists: false,
+            auth_token_nonempty: false,
+            host_address: None,
+            summary: format!(
+                "Home folder is set but not reachable right now: {home_str}. Check that the network share is mounted."
+            ),
+            suggested_action: "fix_home_folder".into(),
+        });
+    }
+    let disc_path = home.join("host-discovery.json");
+    let token_path = home.join("auth-token");
+    let disc_exists = disc_path.is_file();
+    let token_exists = token_path.is_file();
+    let token_content = std::fs::read_to_string(&token_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let token_nonempty = !token_content.is_empty();
+    let (is_placeholder, host_address) = if disc_exists {
+        match std::fs::read(&disc_path) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(v) => {
+                    let host = v.get("host").and_then(|h| h.as_str()).unwrap_or("");
+                    let port = v
+                        .get("port")
+                        .and_then(|p| p.as_u64())
+                        .unwrap_or(crate::library::host_server::DEFAULT_HOST_PORT as u64)
+                        as u16;
+                    let is_ph = host.is_empty();
+                    let addr = if is_ph {
+                        None
+                    } else {
+                        Some(format!("http://{host}:{port}"))
+                    };
+                    (is_ph, addr)
+                }
+                Err(_) => (true, None),
+            },
+            Err(_) => (true, None),
+        }
+    } else {
+        (false, None)
+    };
+    let (summary, action) = if !disc_exists && !token_exists {
+        (
+            "Home folder is reachable, but no FVP install has registered as Host here yet. Either run THIS device as Host, or set up another device as Host pointing at the same folder.".to_string(),
+            "become_host".to_string(),
+        )
+    } else if is_placeholder || !token_nonempty {
+        (
+            "Home folder is reachable, but it only contains the empty placeholder — no FVP install has successfully registered as Host yet. Switch this device to Host to register it, or wait for another device to start its Host server.".to_string(),
+            "become_host".to_string(),
+        )
+    } else if !host_address.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+        (
+            format!("Home folder + Host info found. Host should be at {}.", host_address.as_deref().unwrap_or("?")),
+            "ready".to_string(),
+        )
+    } else {
+        (
+            "Home folder is reachable but the discovery file is malformed. Try clicking 'Switch this machine to Host' to write a fresh one.".to_string(),
+            "become_host".to_string(),
+        )
+    };
+    Ok(HomeFolderDiagnosis {
+        home_folder_set: true,
+        home_folder_path: Some(home_str),
+        home_folder_reachable: true,
+        discovery_file_exists: disc_exists,
+        discovery_file_is_placeholder: is_placeholder,
+        auth_token_file_exists: token_exists,
+        auth_token_nonempty: token_nonempty,
+        host_address,
+        summary,
+        suggested_action: action,
+    })
+}
+
 /// Auto-discovery for Client mode: read `host-discovery.json` +
 /// `auth-token` from the configured home folder and return a usable
 /// endpoint Clients can dial without typing anything. Returns None
@@ -3075,10 +3210,10 @@ pub fn library_read_home_discovery(
         .and_then(|v| v.as_u64())
         .unwrap_or(crate::library::host_server::DEFAULT_HOST_PORT as u64) as u16;
     if host.is_empty() || token.is_empty() {
-        crate::log!(
-            "library:host",
-            "read_home_discovery: discovery file present but host/token empty"
-        );
+        // Don't spam the log every call (Settings + lockout retry +
+        // banner reloads can fire this many times a second). The
+        // `library_diagnose_home_folder` command is the
+        // user-friendly path; this is just the boolean-ish helper.
         return Ok(None);
     }
     Ok(Some(HomeDiscoverySnapshot {

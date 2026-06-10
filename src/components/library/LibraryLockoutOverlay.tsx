@@ -9,7 +9,9 @@ import {
   libraryIpc,
   readHomeDiscovery,
   setHostEndpoint,
+  setLibraryMode,
   subscribeHostState,
+  type HomeFolderDiagnosis,
 } from "../../ipc/library";
 
 const AUTO_REFRESH_MS = 120_000; // 2 minutes per directive
@@ -43,6 +45,8 @@ export function LibraryLockoutOverlay({
   const [lastAttemptResult, setLastAttemptResult] = useState<
     "unknown" | "reachable" | "unreachable" | "bad_auth"
   >("unknown");
+  const [diagnosis, setDiagnosis] = useState<HomeFolderDiagnosis | null>(null);
+  const [becomingHost, setBecomingHost] = useState(false);
 
   // Subscribe to libraryHostClient's state version. Re-renders this
   // component when getHostConnectivity changes (e.g., a list_items
@@ -52,6 +56,14 @@ export function LibraryLockoutOverlay({
 
   const attempt = async () => {
     setBusy(true);
+    // Diagnose home folder state first — gives us specific error
+    // categories instead of a generic "unreachable."
+    try {
+      const d = await libraryIpc.diagnoseHomeFolder();
+      setDiagnosis(d);
+    } catch {
+      /* non-fatal */
+    }
     const ep = getHostEndpoint();
     // If we don't have an endpoint configured, re-try auto-discovery
     // (the home folder may have come online).
@@ -134,16 +146,48 @@ export function LibraryLockoutOverlay({
   const health = getHostHealth();
   const ep = getHostEndpoint();
 
+  // Pick the headline + body based on the most informative source.
+  // Order of preference:
+  //   1. diagnose result (most specific — distinguishes
+  //      "folder unreachable" from "no Host registered" from
+  //      "Host registered but offline")
+  //   2. raw lastAttemptResult ("unreachable" / "bad_auth")
+  const headline = diagnosis
+    ? diagnosisHeadline(diagnosis)
+    : "Library Host unreachable";
+  const body = diagnosis?.summary ?? null;
+
+  const switchToHost = async () => {
+    if (!window.confirm(
+      "Switch this device to Library Host mode?\n\n" +
+        "This device will become the source of truth for the library DB. " +
+        "Other devices on your network can then connect to it as Clients " +
+        "by pointing at the same home folder.\n\n" +
+        "You can switch back to Client or Standalone anytime in Settings.",
+    )) return;
+    setBecomingHost(true);
+    try {
+      await libraryIpc.setMode("host");
+      setLibraryMode("host");
+      showToast("Switched to Host mode. Library should be available now.", "info", 3500);
+      onResolved();
+    } catch (err) {
+      showToast(`Switch failed: ${err}`, "error");
+    } finally {
+      setBecomingHost(false);
+    }
+  };
+
   return (
-    <div className="flex-1 flex items-center justify-center bg-fvp-bg p-8">
-      <div className="max-w-lg w-full bg-fvp-surface border border-fvp-border rounded-lg p-6 shadow-xl">
+    <div className="flex-1 flex items-center justify-center bg-fvp-bg p-8 overflow-y-auto">
+      <div className="max-w-xl w-full bg-fvp-surface border border-fvp-border rounded-lg p-6 shadow-xl">
         <div className="flex items-center gap-3 mb-3">
           <div className="w-10 h-10 rounded-full bg-fvp-err/20 border border-fvp-err flex items-center justify-center text-fvp-err text-xl">
             ⚠
           </div>
           <div>
             <h2 className="text-base font-semibold text-fvp-text">
-              Library Host unreachable
+              {headline}
             </h2>
             <p className="text-[11px] text-fvp-muted mt-0.5">
               This install is in Client mode — without a working Host
@@ -152,6 +196,43 @@ export function LibraryLockoutOverlay({
             </p>
           </div>
         </div>
+
+        {body && (
+          <div className="mb-3 px-3 py-2 bg-fvp-warn/10 border border-fvp-warn text-fvp-text text-xs rounded leading-relaxed">
+            {body}
+          </div>
+        )}
+
+        {/* Concrete state — checkboxes give the user a fast visual
+            scan of what's working and what's not. */}
+        {diagnosis && (
+          <div className="text-[11px] space-y-1 mb-4 px-3 py-2 bg-fvp-bg border border-fvp-border rounded">
+            <CheckRow ok={diagnosis.home_folder_set} label="Home folder configured" />
+            <CheckRow
+              ok={diagnosis.home_folder_reachable}
+              label="Home folder reachable"
+              detail={diagnosis.home_folder_path ?? undefined}
+            />
+            <CheckRow
+              ok={
+                diagnosis.discovery_file_exists &&
+                !diagnosis.discovery_file_is_placeholder
+              }
+              label="Host discovery file valid"
+              detail={
+                !diagnosis.discovery_file_exists
+                  ? "no discovery file"
+                  : diagnosis.discovery_file_is_placeholder
+                    ? "placeholder only — no Host has registered"
+                    : diagnosis.host_address ?? undefined
+              }
+            />
+            <CheckRow
+              ok={diagnosis.auth_token_nonempty}
+              label="Auth token file present"
+            />
+          </div>
+        )}
 
         <div className="text-xs space-y-1 mb-4">
           <div className="flex gap-2">
@@ -193,14 +274,23 @@ export function LibraryLockoutOverlay({
           </div>
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => void attempt()}
             disabled={busy}
-            className="flex-1 px-3 py-2 bg-fvp-accent text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
+            className="flex-1 min-w-[120px] px-3 py-2 bg-fvp-accent text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
           >
             {busy ? "Trying…" : "Retry now"}
           </button>
+          {diagnosis?.suggested_action === "become_host" && (
+            <button
+              onClick={() => void switchToHost()}
+              disabled={becomingHost}
+              className="flex-1 min-w-[160px] px-3 py-2 bg-fvp-ok text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
+            >
+              {becomingHost ? "Switching…" : "Switch this device to Host"}
+            </button>
+          )}
           <button
             onClick={() => useAppStore.setState({ mode: "settings" })}
             className="px-3 py-2 bg-fvp-bg border border-fvp-border text-fvp-text text-xs rounded hover:border-fvp-muted"
@@ -217,6 +307,44 @@ export function LibraryLockoutOverlay({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function diagnosisHeadline(d: HomeFolderDiagnosis): string {
+  if (!d.home_folder_set) return "Home folder not set";
+  if (!d.home_folder_reachable) return "Home folder unreachable";
+  if (d.discovery_file_is_placeholder || !d.host_address) {
+    return "No Host registered in home folder";
+  }
+  return "Library Host offline";
+}
+
+function CheckRow({
+  ok,
+  label,
+  detail,
+}: {
+  ok: boolean;
+  label: string;
+  detail?: string;
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <span
+        className={
+          "shrink-0 w-3.5 text-center font-bold " +
+          (ok ? "text-fvp-ok" : "text-fvp-err")
+        }
+      >
+        {ok ? "✓" : "✗"}
+      </span>
+      <span className="text-fvp-text">{label}</span>
+      {detail && (
+        <span className="text-fvp-muted text-[10px] italic break-all flex-1 min-w-0">
+          {detail}
+        </span>
+      )}
     </div>
   );
 }

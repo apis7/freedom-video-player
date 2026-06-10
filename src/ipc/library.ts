@@ -249,6 +249,8 @@ export const libraryIpc = {
   rotateAuthToken: () => invoke<string>("library_rotate_auth_token"),
   firstRunStatus: () => invoke<boolean>("library_first_run_status"),
   firstRunComplete: () => invoke<void>("library_first_run_complete"),
+  diagnoseHomeFolder: () =>
+    invoke<HomeFolderDiagnosis>("library_diagnose_home_folder"),
   snapshotStatus: () => invoke<SnapshotStatus>("library_snapshot_status"),
   snapshotSetEnabled: (enabled: boolean) =>
     invoke<void>("library_snapshot_set_enabled", { enabled }),
@@ -486,6 +488,27 @@ export interface HostServerStatus {
   lan_ip: string;
   port: number;
   protocol_version: number;
+}
+
+/** Full diagnostic of the home folder state. Used by the lockout
+ *  overlay to give a clear, specific explanation instead of the
+ *  generic "Host unreachable." */
+export interface HomeFolderDiagnosis {
+  home_folder_set: boolean;
+  home_folder_path: string | null;
+  home_folder_reachable: boolean;
+  discovery_file_exists: boolean;
+  discovery_file_is_placeholder: boolean;
+  auth_token_file_exists: boolean;
+  auth_token_nonempty: boolean;
+  host_address: string | null;
+  summary: string;
+  suggested_action:
+    | "ready"
+    | "fix_home_folder"
+    | "become_host"
+    | "wait_for_host"
+    | "set_home_folder";
 }
 
 /** One snapshot file in the snapshots directory. */

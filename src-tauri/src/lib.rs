@@ -291,6 +291,8 @@ pub fn run() {
             commands::library::library_snapshot_take_now,
             commands::library::library_snapshot_reveal_dir,
             commands::library::library_snapshot_schedule_restore,
+            commands::library::library_first_run_status,
+            commands::library::library_first_run_complete,
             commands::library::library_set_poster_cache_cap,
             commands::library::library_find_probable_pairs,
             commands::library::library_transfer_curation,

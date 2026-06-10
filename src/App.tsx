@@ -33,12 +33,15 @@ import {
   setHostEndpoint,
   setLibraryMode,
 } from "./ipc/library";
+import { useState } from "react";
+import { FirstRunWizard } from "./components/library/FirstRunWizard";
 
 export function App() {
   const mode = useAppStore((s) => s.mode);
   const fullscreen = useAppStore((s) => s.fullscreen);
   const chromeVisible = useAppStore((s) => s.chromeVisible);
   const libraryEnabled = useAppStore((s) => s.libraryEnabled);
+  const [showFirstRunWizard, setShowFirstRunWizard] = useState(false);
 
   useMpvEventBridge();
   useChromeAutoHide();
@@ -114,6 +117,19 @@ export function App() {
         }
       } catch (e) {
         console.log(`[fvp] Library Networking boot failed: ${e}`);
+      }
+      // First-run wizard gate. Show only when:
+      //   (a) the wizard hasn't been marked complete yet, AND
+      //   (b) Library Mode is enabled (the wizard is library-flavored)
+      // The user can skip the wizard from inside it; skipping still
+      // marks it complete so it doesn't re-pop every launch.
+      try {
+        const done = await libraryIpc.firstRunStatus();
+        if (!done && useAppStore.getState().libraryEnabled) {
+          setShowFirstRunWizard(true);
+        }
+      } catch (e) {
+        console.log(`[fvp] firstRunStatus boot failed: ${e}`);
       }
     })();
   }, []);
@@ -211,6 +227,9 @@ export function App() {
       <LoadTimeoutModal />
       <AboutModalIfVisible />
       <SafetyBanner />
+      {showFirstRunWizard && (
+        <FirstRunWizard onDismiss={() => setShowFirstRunWizard(false)} />
+      )}
     </div>
   );
 }

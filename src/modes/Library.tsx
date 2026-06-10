@@ -146,6 +146,7 @@ export function LibraryMode() {
     folder_id: number;
     scanned: number;
     total: number;
+    current_file?: string;
   } | null>(null);
   // Folder IDs that currently have an active scan in flight. While a
   // folder is being scanned every row in it is transiently flagged
@@ -2621,7 +2622,12 @@ function DriftBanner({
 function ScanProgressBadge({
   progress,
 }: {
-  progress: { folder_id: number; scanned: number; total: number };
+  progress: {
+    folder_id: number;
+    scanned: number;
+    total: number;
+    current_file?: string;
+  };
 }) {
   const [throttled, setThrottled] = useState(false);
   const pct =
@@ -2638,6 +2644,14 @@ function ScanProgressBadge({
         Scanning {progress.scanned}/{progress.total}
       </span>
       <span className="text-[10px] text-fvp-muted tabular-nums">({pct}%)</span>
+      {progress.current_file && (
+        <span
+          className="text-[10px] text-fvp-muted italic truncate max-w-[280px]"
+          title={progress.current_file}
+        >
+          {progress.current_file}
+        </span>
+      )}
       <button
         onClick={() => {
           const next = !throttled;

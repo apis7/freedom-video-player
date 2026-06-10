@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   getHostEndpoint,
   getHostHealth,
+  getHostStateVersion,
   getLibraryMode,
   libraryIpc,
+  subscribeHostState,
 } from "../../ipc/library";
 
 /**
@@ -21,18 +23,16 @@ import {
  * once we persist the snapshot to local disk.
  */
 export function LibraryNetworkingBanner() {
-  const [, force] = useState(0);
+  // Re-render when libraryHostClient's state version bumps (success,
+  // failure, mode change, endpoint change). Replaces the prior 4s
+  // polling interval — no wasted renders, no up-to-4s lag.
+  useSyncExternalStore(subscribeHostState, getHostStateVersion);
   const [hostInfo, setHostInfo] = useState<{
     fvpVersion: string | null;
     protocol: number | null;
     latencyMs: number;
   } | null>(null);
   const probedFor = useRef<string | null>(null);
-
-  useEffect(() => {
-    const t = window.setInterval(() => force((n) => n + 1), 4000);
-    return () => window.clearInterval(t);
-  }, []);
 
   // Probe /v1/health ONCE per host endpoint URL so the "Connected to…"
   // pill can show the FVP version + protocol the Host reported. Re-
@@ -89,9 +89,10 @@ export function LibraryNetworkingBanner() {
         </span>
         <button
           onClick={() => {
-            void libraryIpc
-              .testHostConnection(endpoint.url, endpoint.token)
-              .then(() => force((n) => n + 1));
+            // testHostConnection's success bumps the stateVersion via
+            // clientCall's notify(), which re-renders this component
+            // through useSyncExternalStore. No manual force needed.
+            void libraryIpc.testHostConnection(endpoint.url, endpoint.token);
           }}
           className="ml-auto px-2 py-0.5 bg-fvp-bg border border-fvp-err rounded hover:bg-fvp-err/20"
         >

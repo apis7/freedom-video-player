@@ -373,12 +373,21 @@ fn run_scan_folder(
             }
         }
         if i % 20 == 0 || i + 1 == total {
+            // Include the basename of the file currently being indexed
+            // so the UI badge can show context ("Scanning: The Dark
+            // Knight.mkv") instead of just a counter. Full UNC paths
+            // can be long; a basename is plenty for the progress ribbon.
+            let basename = file_path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let _ = app.emit(
                 "library:scan-progress",
                 serde_json::json!({
                     "folder_id": folder_id,
                     "scanned": i + 1,
                     "total": total,
+                    "current_file": basename,
                 }),
             );
         }

@@ -247,6 +247,8 @@ export const libraryIpc = {
   setHostAddress: (address: string | null) =>
     invoke<void>("library_set_host_address", { address }),
   rotateAuthToken: () => invoke<string>("library_rotate_auth_token"),
+  firstRunStatus: () => invoke<boolean>("library_first_run_status"),
+  firstRunComplete: () => invoke<void>("library_first_run_complete"),
   snapshotStatus: () => invoke<SnapshotStatus>("library_snapshot_status"),
   snapshotSetEnabled: (enabled: boolean) =>
     invoke<void>("library_snapshot_set_enabled", { enabled }),
@@ -548,6 +550,9 @@ export interface ScanProgressEvent {
   folder_id: number;
   scanned: number;
   total: number;
+  /** Basename of the file currently being indexed (or empty when the
+   *  emitter couldn't extract one). Lets the badge show context. */
+  current_file?: string;
 }
 export interface ScanDoneEvent {
   folder_id: number;

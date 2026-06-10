@@ -2401,6 +2401,7 @@ const LIBRARY_MODE_KEY: &str = "library_mode"; // "standalone" | "host" | "clien
 const HOME_FOLDER_PATH_KEY: &str = "home_folder_path"; // absolute path to shared folder
 const HOST_ADDRESS_KEY: &str = "host_address"; // e.g. "http://192.168.1.7:42171" (Client mode)
 const HOST_AUTH_TOKEN_KEY: &str = "host_auth_token"; // 32-byte hex; shared via home folder file
+const FIRST_RUN_WIZARD_KEY: &str = "first_run_wizard_completed"; // "1" once shown
 
 fn hash_pin(pin: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -3093,6 +3094,28 @@ pub fn library_read_home_discovery(
             .map(|n| n as u32),
         updated_at: disc.get("updated_at").and_then(|v| v.as_i64()),
     }))
+}
+
+// ── First-run wizard state ───────────────────────────────────────────
+
+#[tauri::command]
+pub fn library_first_run_status(
+    db: State<'_, LibraryDb>,
+) -> Result<bool, String> {
+    let conn = db.lock();
+    let done = crate::library::db::get_setting(&conn, FIRST_RUN_WIZARD_KEY)?
+        .as_deref()
+        == Some("1");
+    Ok(done)
+}
+
+#[tauri::command]
+pub fn library_first_run_complete(
+    db: State<'_, LibraryDb>,
+) -> Result<(), String> {
+    crate::log!("library", "first_run_wizard: marked complete");
+    let conn = db.lock();
+    crate::library::db::set_setting(&conn, FIRST_RUN_WIZARD_KEY, "1")
 }
 
 // ── Snapshot backup commands ─────────────────────────────────────────

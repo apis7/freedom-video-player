@@ -995,8 +995,16 @@ export function LibraryMode() {
             ? singleOnlyTitle
             : "Switch to Profile Creator with this video loaded",
           onClick: () => {
-            useAppStore.setState({ mode: "creator" });
-            void openVideoPath(row.file.path);
+            // Route through openVideoPath with explicit creator-mode +
+            // no-autoplay so the file loads INTO the Profile Creator
+            // (timeline + snip lanes) paused, ready to edit. Setting
+            // mode beforehand AND in openVideoPath both end up creator,
+            // but the explicit options also stop the auto-play that
+            // otherwise kicks the video into Player Mode.
+            void openVideoPath(row.file.path, {
+              targetMode: "creator",
+              autoPlay: false,
+            });
           },
         },
         { kind: "separator" },

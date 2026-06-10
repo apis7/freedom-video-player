@@ -184,8 +184,27 @@ export async function openFreeFile(freePath: string): Promise<void> {
  * Clears per-file state, kicks libmpv, schedules the load-timeout prompt,
  * then restores draft + scans for .free profiles.
  */
-export async function openVideoPath(selected: string): Promise<void> {
-  console.log(`[fvp:open] openVideoPath: ${selected}`);
+export interface OpenVideoOptions {
+  /** Which top-level mode to land in after the video loads. Defaults to
+   *  "player". The Library "Edit profile…" path passes "creator" so the
+   *  video opens in the Profile Creator timeline instead of full-bleed
+   *  playback. */
+  targetMode?: "player" | "creator";
+  /** Whether to start playback immediately after the file loads. Defaults
+   *  to true. The Edit Profile path passes false because the Creator
+   *  workflow is "pause + mark snips," not "play through." */
+  autoPlay?: boolean;
+}
+
+export async function openVideoPath(
+  selected: string,
+  options: OpenVideoOptions = {},
+): Promise<void> {
+  const targetMode = options.targetMode ?? "player";
+  const autoPlay = options.autoPlay ?? true;
+  console.log(
+    `[fvp:open] openVideoPath: ${selected} targetMode=${targetMode} autoPlay=${autoPlay}`,
+  );
   // Reset fingerprint cache — we'll recompute for the new file below.
   useAppStore.setState({ currentFileFingerprint: null });
   useAppStore.setState({
@@ -244,12 +263,20 @@ export async function openVideoPath(selected: string): Promise<void> {
 
   try {
     await playback.openFile(selected);
-    useAppStore.setState({ currentFile: selected, playing: true });
-    // Auto-switch to Player Mode the moment a video actually loads.
-    // Covers: cli-open-file (double-click in Explorer), drag-drop,
-    // recent-files menu, BrokenFileModal recovery, etc. Library /
-    // Creator stay reachable from the title bar.
-    useAppStore.setState({ mode: "player" });
+    useAppStore.setState({ currentFile: selected, playing: autoPlay });
+    // Switch to the requested mode. Covers BOTH:
+    //   - "player" (default) for cli-open-file, drag-drop, recent-files,
+    //     BrokenFileModal recovery, etc.
+    //   - "creator" for the Library "Edit profile…" path so the user
+    //     lands directly in the Profile Creator timeline.
+    useAppStore.setState({ mode: targetMode });
+    // If the caller asked us NOT to auto-play (Creator flow), explicitly
+    // pause libmpv. Without this, the play command issued by
+    // playback.openFile's internal start sequence would actually start
+    // playback even though our Zustand `playing` is false.
+    if (!autoPlay) {
+      void playback.pause().catch(() => {});
+    }
     pushRecentFile(selected);
     // Auto-add the played file's parent directory to the library
     // index. Runs regardless of `libraryEnabled` — the user might be

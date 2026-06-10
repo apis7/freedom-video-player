@@ -36,7 +36,11 @@
           "**/*.fvp-thumb.jpg",
           "**/*.fvp-thumb.jpeg",
           "**/*.fvp-thumb.png",
-          "**/*.fvp-thumb.webp"
+          "**/*.fvp-thumb.webp",
+          "**/*.fvp-thumb.gif",
+          "**/*.fvp-thumb.bmp",
+          "**/*.fvp-thumb.tiff",
+          "**/*.fvp-thumb.tif"
         ]
       }
     }

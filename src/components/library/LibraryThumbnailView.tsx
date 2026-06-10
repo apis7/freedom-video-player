@@ -99,43 +99,43 @@ export function LibraryThumbnailView({
   onContextMenu,
   onRefreshMetadata,
 }: Props) {
-  // Save + restore scroll offset by scope so the user keeps their
-  // spot when navigating between All Movies → series → back.
+  // Save + restore scroll offset by scope.
+  //
+  // STRICTLY LIMITED to the "all" / root scope — initial attempt to
+  // save+restore across ALL scopes caused a rendering glitch where
+  // some collections/series stopped showing items after a bulk-
+  // thumbnail write (unclear interaction between the scroll restore,
+  // virtualization, and the post-write epoch bump). Restricting to
+  // "all" keeps the most valuable use case (long All Movies list)
+  // without risking the small-scope-grid-disappears bug.
   const savedScrollOffsets = useAppStore((s) => s.libraryScopeScrollOffsets);
   const setScrollOffset = useAppStore((s) => s.setLibraryScopeScroll);
+  const isAllScope = scopeKey.startsWith("all-");
   // outerRef on react-window's Grid exposes the underlying scrolling
   // div. We use it to read + set scrollTop.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const gridOuterRef = useRef<any>(null);
-  // Restore the saved offset for this scope on mount + whenever the
-  // scope key changes. Done AFTER a microtask so layout is finalized.
   useEffect(() => {
+    if (!isAllScope) return;
     const saved = savedScrollOffsets[scopeKey];
-    if (saved == null) return;
+    if (saved == null || saved <= 0) return;
     let cancelled = false;
     const restore = () => {
       if (cancelled) return;
       const el = gridOuterRef.current;
-      const scroller =
-        el && "scrollTop" in el
-          ? el
-          : document.querySelector<HTMLElement>(
-              `[data-scope-scroller="${scopeKey}"]`,
-            );
-      if (scroller) {
-        scroller.scrollTop = saved;
+      if (el && "scrollTop" in el) {
+        el.scrollTop = saved;
       }
     };
-    // Two RAF ticks gives the Grid time to lay out its rows.
     requestAnimationFrame(() => requestAnimationFrame(restore));
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey]);
-  // Throttled scroll-save: fire at most every ~250ms.
+  }, [scopeKey, isAllScope]);
   const scrollSaveTimerRef = useRef<number | null>(null);
   const handleGridScroll = (info: { scrollTop: number }) => {
+    if (!isAllScope) return;
     if (scrollSaveTimerRef.current != null) return;
     scrollSaveTimerRef.current = window.setTimeout(() => {
       scrollSaveTimerRef.current = null;

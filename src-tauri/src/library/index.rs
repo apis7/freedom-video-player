@@ -42,16 +42,28 @@ fn walk(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<std::path::Pat
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // Earlier versions skipped `#recycle` / `$RECYCLE.BIN` /
-            // `.Trash*` subdirs — assumption: anything in them was
-            // deleted-by-the-user content. That broke NAS users
-            // (Synology) who keep real library content inside a folder
-            // literally named `#recycle`: those files were never
-            // re-enumerated, so `mark_folder_files_missing` permanently
-            // flagged them as broken on every rescan. Walk every
-            // directory now; the reconciliation pass still uses
+            // SKIP recycle-bin containers. Without this, NAS users
+            // (Synology `#recycle` in particular) hit a rescan loop:
+            // delete a file → NAS moves it to `<share>/#recycle/...` →
+            // next rescan re-enumerates it → FVP re-adds it as a
+            // phantom row → user deletes again → repeat. Also covers
+            // Windows `$RECYCLE.BIN` and *nix `.Trash` / `.Trashes`
+            // / `.Trash-<uid>`.
+            //
+            // A previous iteration left these dirs in the walk because
+            // one user reportedly had real content inside a folder
+            // literally named `#recycle`. The trade-off lands the
+            // other way: it's WAY more common to hit the NAS-recycle
+            // loop than to deliberately name a content folder after a
+            // trash directory. Anyone in the rare case can rename.
+            //
+            // The reconciliation pass still uses
             // `path_is_in_recycle_bin` to suppress probable-pair
-            // suggestions for things that look like junk.
+            // suggestions for any rows that slipped in before this
+            // skip was installed.
+            if is_recycle_bin_dir(&path) {
+                continue;
+            }
             walk(&path, depth + 1, max_depth, out);
             continue;
         }
@@ -67,7 +79,6 @@ fn walk(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<std::path::Pat
 /// container. Matches by leaf folder name only — caller decides
 /// whether to recurse into it. Cross-platform: Synology `#recycle`,
 /// Windows `$RECYCLE.BIN`, macOS / Linux `.Trash*`.
-#[allow(dead_code)]
 fn is_recycle_bin_dir(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;

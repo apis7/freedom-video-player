@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { LibraryRow } from "../../ipc/library";
 import { libraryIpc } from "../../ipc/library";
 import { useAppStore } from "../../state/appStore";
+import { ContextMenu, type MenuItem } from "../ContextMenu";
 import { LibraryPoster } from "./LibraryPoster";
 import { formatAspectRatio, formatBytes, formatRuntime } from "./libraryFormat";
 import {
@@ -97,10 +98,16 @@ function SingleRowPanel({
   const showToast = useAppStore((s) => s.showToast);
   const [notesDraft, setNotesDraft] = useState("");
   const [tagInput, setTagInput] = useState("");
+  // Inline context menu coords for the poster right-click. Closed by
+  // ContextMenu's own click-outside handler.
+  const [posterMenu, setPosterMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
 
   useEffect(() => {
     setNotesDraft(row?.identity.notes ?? "");
     setTagInput("");
+    setPosterMenu(null);
   }, [row?.file.id]);
 
   if (!row) {
@@ -232,18 +239,84 @@ function SingleRowPanel({
     }
   };
 
+  // Per-poster file picker shared between the right-click menu and
+  // the double-click shortcut. The bulk path lives further down in
+  // applyToAll for multi-select; here we only target the currently-
+  // selected single identity.
+  const pickAndApplyCustomThumb = async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({
+      multiple: false,
+      filters: [
+        { name: "Image", extensions: ["jpg", "jpeg", "png", "webp"] },
+      ],
+    });
+    if (typeof picked !== "string") return;
+    try {
+      await libraryIpc.setCustomThumbnail(id.id, picked);
+      useAppStore.getState().bumpThumbnailRefreshEpoch();
+      setTimeout(
+        () => useAppStore.getState().bumpThumbnailRefreshEpoch(),
+        500,
+      );
+      showToast("Custom album art set.", "info", 2500);
+      onRefreshList();
+    } catch (err) {
+      showToast(`${err}`, "error");
+    }
+  };
+  const clearCustomThumb = async () => {
+    try {
+      await libraryIpc.setCustomThumbnail(id.id, null);
+      useAppStore.getState().bumpThumbnailRefreshEpoch();
+      setTimeout(
+        () => useAppStore.getState().bumpThumbnailRefreshEpoch(),
+        500,
+      );
+      showToast("Custom album art cleared.", "info", 2000);
+      onRefreshList();
+    } catch (err) {
+      showToast(`${err}`, "error");
+    }
+  };
+
   return (
     <aside className="w-72 shrink-0 border-l border-fvp-border bg-fvp-surface text-xs flex flex-col overflow-y-auto">
       <div className="p-3 border-b border-fvp-border">
         <div className="flex justify-center mb-2">
-          <LibraryPoster
-            customThumbnailPath={id.custom_thumbnail_path}
-            posterLocalPath={id.poster_local_path}
-            widthPx={140}
-            alt={title}
-            isMissing={f.is_missing}
-            cacheKey={id.last_updated_at}
-          />
+          {/* Wrapper carries the right-click + double-click handlers
+              for the poster. Cursor hint signals interactivity. The
+              app-level contextmenu suppressor kills the native menu;
+              this handler shows our own menu via the global context-
+              menu portal pattern (a tiny inline menu rendered just
+              below this wrapper). */}
+          <div
+            className="relative cursor-pointer group"
+            title="Right-click or double-click to change the album art"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setPosterMenu({ x: e.clientX, y: e.clientY });
+            }}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              void pickAndApplyCustomThumb();
+            }}
+          >
+            <LibraryPoster
+              customThumbnailPath={id.custom_thumbnail_path}
+              posterLocalPath={id.poster_local_path}
+              widthPx={140}
+              alt={title}
+              isMissing={f.is_missing}
+              cacheKey={id.last_updated_at}
+            />
+            {/* Subtle hover affordance — overlays the bottom of the
+                poster on hover so the user knows it's interactive. */}
+            <div className="absolute inset-x-0 bottom-0 px-2 py-1 bg-black/70 text-white text-[10px] text-center rounded-b opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+              Right-click or double-click to change
+            </div>
+          </div>
         </div>
         <EditableField
           value={id.movie_title ?? ""}
@@ -404,8 +477,44 @@ function SingleRowPanel({
           {f.path}
         </div>
       </div>
+
+      {posterMenu && (
+        <ContextMenu
+          x={posterMenu.x}
+          y={posterMenu.y}
+          items={posterMenuItems(
+            id.custom_thumbnail_path != null,
+            () => void pickAndApplyCustomThumb(),
+            () => void clearCustomThumb(),
+          )}
+          onClose={() => setPosterMenu(null)}
+        />
+      )}
     </aside>
   );
+}
+
+function posterMenuItems(
+  hasCustom: boolean,
+  onPick: () => void,
+  onClear: () => void,
+): MenuItem[] {
+  const items: MenuItem[] = [
+    {
+      kind: "item",
+      label: hasCustom ? "Change album art…" : "Upload album art…",
+      onClick: onPick,
+    },
+  ];
+  if (hasCustom) {
+    items.push({ kind: "separator" });
+    items.push({
+      kind: "item",
+      label: "Clear custom album art",
+      onClick: onClear,
+    });
+  }
+  return items;
 }
 
 // ── Bulk-edit panel (2+ selected) ───────────────────────────────────

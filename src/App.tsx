@@ -70,6 +70,22 @@ export function App() {
     return unsub;
   }, []);
 
+  // Suppress the native WebView2 right-click menu globally. Without
+  // this, right-clicking on an image, link, or any non-interactive
+  // element exposes the browser's "Save image as / Inspect /
+  // Reload" menu — wrong UX for a desktop app and a real "leaked
+  // browser chrome" tell. Per-element onContextMenu handlers can
+  // still trigger their own custom menus (preventDefault on this
+  // listener doesn't stop propagation, it just kills the default
+  // browser action).
+  useEffect(() => {
+    const swallow = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+    document.addEventListener("contextmenu", swallow);
+    return () => document.removeEventListener("contextmenu", swallow);
+  }, []);
+
   // Library Networking boot: read the current mode + endpoint
   // configuration once at startup so every libraryIpc.* call routes
   // correctly. Falls back to manual host_address/host_auth_token if the

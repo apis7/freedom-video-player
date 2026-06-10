@@ -870,17 +870,34 @@ function CreatorTopToolbar({
       </ToolbarButton>
       <ToolbarButton
         title={
-          "Search & Flag — augments AutoSnip. Type ANY term (e.g. " +
-          "'lady suck-suck', 'dickenson') and FVP drops a flag wherever " +
-          "it appears in the subtitles. NO snips are created — just " +
-          "flags, so you can review and snip manually."
+          "Search & Flag — augments AutoSnip. Type any term (sexual slang, " +
+          "in-universe euphemisms, character names, etc.) and FVP drops " +
+          "a flag wherever it appears in the subtitles. No snips are " +
+          "created — just flags, so you can review and snip manually."
         }
         disabled={!hasFile}
         onClick={() =>
           window.dispatchEvent(new CustomEvent("fvp:request-search-and-flag"))
         }
+        aria-label="Search & Flag"
       >
-        Search & Flag…
+        {/* Magnifying glass + small flag overlay icon. Single-color
+            stroke so it inherits the toolbar button's currentColor. */}
+        <svg
+          viewBox="0 0 24 24"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <circle cx="10" cy="10" r="6" />
+          <path d="M14.5 14.5L20 20" />
+          <path d="M13 6 v6 M13 6 l4 1 l-4 1" />
+        </svg>
       </ToolbarButton>
       {flagCount > 0 && (
         <ToolbarButton

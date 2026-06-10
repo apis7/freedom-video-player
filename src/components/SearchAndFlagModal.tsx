@@ -10,8 +10,8 @@ interface Props {
  * Search & Flag — augments AutoSnip.
  *
  * The bundled AutoSnip wordlists only catch known terms. Some content
- * uses local slang or in-universe euphemisms (the user mentioned "lady
- * suck-suck", "dickenson", etc.) that don't appear in any standard list.
+ * uses local slang, in-universe euphemisms, character names, etc. that
+ * don't appear in any standard list.
  *
  * This modal lets the user type ANY substring, scans the loaded
  * subtitleEntries, and drops a Flag at the start time of every matching
@@ -19,8 +19,8 @@ interface Props {
  * decides whether to snip around each one manually.
  *
  * Case-insensitive substring match. Multiple search terms can be entered
- * (one per line) so a single pass catches all the unique-to-this-video
- * terms the user knows about.
+ * (one per line) so a single pass catches everything the user knows
+ * about.
  */
 export function SearchAndFlagModal({ onClose }: Props) {
   const inc = useAppStore((s) => s.incrementOpenModalCount);
@@ -136,9 +136,7 @@ export function SearchAndFlagModal({ onClose }: Props) {
               <textarea
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={
-                  "lady suck-suck\ndickenson\nfrak\n…"
-                }
+                placeholder={"slang term\ncharacter name\neuphemism\n…"}
                 rows={4}
                 autoFocus
                 className="w-full bg-fvp-bg border border-fvp-border focus:border-fvp-accent rounded px-3 py-2 text-sm text-fvp-text outline-none font-mono"

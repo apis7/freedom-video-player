@@ -11,6 +11,7 @@ import { addSubtitleFlow } from "../utils/addSubtitleFlow";
 import { subtitlesIpc } from "../ipc";
 import { ImdbLinkModal } from "../components/ImdbLinkModal";
 import { SearchAndFlagModal } from "../components/SearchAndFlagModal";
+import { FindInSubsBar } from "../components/FindInSubsBar";
 import { SnipGroupsModal } from "../components/SnipGroupsModal";
 import { BeepShortenModal } from "../components/BeepShortenModal";
 import { MovieInfoModal } from "../components/MovieInfoModal";
@@ -86,6 +87,13 @@ export function CreatorMode() {
     window.addEventListener("fvp:request-search-and-flag", handler);
     return () =>
       window.removeEventListener("fvp:request-search-and-flag", handler);
+  }, []);
+  const [showFindInSubs, setShowFindInSubs] = useState(false);
+  useEffect(() => {
+    const handler = () => setShowFindInSubs(true);
+    window.addEventListener("fvp:request-find-in-subs", handler);
+    return () =>
+      window.removeEventListener("fvp:request-find-in-subs", handler);
   }, []);
   const detectedProfiles = useAppStore((s) => s.detectedProfiles);
   const snipCount = useAppStore((s) => s.snips.length);
@@ -484,6 +492,18 @@ export function CreatorMode() {
       },
       {
         kind: "item",
+        label: "Search & Find in Subs…",
+        disabled: !cf || state.subtitleEntries.length === 0,
+        title:
+          "Word-find for subtitles. Type any term and use ← / → arrows " +
+          "(or Enter / Shift+Enter) to jump the playhead to each occurrence " +
+          "in the subtitle track. Useful for verifying AutoSnip caught " +
+          "everything, or finding a specific line of dialogue.",
+        onClick: () =>
+          window.dispatchEvent(new CustomEvent("fvp:request-find-in-subs")),
+      },
+      {
+        kind: "item",
         label: `${state.subtitleVisible ? "✓ " : "    "}Enable subtitles`,
         disabled: !cf,
         onClick: () => {
@@ -678,6 +698,9 @@ export function CreatorMode() {
       )}
       {showSearchAndFlag && (
         <SearchAndFlagModal onClose={() => setShowSearchAndFlag(false)} />
+      )}
+      {showFindInSubs && (
+        <FindInSubsBar onClose={() => setShowFindInSubs(false)} />
       )}
       {showClearAllConfirm && (
         <TypedConfirmModal

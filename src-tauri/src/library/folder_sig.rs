@@ -56,8 +56,28 @@ use crate::library::db::LibraryDb;
 
 /// One cached folder signature, read from / written back to the
 /// `folder_signatures` table.
+///
+/// **Why a name-hash, not mtime?** Earlier iterations of this module
+/// keyed the cache off the directory's mtime. That meant one extra
+/// `std::fs::metadata(dir)` round-trip per directory, in addition to
+/// the readdir() the walker already needed. On a healthy local disk
+/// that's free. On a flaky SMB share it doubled the round-trips and
+/// could cascade into multi-second timeouts that wedged the whole
+/// scan (and the UI process behind it). The hash form below is
+/// computed entirely from the readdir() the walker already does — no
+/// extra SMB ops, ever. We still store the field under the column
+/// name `mtime_unix` in the schema (no migration needed) because the
+/// shape is the same i64.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirSignature {
+    /// Order-independent hash of the names of the directory's
+    /// immediate children. Detects adds, removes, and renames — any
+    /// edit that changes the entry list bumps this. In-place content
+    /// edits (same name, different bytes) deliberately do NOT bump
+    /// it; index_file's per-file size+mtime check catches those when
+    /// the file is re-stat'd, and we tolerate the case where a
+    /// "clean" dir contains a file whose content silently changed
+    /// (a rescan with the Rescan button always re-verifies).
     pub mtime_unix: i64,
     pub child_count: i64,
 }
@@ -192,17 +212,22 @@ fn walk(
     if depth >= max_depth {
         return;
     }
-    // Stat the directory itself first — cheap on every filesystem,
-    // and we need its mtime either way.
-    let (cur_mtime, cur_child_count, entries) = match read_dir_with_meta(dir) {
-        Some(t) => t,
+    // ONE readdir() per directory. NO separate metadata() call — that
+    // was the SMB-timeout cascade that wedged the v12 first deploy.
+    // Everything we need (entry names, types, hashable identity) is
+    // already in the find-struct that readdir returns.
+    let entries = match read_dir_entries(dir) {
+        Some(e) => e,
         None => return,
     };
+    let cur_hash = name_hash(&entries);
+    let cur_child_count = entries.len() as i64;
+
     let key = rel_key(root, dir);
     let cached = signatures.get(&key);
     let is_clean = matches!(
         cached,
-        Some(s) if s.mtime_unix == cur_mtime && s.child_count == cur_child_count
+        Some(s) if s.mtime_unix == cur_hash && s.child_count == cur_child_count
     );
 
     // Stage the (possibly updated) signature. CLEAN dirs re-stage the
@@ -211,7 +236,7 @@ fn walk(
     out.new_signatures.insert(
         key.clone(),
         DirSignature {
-            mtime_unix: cur_mtime,
+            mtime_unix: cur_hash,
             child_count: cur_child_count,
         },
     );
@@ -237,13 +262,9 @@ fn walk(
     }
 
     // Recurse into subdirs in BOTH the clean + dirty cases. A clean
-    // parent does not guarantee clean children (an edit in a deeper
-    // subdir does not bump the parent's mtime on most filesystems).
-    // We use `entries` here even for clean dirs — yes, that costs the
-    // readdir we hoped to skip — but consider: NTFS/SMB readdir is
-    // typically <10 ms for a normal-sized dir, while listing 1100
-    // file stats was the dominant cost. The remaining savings come
-    // from skipping per-file stats in index_file.
+    // parent does not guarantee clean children — a file edited two
+    // levels down does NOT bump its grandparent's entry list (its
+    // PARENT's, yes; the grandparent's, no).
     for entry in entries {
         if !entry.is_dir || is_recycle_bin_name(&entry.name) {
             continue;
@@ -258,16 +279,9 @@ struct LightEntry {
     extension: Option<String>,
 }
 
-fn read_dir_with_meta(dir: &Path) -> Option<(i64, i64, Vec<LightEntry>)> {
-    let meta = std::fs::metadata(dir).ok()?;
-    let mtime = meta
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let mut entries = Vec::new();
+fn read_dir_entries(dir: &Path) -> Option<Vec<LightEntry>> {
     let it = std::fs::read_dir(dir).ok()?;
+    let mut entries = Vec::new();
     for raw in it.flatten() {
         let path = raw.path();
         let name = match path.file_name().and_then(|s| s.to_str()) {
@@ -288,8 +302,37 @@ fn read_dir_with_meta(dir: &Path) -> Option<(i64, i64, Vec<LightEntry>)> {
             extension,
         });
     }
-    let count = entries.len() as i64;
-    Some((mtime, count, entries))
+    Some(entries)
+}
+
+/// Order-independent FNV-1a XOR-fold over the entry names. Catches
+/// adds, removes, renames; deliberately does not depend on file size
+/// or content (those are checked per-file by index_file when the dir
+/// is dirty). Used as the directory signature so the walker never
+/// needs a per-dir metadata() round-trip on SMB.
+fn name_hash(entries: &[LightEntry]) -> i64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut acc: u64 = 0;
+    for e in entries {
+        let mut h = FNV_OFFSET;
+        for b in e.name.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+        // Fold the type bit in so a file renamed-to-a-dir-of-the-same-
+        // name still registers as a change (very edge-case but cheap).
+        if e.is_dir {
+            h ^= 0x55_55_55_55_55_55_55_55;
+        }
+        acc ^= h;
+    }
+    // 0 is the empty-dir signature; avoid colliding with "uninitialised".
+    if acc == 0 {
+        1
+    } else {
+        acc as i64
+    }
 }
 
 fn is_recycle_bin_name(name: &str) -> bool {
@@ -403,6 +446,55 @@ mod tests {
             .any(|p| p.to_string_lossy().ends_with("shows"));
         assert!(deeper_clean, "movies/deeper should still be clean: clean_dirs={:?}", warm.clean_dirs);
         assert!(shows_clean, "shows should still be clean: clean_dirs={:?}", warm.clean_dirs);
+    }
+
+    #[test]
+    fn rename_within_dir_is_detected() {
+        // Renaming a file changes the entry-name set even though the
+        // child_count stays the same. The hash component of the
+        // signature should make this dirty.
+        let dir = build_tree();
+        let cold = smart_enumerate(dir.path(), 8, &HashMap::new());
+        fs::rename(
+            dir.path().join("movies/a.mkv"),
+            dir.path().join("movies/a_renamed.mkv"),
+        )
+        .unwrap();
+        let warm = smart_enumerate(dir.path(), 8, &cold.new_signatures);
+        let movies_in_dirty: bool = warm
+            .dirty_dirs
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with("movies"));
+        assert!(movies_in_dirty, "movies/ should be dirty after rename");
+        let movies_in_clean: bool = warm
+            .clean_dirs
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with("movies"));
+        assert!(!movies_in_clean, "movies/ should NOT be clean after rename");
+    }
+
+    #[test]
+    fn unrelated_dirs_stay_clean_after_rename() {
+        let dir = build_tree();
+        let cold = smart_enumerate(dir.path(), 8, &HashMap::new());
+        fs::rename(
+            dir.path().join("movies/a.mkv"),
+            dir.path().join("movies/a_renamed.mkv"),
+        )
+        .unwrap();
+        let warm = smart_enumerate(dir.path(), 8, &cold.new_signatures);
+        // shows/ and movies/deeper/ are untouched by the rename, so
+        // their signatures should still match → stay clean.
+        let shows_clean = warm
+            .clean_dirs
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with("shows"));
+        let deeper_clean = warm
+            .clean_dirs
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with("deeper"));
+        assert!(shows_clean, "shows/ should still be clean: clean_dirs={:?}", warm.clean_dirs);
+        assert!(deeper_clean, "movies/deeper/ should still be clean: clean_dirs={:?}", warm.clean_dirs);
     }
 
     #[test]

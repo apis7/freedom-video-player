@@ -227,10 +227,17 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
         </div>
         <div className="text-fvp-muted">
           <span className="text-fvp-text">Want your library on multiple devices?</span>{" "}
-          → Pick <em>Host</em> on your main device, <em>Client</em> on the
-          others, all pointed at one shared <em>home folder</em> on your
-          network.
+          → Pick <em>Host</em> on your main device (the one that&apos;s on most
+          often), <em>Client</em> on the others. All point at one shared
+          <em> home folder</em> on your network (usually a NAS).
         </div>
+      </div>
+      <div className="text-[10px] text-fvp-muted bg-fvp-surface2/40 rounded p-2 leading-relaxed">
+        <strong className="text-fvp-text">Quick clarification:</strong> the
+        &quot;Host&quot; is the <em>device running FVP</em>, not where your
+        media is stored. Your NAS can hold the media + the home folder
+        without needing FVP installed on it — but some device with FVP
+        running has to be the Host.
       </div>
       <div className="flex justify-end pt-1">
         <button
@@ -275,7 +282,7 @@ function RolePickerStep({
           icon="📡"
           title="Library Host"
           tagline="This is my main device — others will connect to it"
-          detail="Other FVP installs (Windows, eventually iOS/Android) will read the same library from this device over the LAN. The library DB lives here; a shared 'home folder' on your network holds the poster cache + connection info."
+          detail="THIS DEVICE runs the FVP library service. The library DB lives here, and other FVP installs on your LAN (eventually iOS/Android too) connect to it. Your media can live anywhere reachable — usually a NAS or network share."
           onClick={() => onPick("host")}
           disabled={busy}
         />
@@ -283,8 +290,8 @@ function RolePickerStep({
           accent="ok"
           icon="📱"
           title="Library Client"
-          tagline="There&apos;s already a Host on my network — connect to it"
-          detail="This device will read + edit the library hosted on another device. You&apos;ll need the same 'home folder' the Host is using; FVP auto-discovers from there."
+          tagline="Another device already runs FVP as the Host"
+          detail="This device reads + edits the library from another FVP install on your LAN. Requires that Host device to be online when you want to use the Library here. (Player and Profile Creator work offline.)"
           onClick={() => onPick("client")}
           disabled={busy}
         />

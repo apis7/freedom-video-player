@@ -20,27 +20,38 @@ actively migrating, so expect occasional churn until Chapter 2.
 After installing, FVP shows a one-time tip about the optional
 Library Networking feature (see below).
 
-## Library Networking (Alpha — Phase 1 of 3)
+## Library Networking
 
-You can share one library across multiple FVP installs (Windows now;
-Mac / iOS / Android later) by designating a **network folder** as the
-shared "home". One install runs as the **Host** (its local DB is the
-source of truth); other installs connect as **Clients** over the LAN.
+Share one library across multiple FVP installs (Windows now; Mac / iOS
+/ Android later) on the same LAN. Set in `Settings → Library → Library
+Networking` or the first-run wizard.
 
-The library SQLite database itself stays local to the Host — SQLite
-over SMB corrupts. The home folder on the share holds the **shared
-poster cache**, **LAN auth token**, and **Host discovery info** so
-Clients can find the Host.
-
-Configure in `Settings → Library → Library Networking`:
-
+Three roles:
 - **Standalone** (default) — library lives only on this device.
-- **Host** — this device IS the library; other installs connect to it.
-- **Client** — talk to a Host on the LAN.
+- **Host** — this device runs the FVP library service. Others connect to it.
+- **Client** — connects to a Host on the LAN.
 
-Phase 1 (current build): settings + folder bootstrap only.
-Phase 2: HTTP API + Host/Client networking.
-Phase 3: offline read-only mode + mobile-client protocol spec.
+### Important: "Host" is the FVP install, not the storage location
+
+The Host is the **device running FVP** with the library DB. Your media
+files can (and usually do) live elsewhere — typically on a NAS that
+all devices have mounted. The home folder on that NAS is just shared
+storage for the poster cache, snapshots, and the Host's connection
+info. **The NAS doesn't run FVP.**
+
+So a common setup looks like:
+- NAS: stores the videos + the FVP home folder (network share)
+- Desktop / main laptop: FVP installed, runs as **Host**
+- Other laptops, phones (future): FVP installed, run as **Client**
+
+When the Host device is offline, Clients show a lockout overlay
+(Player and Profile Creator modes still work). For 24/7 library
+availability you'd need a second always-on device running FVP — a
+future Linux/headless build would let the NAS itself be the Host.
+
+The library SQLite DB itself stays LOCAL to the Host (SQLite over SMB
+corrupts). The home folder on the share holds only the shared poster
+cache, weekly DB snapshots, LAN auth token, and Host discovery info.
 
 ## Stack
 

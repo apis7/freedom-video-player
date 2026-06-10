@@ -203,6 +203,39 @@ export function LibraryLockoutOverlay({
           </div>
         )}
 
+        {/* Common confusion: users with a NAS hosting their media think
+            the NAS is the "Host." It isn't — the Host is wherever FVP
+            is running. Clarify when the diagnose says "become_host." */}
+        {diagnosis?.suggested_action === "become_host" && (
+          <details className="mb-3 text-[11px] text-fvp-muted">
+            <summary className="cursor-pointer hover:text-fvp-text">
+              Why doesn&apos;t my NAS count as the Host?
+            </summary>
+            <div className="mt-1.5 pl-3 border-l-2 border-fvp-border space-y-1.5 leading-relaxed">
+              <p>
+                In FVP, &quot;Host&quot; means the <em>device running the
+                FVP library service</em> (the database + server). Your NAS
+                stores the <em>media files</em> + the <em>home folder</em>{" "}
+                (poster cache, snapshots, connection info), but it
+                doesn&apos;t run FVP itself.
+              </p>
+              <p>
+                Click <strong>Switch this device to Host</strong> below to
+                run the library service on this device. Future iOS / Android
+                / other-desktop clients on your LAN will connect to it. Your
+                NAS keeps doing what it&apos;s doing — storing the media +
+                home folder.
+              </p>
+              <p>
+                <em>Caveat:</em> when this device is off, Clients can&apos;t
+                reach the library. For 24/7 availability you&apos;d need an
+                always-on device running FVP as Host (a future Linux build
+                could run on the NAS itself, but that&apos;s not shipped yet).
+              </p>
+            </div>
+          </details>
+        )}
+
         {/* Concrete state — checkboxes give the user a fast visual
             scan of what's working and what's not. */}
         {diagnosis && (

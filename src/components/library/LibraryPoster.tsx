@@ -14,6 +14,13 @@ interface Props {
    *  underlying poster image still renders so visual recognition holds,
    *  but the badge makes "this won't play" unmistakable at a glance. */
   isMissing?: boolean;
+  /** Cache-buster appended to the image URL so the webview reloads
+   *  whenever the underlying file changes. Pass `identity.last_updated_at`
+   *  — the backend bumps it on every set_custom_thumbnail and
+   *  apply_tmdb_id write. Without this, overwriting a thumb file at the
+   *  same path (the bulk "Set custom thumbnail" path does exactly that)
+   *  leaves stale images on screen because the URL is unchanged. */
+  cacheKey?: number | string | null;
 }
 
 /**
@@ -35,10 +42,15 @@ export function LibraryPoster({
   widthPx,
   alt = "",
   isMissing = false,
+  cacheKey = null,
 }: Props) {
   const source = customThumbnailPath || posterLocalPath || null;
   const [loadError, setLoadError] = useState(false);
-  const url = source ? convertFileSrc(source) : null;
+  const baseUrl = source ? convertFileSrc(source) : null;
+  const url =
+    baseUrl && cacheKey != null
+      ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}v=${cacheKey}`
+      : baseUrl;
 
   const heightPx = Math.round(widthPx * 1.5);
   const style = { width: widthPx, height: heightPx };

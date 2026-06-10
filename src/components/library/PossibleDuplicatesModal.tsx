@@ -259,6 +259,7 @@ function CompareSide({
           widthPx={80}
           alt={displayTitle(row)}
           isMissing={f.is_missing}
+          cacheKey={id.last_updated_at}
         />
         <div className="flex-1 min-w-0 text-xs">
           <div className="font-semibold text-fvp-text">{displayTitle(row)}</div>

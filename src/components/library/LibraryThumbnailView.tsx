@@ -574,6 +574,7 @@ function ThumbCard({
           widthPx={152}
           alt={title}
           isMissing={!synthSeries && row.file.is_missing}
+          cacheKey={id.last_updated_at}
         />
         <div className="absolute left-0 right-0 bottom-0 px-2 py-1 bg-gradient-to-t from-black/85 via-black/60 to-transparent rounded-b pointer-events-none">
           <div className="text-[11px] font-medium text-white leading-tight line-clamp-2">

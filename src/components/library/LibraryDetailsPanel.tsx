@@ -63,6 +63,7 @@ function SeriesSummaryPanel({ row }: { row: LibraryRow }) {
             posterLocalPath={row.identity.poster_local_path}
             widthPx={140}
             alt={s.series_name}
+            cacheKey={row.identity.last_updated_at}
           />
         </div>
         <div className="text-sm font-semibold text-fvp-text leading-tight">
@@ -241,6 +242,7 @@ function SingleRowPanel({
             widthPx={140}
             alt={title}
             isMissing={f.is_missing}
+            cacheKey={id.last_updated_at}
           />
         </div>
         <EditableField

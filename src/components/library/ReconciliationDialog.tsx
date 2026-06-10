@@ -560,6 +560,7 @@ function ComparisonCard({
           posterLocalPath={id.poster_local_path}
           widthPx={88}
           alt={id.movie_title ?? ""}
+          cacheKey={id.last_updated_at}
         />
         <div className="min-w-0 flex-1">
           {editingTitle ? (

@@ -247,6 +247,7 @@ function ReelFace({ row }: { row: LibraryRow | null }) {
       posterLocalPath={row.identity.poster_local_path}
       widthPx={220}
       alt={row.identity.movie_title ?? ""}
+      cacheKey={row.identity.last_updated_at}
     />
   );
 }

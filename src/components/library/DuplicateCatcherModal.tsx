@@ -198,6 +198,7 @@ export function DuplicateCatcherModal({ clusters, onChanged, onClose }: Props) {
                   posterLocalPath={row.identity.poster_local_path}
                   widthPx={56}
                   alt={row.identity.movie_title ?? ""}
+                  cacheKey={row.identity.last_updated_at}
                 />
                 <div className="min-w-0 flex-1">
                   <div className="text-xs font-semibold text-fvp-text truncate">

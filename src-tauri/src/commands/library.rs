@@ -5399,9 +5399,8 @@ pub fn analytics_core(
             WHERE started_at >= ?1
               AND (?2 IS NULL OR file_id IN (
                   SELECT lf.id FROM library_files lf
-                  JOIN library_identity_tags lit ON lit.identity_id = lf.identity_id
-                  JOIN library_tags lt ON lt.id = lit.tag_id
-                  WHERE LOWER(lt.name) = LOWER(?2)
+                  JOIN library_tags lt ON lt.identity_id = lf.identity_id
+                  WHERE LOWER(lt.tag) = LOWER(?2)
               ))
             GROUP BY day
             ORDER BY day ASC
@@ -5434,9 +5433,8 @@ pub fn analytics_core(
                 WHERE started_at >= ?1
                   AND (?2 IS NULL OR file_id IN (
                       SELECT lf.id FROM library_files lf
-                      JOIN library_identity_tags lit ON lit.identity_id = lf.identity_id
-                      JOIN library_tags lt ON lt.id = lit.tag_id
-                      WHERE LOWER(lt.name) = LOWER(?2)
+                      JOIN library_tags lt ON lt.identity_id = lf.identity_id
+                      WHERE LOWER(lt.tag) = LOWER(?2)
                   ))
                 "#,
             )
@@ -5457,9 +5455,8 @@ pub fn analytics_core(
             WHERE lwl.started_at >= ?1
               AND (?2 IS NULL OR lf.id IN (
                   SELECT lf2.id FROM library_files lf2
-                  JOIN library_identity_tags lit ON lit.identity_id = lf2.identity_id
-                  JOIN library_tags lt ON lt.id = lit.tag_id
-                  WHERE LOWER(lt.name) = LOWER(?2)
+                  JOIN library_tags lt ON lt.identity_id = lf2.identity_id
+                  WHERE LOWER(lt.tag) = LOWER(?2)
               ))
             GROUP BY li.id
             ORDER BY (opens + watched_ms / 60000) DESC
@@ -5483,15 +5480,14 @@ pub fn analytics_core(
     let mut tag_stmt = conn
         .prepare(
             r#"
-            SELECT lt.name,
+            SELECT lt.tag AS name,
                    SUM(CASE WHEN lwl.event_type = 'opened' THEN 1 ELSE 0 END) AS opens,
                    COUNT(DISTINCT lwl.file_id) AS distinct_files
             FROM library_watch_log lwl
             JOIN library_files lf ON lf.id = lwl.file_id
-            JOIN library_identity_tags lit ON lit.identity_id = lf.identity_id
-            JOIN library_tags lt ON lt.id = lit.tag_id
+            JOIN library_tags lt ON lt.identity_id = lf.identity_id
             WHERE lwl.started_at >= ?1
-            GROUP BY lt.name
+            GROUP BY lt.tag
             ORDER BY opens DESC
             LIMIT 20
             "#,

@@ -158,13 +158,13 @@ export const libraryIpc = {
   searchByFilename: (filename: string) =>
     invoke<string[]>("library_search_by_filename", { filename }),
   relocateFile: (fileId: number, newPath: string) =>
-    invoke<void>("library_relocate_file", { fileId, newPath }),
+    libInvoke<void>("relocate_file", { fileId, newPath }),
   removeBrokenLinks: () =>
-    invoke<number>("library_remove_broken_links"),
+    libInvoke<number>("remove_broken_links"),
   findPossibleDuplicates: () =>
     invoke<FuzzyDupPair[]>("library_find_possible_duplicates"),
   renameFile: (fileId: number, newBasename: string) =>
-    invoke<string>("library_rename_file", { fileId, newBasename }),
+    libInvoke<string>("rename_file", { fileId, newBasename }),
   probeFile: (fileId: number) =>
     invoke<boolean>("library_probe_file", { fileId }),
   googleImageSearch: (query: string, apiKey: string, cx: string) =>
@@ -208,13 +208,13 @@ export const libraryIpc = {
   ) =>
     libInvoke<void>("set_manual_metadata", { identityId, field, value }),
   roulettePick: (fileIds: number[], familyViewOn: boolean) =>
-    invoke<LibraryRow | null>("library_roulette_pick", { fileIds, familyViewOn }),
+    libInvoke<LibraryRow | null>("roulette_pick", { fileIds, familyViewOn }),
   suggestNext: (familyViewOn: boolean) =>
-    invoke<LibraryRow | null>("library_suggest_next", { familyViewOn }),
+    libInvoke<LibraryRow | null>("suggest_next", { familyViewOn }),
   dismissSuggestion: (identityId: number) =>
     libInvoke<void>("dismiss_suggestion", { identityId }),
   profileCreatorSuggest: (familyViewOn: boolean) =>
-    invoke<LibraryRow | null>("library_profile_creator_suggest", { familyViewOn }),
+    libInvoke<LibraryRow | null>("profile_creator_suggest", { familyViewOn }),
   clearDriftWarning: (fileId: number) =>
     libInvoke<void>("clear_drift_warning", { fileId }),
   findFileByPath: (path: string) =>
@@ -239,7 +239,7 @@ export const libraryIpc = {
   setDeleteDefault: (deleteDefault: "remove" | "recycle") =>
     libInvoke<void>("set_delete_default", { default: deleteDefault }),
   setPosterCacheCap: (capBytes: number) =>
-    invoke<void>("library_set_poster_cache_cap", { capBytes }),
+    libInvoke<void>("set_poster_cache_cap", { capBytes }),
   setMode: (mode: LibraryMode) =>
     invoke<void>("library_set_mode", { mode }),
   setHomeFolder: (path: string | null) =>
@@ -255,42 +255,42 @@ export const libraryIpc = {
       token,
     }),
   findProbablePairs: () =>
-    invoke<ProbablePair[]>("library_find_probable_pairs"),
+    libInvoke<ProbablePair[]>("find_probable_pairs"),
   transferCuration: (
     fromIdentity: number,
     toIdentity: number,
     checklist: TransferChecklist,
   ) =>
-    invoke<void>("library_transfer_curation", {
+    libInvoke<void>("transfer_curation", {
       fromIdentity,
       toIdentity,
       checklist,
     }),
   dismissPair: (fingerprintA: string, fingerprintB: string) =>
-    invoke<void>("library_dismiss_pair", { fingerprintA, fingerprintB }),
+    libInvoke<void>("dismiss_pair", { fingerprintA, fingerprintB }),
   snoozePair: (fingerprintA: string, fingerprintB: string, hours?: number) =>
-    invoke<void>("library_snooze_pair", {
+    libInvoke<void>("snooze_pair", {
       fingerprintA,
       fingerprintB,
       hours: hours ?? 24,
     }),
   findDuplicates: () =>
-    invoke<DuplicateCluster[]>("library_find_duplicates"),
+    libInvoke<DuplicateCluster[]>("find_duplicates"),
   setCustomThumbnail: (identityId: number, path: string | null) =>
     invoke<void>("library_set_custom_thumbnail", { identityId, path }),
   revealInExplorer: (path: string) =>
     invoke<void>("library_reveal_in_explorer", { path }),
   applyTmdbId: (identityId: number, tmdbId: number) =>
-    invoke<void>("library_apply_tmdb_id", { identityId, tmdbId }),
+    libInvoke<void>("apply_tmdb_id", { identityId, tmdbId }),
   smartTmdbSearch: (groupKind: "collection" | "series", groupId: number) =>
-    invoke<SmartTmdbCandidate[]>("library_smart_tmdb_search", {
+    libInvoke<SmartTmdbCandidate[]>("smart_tmdb_search", {
       groupKind,
       groupId,
     }),
   removeFiles: (fileIds: number[]) =>
-    invoke<DeleteSummary>("library_remove_files", { fileIds }),
+    libInvoke<DeleteSummary>("remove_files", { fileIds }),
   trashFiles: (fileIds: number[]) =>
-    invoke<DeleteSummary>("library_trash_files", { fileIds }),
+    libInvoke<DeleteSummary>("trash_files", { fileIds }),
   logOpen: (fileId: number) =>
     libInvoke<void>("log_open", { fileId }),
   reorderCollections: (orderedIds: number[]) =>
@@ -310,7 +310,7 @@ export const libraryIpc = {
   setSeriesHasSeasons: (seriesId: number, hasSeasons: boolean) =>
     libInvoke<void>("set_series_has_seasons", { seriesId, hasSeasons }),
   analytics: (days: number, tag: string | null) =>
-    invoke<AnalyticsSnapshot>("library_analytics", { days, tag }),
+    libInvoke<AnalyticsSnapshot>("analytics", { days, tag }),
   setSeriesItemSeason: (
     seriesId: number,
     identityId: number,

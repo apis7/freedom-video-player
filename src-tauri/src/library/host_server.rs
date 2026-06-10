@@ -308,6 +308,24 @@ async fn ipc_dispatch(
         "find_file_by_path" => call_find_file_by_path(&state.db, args),
         "refresh_profile_status" => call_refresh_profile_status(&state.db, args),
         "dismiss_suggestion" => call_dismiss_suggestion(&state.db, args),
+        // ── heavy assemblers + TMDb + reconciliation ─────────────────
+        "apply_tmdb_id" => call_apply_tmdb_id(&state.db, args),
+        "remove_files" => call_remove_files(&state.db, args),
+        "trash_files" => call_trash_files(&state.db, args),
+        "find_duplicates" => call_find_duplicates(&state.db, args),
+        "find_probable_pairs" => call_find_probable_pairs(&state.db, args),
+        "analytics" => call_analytics(&state.db, args),
+        "roulette_pick" => call_roulette_pick(&state.db, args),
+        "suggest_next" => call_suggest_next(&state.db, args),
+        "profile_creator_suggest" => call_profile_creator_suggest(&state.db, args),
+        "smart_tmdb_search" => call_smart_tmdb_search(&state.db, args),
+        "remove_broken_links" => call_remove_broken_links(&state.db, args),
+        "set_poster_cache_cap" => call_set_poster_cache_cap(&state.db, args),
+        "dismiss_pair" => call_dismiss_pair(&state.db, args),
+        "snooze_pair" => call_snooze_pair(&state.db, args),
+        "transfer_curation" => call_transfer_curation(&state.db, args),
+        "relocate_file" => call_relocate_file(&state.db, args),
+        "rename_file" => call_rename_file(&state.db, args),
         _ => {
             crate::log!(
                 "library:host",
@@ -1201,6 +1219,238 @@ fn call_dismiss_suggestion(db: &LibraryDb, args: Value) -> Result<Value, String>
     )
     .map_err(|e| format!("dismiss: {e}"))?;
     Ok(json!({"ok": true}))
+}
+
+// ── Heavy assemblers / TMDb / reconciliation ─────────────────────────
+//
+// Most of these are thin wrappers around `*_core` free functions in
+// commands::library that we extracted so both the Tauri command path
+// and this HTTP path call the same underlying logic. Direct SQL or
+// orchestrator calls stay inline only when the original command had
+// no separable core to reuse.
+
+fn call_apply_tmdb_id(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let identity_id = arg_i64(&args, "identity_id")?;
+    let tmdb_id = arg_i64(&args, "tmdb_id")? as u32;
+    crate::commands::library::apply_tmdb_id_core(db, identity_id, tmdb_id)?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_remove_files(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let file_ids = arg_i64_array(&args, "file_ids")?;
+    let summary = crate::commands::library::remove_files_core(db, file_ids)?;
+    serde_json::to_value(summary).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_trash_files(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let file_ids = arg_i64_array(&args, "file_ids")?;
+    let summary = crate::commands::library::trash_files_core(db, file_ids)?;
+    serde_json::to_value(summary).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_find_duplicates(db: &LibraryDb, _args: Value) -> Result<Value, String> {
+    let clusters = crate::commands::library::find_duplicates_core(db)?;
+    serde_json::to_value(clusters).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_find_probable_pairs(
+    db: &LibraryDb,
+    _args: Value,
+) -> Result<Value, String> {
+    let pairs = crate::commands::library::find_probable_pairs_core(db)?;
+    serde_json::to_value(pairs).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_analytics(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let days = arg_i64(&args, "days").unwrap_or(30);
+    let tag = arg_opt_str(&args, "tag");
+    let snap = crate::commands::library::analytics_core(db, days, tag)?;
+    serde_json::to_value(snap).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_roulette_pick(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let file_ids = arg_i64_array(&args, "file_ids").unwrap_or_default();
+    let family_view_on =
+        args.get("family_view_on").and_then(|v| v.as_bool()).unwrap_or(false);
+    let pick = crate::commands::library::roulette_pick_core(db, file_ids, family_view_on)?;
+    serde_json::to_value(pick).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_suggest_next(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let family_view_on =
+        args.get("family_view_on").and_then(|v| v.as_bool()).unwrap_or(false);
+    let pick = crate::commands::library::suggest_next_core(db, family_view_on)?;
+    serde_json::to_value(pick).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_profile_creator_suggest(
+    db: &LibraryDb,
+    args: Value,
+) -> Result<Value, String> {
+    let family_view_on =
+        args.get("family_view_on").and_then(|v| v.as_bool()).unwrap_or(false);
+    let pick = crate::commands::library::profile_creator_suggest_core(
+        db,
+        family_view_on,
+    )?;
+    serde_json::to_value(pick).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_smart_tmdb_search(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let group_kind = arg_str(&args, "group_kind")?;
+    let group_id = arg_i64(&args, "group_id")?;
+    let results = crate::commands::library::smart_tmdb_search_core(
+        db, group_kind, group_id,
+    )?;
+    serde_json::to_value(results).map_err(|e| format!("serialize: {e}"))
+}
+
+fn call_remove_broken_links(db: &LibraryDb, _args: Value) -> Result<Value, String> {
+    // Inline — small and didn't have a separable core. Drops library_files
+    // rows whose path no longer exists on disk (from the Host's
+    // perspective), plus any orphan identities they leave behind.
+    let mut conn = db.lock();
+    let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
+    let candidates: Vec<(i64, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT id, path FROM library_files")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let it = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| format!("query: {e}"))?;
+        let out: Vec<(i64, String)> = it.filter_map(|r| r.ok()).collect();
+        out
+    };
+    let mut removed: u32 = 0;
+    for (id, path) in candidates {
+        if !std::path::Path::new(&path).exists() {
+            if tx
+                .execute("DELETE FROM library_files WHERE id = ?1", rusqlite::params![id])
+                .map(|n| n > 0)
+                .unwrap_or(false)
+            {
+                removed += 1;
+            }
+        }
+    }
+    let _ = tx.execute(
+        "DELETE FROM library_identities WHERE id NOT IN (SELECT DISTINCT identity_id FROM library_files)",
+        [],
+    );
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
+    crate::log!("library:host", "remove_broken_links: removed {removed} row(s)");
+    Ok(json!(removed))
+}
+
+fn call_set_poster_cache_cap(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let cap_bytes = arg_i64(&args, "cap_bytes")?;
+    // Re-use the existing helper (it's a small DB write).
+    let conn = db.lock();
+    crate::library::poster_cache::set_cap_bytes(&conn, cap_bytes as u64)?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_dismiss_pair(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let fp_a = arg_str(&args, "fingerprint_a")?;
+    let fp_b = arg_str(&args, "fingerprint_b")?;
+    let conn = db.lock();
+    conn.execute(
+        "INSERT OR IGNORE INTO library_dismissed_pairs(fingerprint_a, fingerprint_b, dismissed_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![fp_a, fp_b, now_unix()],
+    ).map_err(|e| format!("dismiss_pair: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_snooze_pair(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let fp_a = arg_str(&args, "fingerprint_a")?;
+    let fp_b = arg_str(&args, "fingerprint_b")?;
+    let hours = arg_opt_i64(&args, "hours").unwrap_or(24);
+    let until = now_unix() + (hours * 3600);
+    let conn = db.lock();
+    // Snoozes share the dismissed_pairs table; consumer checks dismissed_at
+    // against now to decide whether a snooze has expired.
+    conn.execute(
+        "INSERT OR REPLACE INTO library_dismissed_pairs(fingerprint_a, fingerprint_b, dismissed_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![fp_a, fp_b, until],
+    ).map_err(|e| format!("snooze_pair: {e}"))?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_transfer_curation(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let from_identity = arg_i64(&args, "from_identity")?;
+    let to_identity = arg_i64(&args, "to_identity")?;
+    // TransferChecklist is a struct on the Tauri side; deserialize from
+    // the JSON arg via serde so the field shape stays in sync.
+    let checklist: crate::commands::library::TransferChecklist =
+        serde_json::from_value(
+            args.get("checklist").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(|e| format!("parse checklist: {e}"))?;
+    crate::commands::library::transfer_curation_core(
+        db,
+        from_identity,
+        to_identity,
+        checklist,
+    )?;
+    Ok(json!({"ok": true}))
+}
+
+fn call_relocate_file(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let file_id = arg_i64(&args, "file_id")?;
+    let new_path = arg_str(&args, "new_path")?;
+    // Validate new path from the Host's filesystem perspective (the Host
+    // is the one that has to read this file).
+    if !std::path::Path::new(&new_path).exists() {
+        return Err(format!("Path doesn't exist on Host: {new_path}"));
+    }
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE library_files SET path = ?1, is_missing = 0 WHERE id = ?2",
+        rusqlite::params![new_path, file_id],
+    )
+    .map_err(|e| format!("relocate: {e}"))?;
+    crate::log!(
+        "library:host",
+        "relocate_file: file_id={file_id} → {new_path}"
+    );
+    Ok(json!({"ok": true}))
+}
+
+fn call_rename_file(db: &LibraryDb, args: Value) -> Result<Value, String> {
+    let file_id = arg_i64(&args, "file_id")?;
+    let new_basename = arg_str(&args, "new_basename")?;
+    let old_path: String = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path FROM library_files WHERE id = ?1",
+            rusqlite::params![file_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("lookup: {e}"))?
+    };
+    let p = std::path::Path::new(&old_path);
+    let parent = p
+        .parent()
+        .ok_or_else(|| "old path has no parent".to_string())?;
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| format!(".{s}"))
+        .unwrap_or_default();
+    let new_path = parent.join(format!("{new_basename}{ext}"));
+    if !p.exists() {
+        return Err(format!("File doesn't exist on Host: {old_path}"));
+    }
+    std::fs::rename(p, &new_path).map_err(|e| format!("rename: {e}"))?;
+    {
+        let conn = db.lock();
+        conn.execute(
+            "UPDATE library_files SET path = ?1 WHERE id = ?2",
+            rusqlite::params![new_path.to_string_lossy(), file_id],
+        )
+        .map_err(|e| format!("update db: {e}"))?;
+    }
+    Ok(json!(new_path.to_string_lossy().into_owned()))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

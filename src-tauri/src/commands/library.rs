@@ -680,6 +680,13 @@ pub fn library_get_row(
     db: State<'_, LibraryDb>,
     file_id: i64,
 ) -> Result<Option<LibraryRow>, String> {
+    get_row_core(&db, file_id)
+}
+
+pub fn get_row_core(
+    db: &LibraryDb,
+    file_id: i64,
+) -> Result<Option<LibraryRow>, String> {
     let conn = db.lock();
     let result = conn.query_row(
         "SELECT
@@ -1343,6 +1350,13 @@ pub fn library_remove_files(
     db: State<'_, LibraryDb>,
     file_ids: Vec<i64>,
 ) -> Result<DeleteSummary, String> {
+    remove_files_core(&db, file_ids)
+}
+
+pub fn remove_files_core(
+    db: &LibraryDb,
+    file_ids: Vec<i64>,
+) -> Result<DeleteSummary, String> {
     crate::log!(
         "library",
         "remove_files: removing {} file row(s) from DB",
@@ -1426,6 +1440,13 @@ fn is_unc_or_network_path(path: &str) -> bool {
 #[tauri::command]
 pub fn library_trash_files(
     db: State<'_, LibraryDb>,
+    file_ids: Vec<i64>,
+) -> Result<DeleteSummary, String> {
+    trash_files_core(&db, file_ids)
+}
+
+pub fn trash_files_core(
+    db: &LibraryDb,
     file_ids: Vec<i64>,
 ) -> Result<DeleteSummary, String> {
     crate::log!(
@@ -1531,7 +1552,7 @@ pub fn library_trash_files(
         }
     }
     if !to_remove.is_empty() {
-        let inner = library_remove_files(db, to_remove)?;
+        let inner = remove_files_core(db, to_remove)?;
         summary.removed = inner.removed;
         for f in inner.failed {
             summary.failed.push(f);
@@ -1733,6 +1754,14 @@ pub struct SmartTmdbCandidate {
 #[tauri::command]
 pub fn library_smart_tmdb_search(
     db: State<'_, LibraryDb>,
+    group_kind: String,
+    group_id: i64,
+) -> Result<Vec<SmartTmdbCandidate>, String> {
+    smart_tmdb_search_core(&db, group_kind, group_id)
+}
+
+pub fn smart_tmdb_search_core(
+    db: &LibraryDb,
     group_kind: String,
     group_id: i64,
 ) -> Result<Vec<SmartTmdbCandidate>, String> {
@@ -1999,6 +2028,15 @@ pub fn library_apply_tmdb_id(
     identity_id: i64,
     tmdb_id: u32,
 ) -> Result<(), String> {
+    apply_tmdb_id_core(&db, identity_id, tmdb_id)
+}
+
+/// Core of apply_tmdb_id — callable from the HTTP host server too.
+pub fn apply_tmdb_id_core(
+    db: &LibraryDb,
+    identity_id: i64,
+    tmdb_id: u32,
+) -> Result<(), String> {
     let started = std::time::Instant::now();
     crate::log!(
         "library",
@@ -2025,7 +2063,7 @@ pub fn library_apply_tmdb_id(
             let poster_started = std::time::Instant::now();
             crate::log!("library", "apply_tmdb_id: downloading poster {url}");
             match crate::library::poster_cache::fetch_to_cache(
-                &db,
+                db,
                 &app_local_data_dir,
                 url,
             ) {
@@ -3194,6 +3232,12 @@ pub struct ProbablePair {
 pub fn library_find_probable_pairs(
     db: State<'_, LibraryDb>,
 ) -> Result<Vec<ProbablePair>, String> {
+    find_probable_pairs_core(&db)
+}
+
+pub fn find_probable_pairs_core(
+    db: &LibraryDb,
+) -> Result<Vec<ProbablePair>, String> {
     let started = std::time::Instant::now();
     let rows = crate::library::index::list_files_with_identity(&db)?;
     // Pick one representative file per identity for the engine — true
@@ -3442,6 +3486,15 @@ pub fn library_transfer_curation(
     to_identity: i64,
     checklist: TransferChecklist,
 ) -> Result<(), String> {
+    transfer_curation_core(&db, from_identity, to_identity, checklist)
+}
+
+pub fn transfer_curation_core(
+    db: &LibraryDb,
+    from_identity: i64,
+    to_identity: i64,
+    checklist: TransferChecklist,
+) -> Result<(), String> {
     if from_identity == to_identity {
         return Err("Source and target are the same identity.".into());
     }
@@ -3666,6 +3719,12 @@ pub struct DuplicateCluster {
 #[tauri::command]
 pub fn library_find_duplicates(
     db: State<'_, LibraryDb>,
+) -> Result<Vec<DuplicateCluster>, String> {
+    find_duplicates_core(&db)
+}
+
+pub fn find_duplicates_core(
+    db: &LibraryDb,
 ) -> Result<Vec<DuplicateCluster>, String> {
     let rows = crate::library::index::list_files_with_identity(&db)?;
     let mut grouped: HashMap<i64, Vec<crate::library::model::LibraryFile>> = HashMap::new();
@@ -4322,7 +4381,15 @@ pub fn library_roulette_pick(
     file_ids: Vec<i64>,
     family_view_on: bool,
 ) -> Result<Option<LibraryRow>, String> {
-    let all_rows = crate::library::index::list_files_with_identity(&db)?;
+    roulette_pick_core(&db, file_ids, family_view_on)
+}
+
+pub fn roulette_pick_core(
+    db: &LibraryDb,
+    file_ids: Vec<i64>,
+    family_view_on: bool,
+) -> Result<Option<LibraryRow>, String> {
+    let all_rows = crate::library::index::list_files_with_identity(db)?;
     let conn = db.lock();
     let pool: Vec<(LibraryFile, LibraryIdentity)> = if file_ids.is_empty() {
         all_rows
@@ -4440,7 +4507,7 @@ pub fn library_roulette_pick(
         }
     };
     drop(conn);
-    library_get_row(db, pick_file_id)
+    get_row_core(db, pick_file_id)
 }
 
 /// "Suggested Movie" — full-library weighted pick with don't-nag carve-out.
@@ -4458,6 +4525,13 @@ pub fn library_roulette_pick(
 #[tauri::command]
 pub fn library_suggest_next(
     db: State<'_, LibraryDb>,
+    family_view_on: bool,
+) -> Result<Option<LibraryRow>, String> {
+    suggest_next_core(&db, family_view_on)
+}
+
+pub fn suggest_next_core(
+    db: &LibraryDb,
     family_view_on: bool,
 ) -> Result<Option<LibraryRow>, String> {
     const SERIES_WATCH_THRESHOLD: i64 = 12;
@@ -4590,7 +4664,7 @@ pub fn library_suggest_next(
         }
     }
     drop(conn);
-    library_get_row(db, pick_file_id)
+    get_row_core(db, pick_file_id)
 }
 
 /// "Next" button on the suggestion — record this identity as dismissed
@@ -4621,6 +4695,13 @@ pub fn library_dismiss_suggestion(
 #[tauri::command]
 pub fn library_profile_creator_suggest(
     db: State<'_, LibraryDb>,
+    family_view_on: bool,
+) -> Result<Option<LibraryRow>, String> {
+    profile_creator_suggest_core(&db, family_view_on)
+}
+
+pub fn profile_creator_suggest_core(
+    db: &LibraryDb,
     family_view_on: bool,
 ) -> Result<Option<LibraryRow>, String> {
     let all_rows = crate::library::index::list_files_with_identity(&db)?;
@@ -4695,7 +4776,7 @@ pub fn library_profile_creator_suggest(
         .find(|(_, i)| i.id == pick_identity)
         .map(|(f, _)| f.id);
     let Some(fid) = file_id else { return Ok(None) };
-    library_get_row(db, fid)
+    get_row_core(db, fid)
 }
 
 /// Acknowledge / clear the drift warning on a file — user reviewed and
@@ -4764,6 +4845,14 @@ pub struct AnalyticsSnapshot {
 #[tauri::command]
 pub fn library_analytics(
     db: State<'_, LibraryDb>,
+    days: i64,
+    tag: Option<String>,
+) -> Result<AnalyticsSnapshot, String> {
+    analytics_core(&db, days, tag)
+}
+
+pub fn analytics_core(
+    db: &LibraryDb,
     days: i64,
     tag: Option<String>,
 ) -> Result<AnalyticsSnapshot, String> {

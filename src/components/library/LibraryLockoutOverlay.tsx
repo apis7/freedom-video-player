@@ -163,13 +163,37 @@ export function LibraryLockoutOverlay({
         "This device will become the source of truth for the library DB. " +
         "Other devices on your network can then connect to it as Clients " +
         "by pointing at the same home folder.\n\n" +
-        "You can switch back to Client or Standalone anytime in Settings.",
+        "You can switch back anytime in Settings.",
     )) return;
     setBecomingHost(true);
     try {
       await libraryIpc.setMode("host");
       setLibraryMode("host");
       showToast("Switched to Host mode. Library should be available now.", "info", 3500);
+      onResolved();
+    } catch (err) {
+      showToast(`Switch failed: ${err}`, "error");
+    } finally {
+      setBecomingHost(false);
+    }
+  };
+
+  const switchToSync = async () => {
+    if (!window.confirm(
+      "Switch this device to Sync mode?\n\n" +
+        "Your library DB will live LOCALLY on this device, and mirror to " +
+        "the home folder on your NAS every 5 minutes. Other devices that " +
+        "later point at the same folder (also in Sync mode) will stay " +
+        "in step via the mirror. No 'always-on Host' needed.\n\n" +
+        "Best fit when your media is on a NAS but you don't have an " +
+        "always-on computer to act as Host. Concurrent edits use last-" +
+        "writer-wins; single-user-one-device-at-a-time is the sweet spot.",
+    )) return;
+    setBecomingHost(true);
+    try {
+      await libraryIpc.setMode("sync");
+      setLibraryMode("sync");
+      showToast("Switched to Sync mode. Library is available again.", "info", 3500);
       onResolved();
     } catch (err) {
       showToast(`Switch failed: ${err}`, "error");
@@ -205,32 +229,49 @@ export function LibraryLockoutOverlay({
 
         {/* Common confusion: users with a NAS hosting their media think
             the NAS is the "Host." It isn't — the Host is wherever FVP
-            is running. Clarify when the diagnose says "become_host." */}
+            is running. Plus: sync mode is often what they actually want. */}
         {diagnosis?.suggested_action === "become_host" && (
           <details className="mb-3 text-[11px] text-fvp-muted">
             <summary className="cursor-pointer hover:text-fvp-text">
-              Why doesn&apos;t my NAS count as the Host?
+              Why doesn&apos;t my NAS count as the Host? &nbsp;
+              <span className="text-fvp-muted/70">
+                (and which mode should I pick?)
+              </span>
             </summary>
-            <div className="mt-1.5 pl-3 border-l-2 border-fvp-border space-y-1.5 leading-relaxed">
+            <div className="mt-1.5 pl-3 border-l-2 border-fvp-border space-y-2 leading-relaxed">
               <p>
                 In FVP, &quot;Host&quot; means the <em>device running the
                 FVP library service</em> (the database + server). Your NAS
-                stores the <em>media files</em> + the <em>home folder</em>{" "}
-                (poster cache, snapshots, connection info), but it
-                doesn&apos;t run FVP itself.
+                stores the <em>media files</em> + the <em>home folder</em>,
+                but it doesn&apos;t run FVP itself.
               </p>
               <p>
-                Click <strong>Switch this device to Host</strong> below to
-                run the library service on this device. Future iOS / Android
-                / other-desktop clients on your LAN will connect to it. Your
-                NAS keeps doing what it&apos;s doing — storing the media +
-                home folder.
+                <strong className="text-fvp-text">Three ways to fix this:</strong>
               </p>
-              <p>
-                <em>Caveat:</em> when this device is off, Clients can&apos;t
-                reach the library. For 24/7 availability you&apos;d need an
-                always-on device running FVP as Host (a future Linux build
-                could run on the NAS itself, but that&apos;s not shipped yet).
+              <div className="pl-2 space-y-1.5">
+                <p>
+                  <strong className="text-fvp-ok">🔄 Sync mode</strong>{" "}
+                  (recommended when no FVP device is always on) — this
+                  device does all the library work locally, mirrors the
+                  DB to the NAS every 5 minutes. Other devices pull the
+                  mirror when they launch. No always-on Host required.
+                </p>
+                <p>
+                  <strong className="text-fvp-accent">📡 Host mode</strong>{" "}
+                  — this device IS the Host. Best when this device is
+                  usually on. Other devices connect as live Clients;
+                  they lock out when this device is off.
+                </p>
+                <p>
+                  <strong className="text-fvp-muted">Stay as Client</strong>{" "}
+                  — another device on your LAN registers as the live Host
+                  first. Pointless if no other FVP install exists.
+                </p>
+              </div>
+              <p className="text-[10px] italic">
+                Caveat for both Host and Sync: a future Linux/headless
+                FVP build could run on the NAS itself, giving you 24/7
+                multi-device. Not shipped yet.
               </p>
             </div>
           </details>
@@ -315,15 +356,6 @@ export function LibraryLockoutOverlay({
           >
             {busy ? "Trying…" : "Retry now"}
           </button>
-          {diagnosis?.suggested_action === "become_host" && (
-            <button
-              onClick={() => void switchToHost()}
-              disabled={becomingHost}
-              className="flex-1 min-w-[160px] px-3 py-2 bg-fvp-ok text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
-            >
-              {becomingHost ? "Switching…" : "Switch this device to Host"}
-            </button>
-          )}
           <button
             onClick={() => useAppStore.setState({ mode: "settings" })}
             className="px-3 py-2 bg-fvp-bg border border-fvp-border text-fvp-text text-xs rounded hover:border-fvp-muted"
@@ -331,6 +363,47 @@ export function LibraryLockoutOverlay({
             Open Settings
           </button>
         </div>
+
+        {/* Mode-change escape hatches — laid out below the retry/settings
+            row so the user sees them as a "or rethink your setup"
+            choice rather than the primary action. Both buttons confirm
+            before flipping the mode. */}
+        {diagnosis?.suggested_action === "become_host" && (
+          <div className="mt-3 pt-3 border-t border-fvp-border space-y-2">
+            <div className="text-[11px] text-fvp-muted uppercase tracking-wider">
+              Or change how this device handles the library
+            </div>
+            <div className="grid sm:grid-cols-2 gap-2">
+              <button
+                onClick={() => void switchToSync()}
+                disabled={becomingHost}
+                className="text-left px-3 py-2 bg-fvp-ok/10 border border-fvp-ok rounded hover:bg-fvp-ok/20 disabled:opacity-50 group"
+              >
+                <div className="text-fvp-ok font-semibold text-xs">
+                  🔄 Switch to Sync mode
+                </div>
+                <div className="text-[10px] text-fvp-muted mt-0.5 leading-snug">
+                  This device does all the work. Mirrors DB to the NAS
+                  every 5 min. No "always-on Host" required.
+                </div>
+              </button>
+              <button
+                onClick={() => void switchToHost()}
+                disabled={becomingHost}
+                className="text-left px-3 py-2 bg-fvp-accent/10 border border-fvp-accent rounded hover:bg-fvp-accent/20 disabled:opacity-50 group"
+              >
+                <div className="text-fvp-accent font-semibold text-xs">
+                  📡 Switch to Host mode
+                </div>
+                <div className="text-[10px] text-fvp-muted mt-0.5 leading-snug">
+                  This device runs the live library service. Other
+                  devices connect as Clients. Best if this one's always
+                  on.
+                </div>
+              </button>
+            </div>
+          </div>
+        )}
 
         {lastAttemptResult === "bad_auth" && (
           <div className="mt-3 px-2 py-1.5 bg-fvp-err/10 border border-fvp-err text-fvp-err text-[11px] rounded">

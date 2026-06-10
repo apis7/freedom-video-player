@@ -247,6 +247,15 @@ export const libraryIpc = {
   setHostAddress: (address: string | null) =>
     invoke<void>("library_set_host_address", { address }),
   rotateAuthToken: () => invoke<string>("library_rotate_auth_token"),
+  snapshotStatus: () => invoke<SnapshotStatus>("library_snapshot_status"),
+  snapshotSetEnabled: (enabled: boolean) =>
+    invoke<void>("library_snapshot_set_enabled", { enabled }),
+  snapshotSetKeepCount: (count: number) =>
+    invoke<void>("library_snapshot_set_keep_count", { count }),
+  snapshotSetCadenceDays: (days: number) =>
+    invoke<void>("library_snapshot_set_cadence_days", { days }),
+  snapshotTakeNow: () => invoke<string>("library_snapshot_take_now"),
+  snapshotRevealDir: () => invoke<void>("library_snapshot_reveal_dir"),
   hostServerStatus: () =>
     invoke<HostServerStatus>("library_host_server_status"),
   testHostConnection: (url: string, token: string | null) =>
@@ -462,6 +471,24 @@ export interface HostServerStatus {
   lan_ip: string;
   port: number;
   protocol_version: number;
+}
+
+/** One snapshot file in the snapshots directory. */
+export interface SnapshotEntry {
+  filename: string;
+  path: string;
+  size_bytes: number;
+  modified_unix: number;
+}
+
+/** Snapshot backup configuration + current state. */
+export interface SnapshotStatus {
+  enabled: boolean;
+  keep_count: number;
+  cadence_days: number;
+  last_at: number;
+  effective_dir: string;
+  entries: SnapshotEntry[];
 }
 
 /** Result of probing a Host URL from a Client. `reachable` reports

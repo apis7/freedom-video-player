@@ -26,6 +26,7 @@ pub mod model;
 pub mod orchestrator;
 pub mod poster_cache;
 pub mod reconcile;
+pub mod snapshot;
 pub mod suggestions;
 
 pub use db::LibraryDb;

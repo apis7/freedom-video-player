@@ -3049,6 +3049,85 @@ pub fn library_read_home_discovery(
     }))
 }
 
+// ── Snapshot backup commands ─────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct SnapshotStatus {
+    pub enabled: bool,
+    pub keep_count: i64,
+    pub cadence_days: i64,
+    pub last_at: i64,
+    pub effective_dir: String,
+    pub entries: Vec<crate::library::snapshot::SnapshotEntry>,
+}
+
+#[tauri::command]
+pub fn library_snapshot_status(
+    db: State<'_, LibraryDb>,
+) -> Result<SnapshotStatus, String> {
+    let (enabled, keep_count, cadence_days, last_at) =
+        crate::library::snapshot::read_status(&db);
+    let entries = crate::library::snapshot::list_snapshots(&db);
+    let effective_dir = crate::library::snapshot::effective_snapshot_dir(&db)
+        .to_string_lossy()
+        .into_owned();
+    Ok(SnapshotStatus {
+        enabled,
+        keep_count,
+        cadence_days,
+        last_at,
+        effective_dir,
+        entries,
+    })
+}
+
+#[tauri::command]
+pub fn library_snapshot_set_enabled(
+    db: State<'_, LibraryDb>,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::log!("library:snapshot", "set_enabled → {enabled}");
+    crate::library::snapshot::set_enabled(&db, enabled)
+}
+
+#[tauri::command]
+pub fn library_snapshot_set_keep_count(
+    db: State<'_, LibraryDb>,
+    count: i64,
+) -> Result<(), String> {
+    crate::log!("library:snapshot", "set_keep_count → {count}");
+    crate::library::snapshot::set_keep_count(&db, count)
+}
+
+#[tauri::command]
+pub fn library_snapshot_set_cadence_days(
+    db: State<'_, LibraryDb>,
+    days: i64,
+) -> Result<(), String> {
+    crate::log!("library:snapshot", "set_cadence_days → {days}");
+    crate::library::snapshot::set_cadence_days(&db, days)
+}
+
+#[tauri::command]
+pub fn library_snapshot_take_now(
+    db: State<'_, LibraryDb>,
+) -> Result<String, String> {
+    crate::log!("library:snapshot", "take_now (user-triggered)");
+    let p = crate::library::snapshot::force_snapshot(&db)?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn library_snapshot_reveal_dir(
+    db: State<'_, LibraryDb>,
+) -> Result<(), String> {
+    let dir = crate::library::snapshot::effective_snapshot_dir(&db);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create: {e}"))?;
+    }
+    library_reveal_in_explorer(dir.to_string_lossy().into_owned())
+}
+
 fn mint_auth_token() -> String {
     // 32 random bytes → 64-char hex. Source: getrandom via rand 0.8.
     // We already pull rand in for fingerprint shuffles so no new dep.
@@ -3070,8 +3149,14 @@ fn write_auth_token_file(
 /// to new. Skips the discovery + token files (the new bootstrap step
 /// rewrites those with fresh values). Returns (copied, failed) counts.
 ///
-/// Currently copies:
-///   - `poster-cache/` (all .jpg/.png files inside)
+/// **Newer-wins symmetry:** if a file exists at BOTH old and new, we
+/// keep whichever has the more recent mtime. This makes the
+/// X → Y → X "ping-pong" case work cleanly — any updates that
+/// happened while the home was at Y propagate back into X.
+///
+/// Subdirectories migrated:
+///   - `poster-cache/` (TMDb thumbnail blobs)
+///   - `snapshots/`    (weekly DB backups; see library::snapshot)
 /// Future expansion: shared settings, custom-thumbnail vault, etc.
 fn migrate_home_folder_contents(
     old: &std::path::Path,
@@ -3079,59 +3164,75 @@ fn migrate_home_folder_contents(
 ) -> (u32, u32) {
     let mut copied = 0u32;
     let mut failed = 0u32;
-    let cache_src = old.join("poster-cache");
-    if cache_src.is_dir() {
-        let cache_dst = new.join("poster-cache");
-        if let Err(e) = std::fs::create_dir_all(&cache_dst) {
+    for subdir in &["poster-cache", "snapshots"] {
+        let (c, f) = migrate_subdir(&old.join(subdir), &new.join(subdir));
+        copied += c;
+        failed += f;
+    }
+    (copied, failed)
+}
+
+fn migrate_subdir(src: &std::path::Path, dst: &std::path::Path) -> (u32, u32) {
+    if !src.is_dir() {
+        return (0, 0);
+    }
+    let mut copied = 0u32;
+    let mut failed = 0u32;
+    if let Err(e) = std::fs::create_dir_all(dst) {
+        crate::log!(
+            "library",
+            "migrate_subdir: create_dir_all \"{}\" failed: {e}",
+            dst.display()
+        );
+        return (0, 1);
+    }
+    let it = match std::fs::read_dir(src) {
+        Ok(i) => i,
+        Err(e) => {
             crate::log!(
                 "library",
-                "migrate_home_folder_contents: create new cache dir failed: {e}"
+                "migrate_subdir: read_dir \"{}\" failed: {e}",
+                src.display()
             );
-            failed += 1;
-        } else {
-            // Walk only one level deep — the cache is flat (one file
-            // per hash). Avoids recursion-into-symlinks surprises on
-            // network shares.
-            match std::fs::read_dir(&cache_src) {
-                Ok(it) => {
-                    for ent in it.flatten() {
-                        let from = ent.path();
-                        if !from.is_file() {
-                            continue;
-                        }
-                        let Some(name) = from.file_name() else { continue };
-                        let to = cache_dst.join(name);
-                        // Skip if the destination already exists (idempotent
-                        // re-runs don't churn).
-                        if to.exists() {
-                            continue;
-                        }
-                        match std::fs::copy(&from, &to) {
-                            Ok(_) => copied += 1,
-                            Err(e) => {
-                                failed += 1;
-                                crate::log!(
-                                    "library",
-                                    "migrate_home_folder_contents: copy {} → {} failed: {e}",
-                                    from.display(),
-                                    to.display(),
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    crate::log!(
-                        "library",
-                        "migrate_home_folder_contents: read_dir {} failed: {e}",
-                        cache_src.display(),
-                    );
-                    failed += 1;
-                }
+            return (0, 1);
+        }
+    };
+    for ent in it.flatten() {
+        let from = ent.path();
+        if !from.is_file() {
+            continue;
+        }
+        let Some(name) = from.file_name() else { continue };
+        let to = dst.join(name);
+        // Newer-wins: skip copy when the destination is the same or
+        // newer than the source. Without this, ping-ponging the home
+        // folder X → Y → X would lose updates made at Y.
+        let need_copy = match (mtime(&from), mtime(&to)) {
+            (Some(src_t), Some(dst_t)) => src_t > dst_t,
+            (Some(_), None) => true, // dest missing
+            _ => false,              // can't stat source — bail safely
+        };
+        if !need_copy {
+            continue;
+        }
+        match std::fs::copy(&from, &to) {
+            Ok(_) => copied += 1,
+            Err(e) => {
+                failed += 1;
+                crate::log!(
+                    "library",
+                    "migrate_subdir: copy {} → {} failed: {e}",
+                    from.display(),
+                    to.display(),
+                );
             }
         }
     }
     (copied, failed)
+}
+
+fn mtime(p: &std::path::Path) -> Option<std::time::SystemTime> {
+    p.metadata().and_then(|m| m.modified()).ok()
 }
 
 /// Create / refresh the on-share structure: README.txt, poster-cache/,

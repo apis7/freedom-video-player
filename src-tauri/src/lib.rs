@@ -137,6 +137,12 @@ pub fn run() {
                                 app.app_handle(),
                             );
                             app.manage(supervisor);
+                            // Snapshot backup tick — hourly check, weekly
+                            // by default. Default ON; user can disable +
+                            // tune cadence/keep-count in Settings. Lives
+                            // on the home folder when one is configured
+                            // (travels with the migration).
+                            library::snapshot::init(db.clone());
                             app.manage(db);
                         }
                         Err(e) => {
@@ -257,6 +263,12 @@ pub fn run() {
             commands::library::library_host_server_status,
             commands::library::library_test_host_connection,
             commands::library::library_read_home_discovery,
+            commands::library::library_snapshot_status,
+            commands::library::library_snapshot_set_enabled,
+            commands::library::library_snapshot_set_keep_count,
+            commands::library::library_snapshot_set_cadence_days,
+            commands::library::library_snapshot_take_now,
+            commands::library::library_snapshot_reveal_dir,
             commands::library::library_set_poster_cache_cap,
             commands::library::library_find_probable_pairs,
             commands::library::library_transfer_curation,

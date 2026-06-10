@@ -9,6 +9,7 @@ import {
   type HostConnectionTestResult,
   type HostServerStatus,
   type LibrarySettingsSnapshot,
+  type SnapshotStatus,
   type WatchedFolder,
 } from "../../ipc/library";
 import { PinPromptModal } from "./PinPromptModal";
@@ -306,6 +307,9 @@ export function LibrarySettingsPanel() {
           </div>
 
           <Divider />
+          <SnapshotBackupSection />
+
+          <Divider />
           <SubHeading>Delete key default</SubHeading>
           <div className="flex items-center gap-3">
             <select
@@ -446,6 +450,175 @@ export function LibrarySettingsPanel() {
         />
       )}
     </section>
+  );
+}
+
+/**
+ * Snapshot backups settings + status.
+ *
+ * Default ON, weekly, keep last 3. The background tick on the Rust
+ * side fires hourly and copies the DB via `VACUUM INTO` when the
+ * cadence is due. Snapshots live in `<home>/snapshots/` when a home
+ * folder is configured, else in `$LOCALAPPDATA\com.fvp.desktop\
+ * snapshots\`.
+ */
+function SnapshotBackupSection() {
+  const showToast = useAppStore((s) => s.showToast);
+  const [status, setStatus] = useState<SnapshotStatus | null>(null);
+  const [busyTake, setBusyTake] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await libraryIpc.snapshotStatus());
+    } catch (err) {
+      showToast(`Snapshot status failed: ${err}`, "error");
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const takeNow = async () => {
+    setBusyTake(true);
+    try {
+      const path = await libraryIpc.snapshotTakeNow();
+      showToast(`Snapshot written: ${path}`, "info", 3500);
+      await refresh();
+    } catch (err) {
+      showToast(`${err}`, "error");
+    } finally {
+      setBusyTake(false);
+    }
+  };
+
+  if (!status) {
+    return (
+      <>
+        <SubHeading>Snapshot backups</SubHeading>
+        <div className="text-[11px] text-fvp-muted italic">Loading…</div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <SubHeading>Snapshot backups</SubHeading>
+      <p className="text-[11px] text-fvp-muted">
+        Periodically copy your library DB (movies, tags, collections,
+        series, watch history — <strong>no video files</strong>) to a
+        rotating set of <code>.db</code> snapshots. Restores are manual
+        for now: stop FVP, swap <code>library.db</code> with the
+        snapshot, restart.
+      </p>
+
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={status.enabled}
+          onChange={(e) => {
+            void libraryIpc
+              .snapshotSetEnabled(e.target.checked)
+              .then(refresh)
+              .catch((err) => showToast(`${err}`, "error"));
+          }}
+          className="accent-fvp-accent"
+        />
+        <span>Enable weekly snapshots</span>
+      </label>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="flex items-center gap-2 text-xs text-fvp-muted">
+          Keep last
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={status.keep_count}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              if (!Number.isFinite(n) || n < 1) return;
+              void libraryIpc
+                .snapshotSetKeepCount(n)
+                .then(refresh)
+                .catch((err) => showToast(`${err}`, "error"));
+            }}
+            className="bg-fvp-bg border border-fvp-border rounded px-2 py-1 text-xs w-16 text-fvp-text"
+            disabled={!status.enabled}
+          />
+          snapshots
+        </label>
+        <label className="flex items-center gap-2 text-xs text-fvp-muted">
+          Every
+          <input
+            type="number"
+            min={1}
+            max={90}
+            value={status.cadence_days}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              if (!Number.isFinite(n) || n < 1) return;
+              void libraryIpc
+                .snapshotSetCadenceDays(n)
+                .then(refresh)
+                .catch((err) => showToast(`${err}`, "error"));
+            }}
+            className="bg-fvp-bg border border-fvp-border rounded px-2 py-1 text-xs w-16 text-fvp-text"
+            disabled={!status.enabled}
+          />
+          day(s)
+        </label>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => void takeNow()}
+          disabled={busyTake}
+          className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
+        >
+          {busyTake ? "Taking…" : "Take a snapshot now"}
+        </button>
+        <button
+          onClick={() => {
+            void libraryIpc
+              .snapshotRevealDir()
+              .catch((err) => showToast(`${err}`, "error"));
+          }}
+          className="px-3 py-1.5 bg-fvp-bg border border-fvp-border text-fvp-text text-xs rounded hover:border-fvp-muted"
+        >
+          Open snapshots folder
+        </button>
+      </div>
+
+      <div className="text-[10px] text-fvp-muted">
+        Saving to: <code className="break-all">{status.effective_dir}</code>
+        {status.last_at > 0 && (
+          <span>
+            {" · last snapshot "}
+            {new Date(status.last_at * 1000).toLocaleString()}
+          </span>
+        )}
+      </div>
+
+      {status.entries.length > 0 && (
+        <div className="space-y-0.5">
+          <div className="text-[11px] uppercase tracking-wider text-fvp-muted mt-1">
+            Current snapshots ({status.entries.length})
+          </div>
+          {status.entries.map((e) => (
+            <div
+              key={e.filename}
+              className="flex justify-between gap-2 text-[11px] font-mono px-2 py-0.5 bg-fvp-bg border border-fvp-border rounded"
+            >
+              <span className="truncate">{e.filename}</span>
+              <span className="text-fvp-muted shrink-0">
+                {(e.size_bytes / 1024 / 1024).toFixed(1)} MB
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

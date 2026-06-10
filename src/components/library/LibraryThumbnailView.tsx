@@ -8,6 +8,7 @@ import { formatBytes, formatRuntime } from "./libraryFormat";
 import { setIdentityDragData } from "./dragKinds";
 import { displayTitle } from "./titleDisplay";
 import { actlog } from "../../utils/actlog";
+import { useAppStore } from "../../state/appStore";
 import {
   DndContext,
   PointerSensor,
@@ -43,6 +44,11 @@ interface Props {
   /** Bumping counter sent by the SeriesScopeBar dropdown; views scroll
    *  to the given row index when this counter changes. */
   jumpToRowIndex?: { idx: number; n: number };
+  /** Stable identifier for the current Library scope (e.g. "all-root",
+   *  "series-37", "collection-12"). Used to save + restore scroll
+   *  position so the user keeps their spot when diving into a series
+   *  and coming back. */
+  scopeKey: string;
   /** Enable drag-reorder. "series-numbered" shows a position badge on
    *  each card; "collection" is plain reorder. Drop fires onReorderRows
    *  with the new identity-id order. */
@@ -79,6 +85,7 @@ const CARD_H = 268;
  */
 export function LibraryThumbnailView({
   rows,
+  scopeKey,
   selectedFileIds,
   primarySelectedId,
   refreshingIdentityIds,
@@ -92,6 +99,49 @@ export function LibraryThumbnailView({
   onContextMenu,
   onRefreshMetadata,
 }: Props) {
+  // Save + restore scroll offset by scope so the user keeps their
+  // spot when navigating between All Movies → series → back.
+  const savedScrollOffsets = useAppStore((s) => s.libraryScopeScrollOffsets);
+  const setScrollOffset = useAppStore((s) => s.setLibraryScopeScroll);
+  // outerRef on react-window's Grid exposes the underlying scrolling
+  // div. We use it to read + set scrollTop.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const gridOuterRef = useRef<any>(null);
+  // Restore the saved offset for this scope on mount + whenever the
+  // scope key changes. Done AFTER a microtask so layout is finalized.
+  useEffect(() => {
+    const saved = savedScrollOffsets[scopeKey];
+    if (saved == null) return;
+    let cancelled = false;
+    const restore = () => {
+      if (cancelled) return;
+      const el = gridOuterRef.current;
+      const scroller =
+        el && "scrollTop" in el
+          ? el
+          : document.querySelector<HTMLElement>(
+              `[data-scope-scroller="${scopeKey}"]`,
+            );
+      if (scroller) {
+        scroller.scrollTop = saved;
+      }
+    };
+    // Two RAF ticks gives the Grid time to lay out its rows.
+    requestAnimationFrame(() => requestAnimationFrame(restore));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey]);
+  // Throttled scroll-save: fire at most every ~250ms.
+  const scrollSaveTimerRef = useRef<number | null>(null);
+  const handleGridScroll = (info: { scrollTop: number }) => {
+    if (scrollSaveTimerRef.current != null) return;
+    scrollSaveTimerRef.current = window.setTimeout(() => {
+      scrollSaveTimerRef.current = null;
+      setScrollOffset(scopeKey, info.scrollTop);
+    }, 250);
+  };
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const gridRef = useRef<any>(null);
@@ -287,6 +337,9 @@ export function LibraryThumbnailView({
         cardWidth={CARD_W}
         onReorderRows={onReorderRows}
         data={itemData}
+        jumpToRowIndex={jumpToRowIndex}
+        scopeKey={scopeKey}
+        onScrollSave={handleGridScroll}
       />
     );
   }
@@ -296,6 +349,7 @@ export function LibraryThumbnailView({
       {dims.w > 0 && dims.h > 0 && (
         <Grid
           ref={gridRef}
+          outerRef={gridOuterRef}
           columnCount={columnCount}
           columnWidth={CARD_W}
           rowCount={rowCount}
@@ -304,6 +358,7 @@ export function LibraryThumbnailView({
           width={dims.w}
           itemData={itemData}
           overscanRowCount={2}
+          onScroll={handleGridScroll}
         >
           {Cell}
         </Grid>
@@ -729,16 +784,40 @@ function ReorderableGrid({
   cardWidth,
   onReorderRows,
   data,
+  jumpToRowIndex,
+  scopeKey,
+  onScrollSave,
 }: {
   rows: LibraryRow[];
   cardWidth: number;
   onReorderRows?: (orderedIds: number[]) => void;
   data: CellData;
+  jumpToRowIndex?: { idx: number; n: number };
+  scopeKey: string;
+  onScrollSave: (info: { scrollTop: number }) => void;
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
   const ids = rows.map((r) => r.identity.id);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+
+  // Jump-to-season for the reorderable path. react-window's
+  // scrollToItem doesn't apply here — we use a per-card data
+  // attribute + querySelector + scrollIntoView instead. Tracks
+  // jumpToRowIndex.n so consecutive jumps to the same row re-fire.
+  useEffect(() => {
+    if (!jumpToRowIndex || jumpToRowIndex.idx < 0 || !scrollerRef.current) {
+      return;
+    }
+    const target = scrollerRef.current.querySelector(
+      `[data-row-idx="${jumpToRowIndex.idx}"]`,
+    ) as HTMLElement | null;
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpToRowIndex?.n]);
+
   const handleDragEnd = (e: DragEndEvent) => {
     const { active, over } = e;
     if (!over || active.id === over.id || !onReorderRows) return;
@@ -748,7 +827,14 @@ function ReorderableGrid({
     onReorderRows(arrayMove(ids, oldIdx, newIdx));
   };
   return (
-    <div className="h-full w-full overflow-y-auto p-2">
+    <div
+      ref={scrollerRef}
+      data-scope-scroller={scopeKey}
+      onScroll={(e) =>
+        onScrollSave({ scrollTop: (e.target as HTMLDivElement).scrollTop })
+      }
+      className="h-full w-full overflow-y-auto p-2"
+    >
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -761,12 +847,13 @@ function ReorderableGrid({
               gridTemplateColumns: `repeat(auto-fill, minmax(${cardWidth - 16}px, 1fr))`,
             }}
           >
-            {rows.map((row) => (
+            {rows.map((row, idx) => (
               <SortableCard
                 key={row.identity.id}
                 id={row.identity.id}
                 row={row}
                 data={data}
+                rowIdx={idx}
               />
             ))}
           </div>
@@ -784,10 +871,12 @@ function SortableCard({
   id,
   row,
   data,
+  rowIdx,
 }: {
   id: number;
   row: LibraryRow;
   data: CellData;
+  rowIdx: number;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id });
@@ -799,7 +888,13 @@ function SortableCard({
     zIndex: isDragging ? 10 : undefined,
   };
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      data-row-idx={rowIdx}
+      {...attributes}
+      {...listeners}
+    >
       <ThumbCard
         row={row}
         selected={data.selectedFileIds.has(row.file.id)}

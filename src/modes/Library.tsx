@@ -1160,7 +1160,7 @@ export function LibraryMode() {
               const picked = await open({
                 multiple: false,
                 filters: [
-                  { name: "Image", extensions: ["jpg", "jpeg", "png", "webp"] },
+                  { name: "Image", extensions: ["jpg", "jpeg", "jfif", "png", "webp", "gif", "bmp", "tiff", "tif"] },
                 ],
               });
               if (typeof picked !== "string") {
@@ -1913,6 +1913,7 @@ export function LibraryMode() {
             <div className="flex-1 min-h-0">
               <LibraryThumbnailView
                 rows={maskedFilteredRows}
+                scopeKey={`${activeScope.kind}-${activeScope.id ?? "root"}`}
                 selectedFileIds={selectedFileIds}
                 primarySelectedId={primarySelectedId}
                 refreshingIdentityIds={refreshingIdentityIds}

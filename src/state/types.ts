@@ -40,6 +40,11 @@ export interface AppState {
    *  browser/webview caches across the whole grid (not just the row
    *  whose details panel is currently mounted). */
   thumbnailRefreshEpoch: number;
+  /** Scroll offsets keyed by Library scope key (e.g. "all",
+   *  "series-37", "collection-12"). Restored when the user navigates
+   *  back to a previously-visited scope so they don't lose their
+   *  spot after diving into a series + coming back. */
+  libraryScopeScrollOffsets: Record<string, number>;
   currentFile: string | null;
   loading: boolean;
   playing: boolean;
@@ -281,6 +286,7 @@ export interface AppActions {
   setMode: (mode: AppMode) => void;
   setLibraryEnabled: (v: boolean) => void;
   bumpThumbnailRefreshEpoch: () => void;
+  setLibraryScopeScroll: (scopeKey: string, offset: number) => void;
   togglePlay: () => void;
   toggleMute: () => void;
   toggleFullscreen: () => void;

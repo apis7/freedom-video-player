@@ -62,6 +62,7 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   // can flip it off; everyone else gets the Library tab automatically.
   libraryEnabled: true,
   thumbnailRefreshEpoch: 0,
+  libraryScopeScrollOffsets: {},
   currentFile: null,
   loading: false,
   playing: false,
@@ -159,6 +160,13 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
     // when the bump happened) and guarantee uniqueness across the
     // session even after a page reload.
     set({ thumbnailRefreshEpoch: Date.now() }),
+  setLibraryScopeScroll: (scopeKey, offset) =>
+    set((s) => ({
+      libraryScopeScrollOffsets: {
+        ...s.libraryScopeScrollOffsets,
+        [scopeKey]: offset,
+      },
+    })),
   togglePlay: () => set((s) => ({ playing: !s.playing })),
   toggleMute: () => set((s) => ({ muted: !s.muted })),
   toggleFullscreen: () => set((s) => ({ fullscreen: !s.fullscreen })),

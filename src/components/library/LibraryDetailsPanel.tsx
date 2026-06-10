@@ -248,7 +248,7 @@ function SingleRowPanel({
     const picked = await open({
       multiple: false,
       filters: [
-        { name: "Image", extensions: ["jpg", "jpeg", "png", "webp"] },
+        { name: "Image", extensions: ["jpg", "jpeg", "jfif", "png", "webp", "gif", "bmp", "tiff", "tif"] },
       ],
     });
     if (typeof picked !== "string") return;
@@ -632,7 +632,7 @@ function BulkEditPanel({
     const picked = await open({
       multiple: false,
       filters: [
-        { name: "Image", extensions: ["jpg", "jpeg", "png", "webp"] },
+        { name: "Image", extensions: ["jpg", "jpeg", "jfif", "png", "webp", "gif", "bmp", "tiff", "tif"] },
       ],
     });
     if (typeof picked !== "string") return;

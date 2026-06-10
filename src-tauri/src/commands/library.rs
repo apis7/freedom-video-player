@@ -2226,12 +2226,23 @@ pub fn set_custom_thumbnail_core(
             if !src.exists() {
                 return Err(format!("Source file not found: {src_str}"));
             }
-            let ext = src
+            let src_ext = src
                 .extension()
                 .and_then(|e| e.to_str())
                 .filter(|e| e.len() <= 5)
                 .unwrap_or("jpg")
                 .to_lowercase();
+            // Browser-renderable extensions get a verbatim byte copy
+            // (fast, no re-encode). Anything else (jfif, bmp, tiff,
+            // heic if someone enables it later) gets decoded and
+            // re-encoded as JPEG so the webview can actually display
+            // it. We also normalize jpeg → jpg so the sibling filename
+            // is predictable.
+            let (ext, needs_convert) = match src_ext.as_str() {
+                "jpg" | "jpeg" => ("jpg".to_string(), false),
+                "png" | "webp" | "gif" => (src_ext.clone(), false),
+                _ => ("jpg".to_string(), true), // includes jfif, bmp, tiff
+            };
             // Pull every file path under this identity. Order by id so
             // the "first" we pick to store is stable.
             let conn = db.lock();
@@ -2275,8 +2286,38 @@ pub fn set_custom_thumbnail_core(
                 let mut last_err: Option<std::io::Error> = None;
                 let mut succeeded = false;
                 for attempt in 0..3 {
-                    match std::fs::copy(src, &dst) {
-                        Ok(_) => {
+                    let attempt_result: std::io::Result<()> = if needs_convert {
+                        // Decode whatever the user picked + re-encode as
+                        // JPEG so the browser can display it. The image
+                        // crate handles jfif, bmp, tiff, etc. with the
+                        // features enabled in Cargo.toml.
+                        match image::ImageReader::open(src)
+                            .and_then(|r| r.with_guessed_format())
+                        {
+                            Ok(reader) => match reader.decode() {
+                                Ok(img) => img
+                                    .save_with_format(
+                                        &dst,
+                                        image::ImageFormat::Jpeg,
+                                    )
+                                    .map_err(|e| {
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            format!("convert: {e}"),
+                                        )
+                                    }),
+                                Err(e) => Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("decode: {e}"),
+                                )),
+                            },
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        std::fs::copy(src, &dst).map(|_| ())
+                    };
+                    match attempt_result {
+                        Ok(()) => {
                             succeeded = true;
                             break;
                         }

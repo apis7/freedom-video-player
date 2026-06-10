@@ -8,7 +8,39 @@ files without modifying them.
 
 ## Status
 
-Early development. Windows-first (Chapter 1).
+Alpha. Windows-first (Chapter 1). Daily-driver usable for the
+maintainer; rough edges remain — the library DB schema is still
+actively migrating, so expect occasional churn until Chapter 2.
+
+## Download
+
+**Latest Windows installer (NSIS, x64):** see the
+[Releases page](https://github.com/apis7/freedom-video-player/releases/latest).
+
+After installing, FVP shows a one-time tip about the optional
+Library Networking feature (see below).
+
+## Library Networking (Alpha — Phase 1 of 3)
+
+You can share one library across multiple FVP installs (Windows now;
+Mac / iOS / Android later) by designating a **network folder** as the
+shared "home". One install runs as the **Host** (its local DB is the
+source of truth); other installs connect as **Clients** over the LAN.
+
+The library SQLite database itself stays local to the Host — SQLite
+over SMB corrupts. The home folder on the share holds the **shared
+poster cache**, **LAN auth token**, and **Host discovery info** so
+Clients can find the Host.
+
+Configure in `Settings → Library → Library Networking`:
+
+- **Standalone** (default) — library lives only on this device.
+- **Host** — this device IS the library; other installs connect to it.
+- **Client** — talk to a Host on the LAN.
+
+Phase 1 (current build): settings + folder bootstrap only.
+Phase 2: HTTP API + Host/Client networking.
+Phase 3: offline read-only mode + mobile-client protocol spec.
 
 ## Stack
 

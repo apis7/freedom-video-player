@@ -2211,6 +2211,24 @@ const FAMILY_VIEW_ALLOWED_KEY: &str = "family_view_allowed";
 const CLOCK_FORMAT_KEY: &str = "clock_format"; // "12h" or "24h"
 const DELETE_DEFAULT_KEY: &str = "delete_default"; // "remove" or "recycle"
 
+// ── Networked-Library settings (Phase 1: persistence only) ───────────
+//
+// `library_mode` picks one of three roles for THIS install:
+//   - "standalone"  — DB local, no networking. Default for fresh installs.
+//   - "host"        — DB local AND serves a LAN HTTP API to clients.
+//                     The home folder on the network share holds the
+//                     shared poster cache + auth token + discovery file
+//                     so Clients can find this Host.
+//   - "client"      — Talks to a remote Host over the LAN; this install's
+//                     local DB is only a cache (Phase 3 offline mode).
+// Phase 1 ships the persistence + UI only. The actual HTTP server and
+// Client networking land in Phase 2. Keeping these settings in place
+// now means Phase 2 only needs to read them, not migrate them.
+const LIBRARY_MODE_KEY: &str = "library_mode"; // "standalone" | "host" | "client"
+const HOME_FOLDER_PATH_KEY: &str = "home_folder_path"; // absolute path to shared folder
+const HOST_ADDRESS_KEY: &str = "host_address"; // e.g. "http://192.168.1.7:42171" (Client mode)
+const HOST_AUTH_TOKEN_KEY: &str = "host_auth_token"; // 32-byte hex; shared via home folder file
+
 fn hash_pin(pin: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -2332,6 +2350,12 @@ pub struct LibrarySettingsSnapshot {
     pub delete_default: String,
     pub poster_cache_cap_bytes: u64,
     pub poster_cache_size_bytes: u64,
+    // Networked-Library (Phase 1 — persistence only; networking lands in Phase 2).
+    pub library_mode: String,            // "standalone" | "host" | "client"
+    pub home_folder_path: Option<String>,
+    pub home_folder_exists: bool,         // true if the path resolves and is a dir
+    pub host_address: Option<String>,
+    pub host_auth_token: Option<String>,  // visible in Settings so the user can rotate / share
 }
 
 #[tauri::command]
@@ -2347,7 +2371,7 @@ pub fn library_get_settings(
         let mut stmt = conn
             .prepare(
                 "SELECT key, value FROM library_settings
-                 WHERE key IN (?1, ?2, ?3, ?4, ?5)",
+                 WHERE key IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .map_err(|e| format!("prepare settings bulk: {e}"))?;
         let rows = stmt
@@ -2358,6 +2382,10 @@ pub fn library_get_settings(
                     FAMILY_VIEW_ENABLED_KEY,
                     CLOCK_FORMAT_KEY,
                     DELETE_DEFAULT_KEY,
+                    LIBRARY_MODE_KEY,
+                    HOME_FOLDER_PATH_KEY,
+                    HOST_ADDRESS_KEY,
+                    HOST_AUTH_TOKEN_KEY,
                 ],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
@@ -2379,6 +2407,17 @@ pub fn library_get_settings(
         .get(DELETE_DEFAULT_KEY)
         .cloned()
         .unwrap_or_else(|| "remove".to_string());
+    let library_mode = settings
+        .get(LIBRARY_MODE_KEY)
+        .cloned()
+        .unwrap_or_else(|| "standalone".to_string());
+    let home_folder_path = settings.get(HOME_FOLDER_PATH_KEY).cloned();
+    let home_folder_exists = home_folder_path
+        .as_deref()
+        .map(|p| std::path::Path::new(p).is_dir())
+        .unwrap_or(false);
+    let host_address = settings.get(HOST_ADDRESS_KEY).cloned();
+    let host_auth_token = settings.get(HOST_AUTH_TOKEN_KEY).cloned();
     let cap = crate::library::poster_cache::get_cap_bytes(&conn);
     drop(conn);
     let cache_dir = match app.path().app_local_data_dir() {
@@ -2396,7 +2435,223 @@ pub fn library_get_settings(
         delete_default,
         poster_cache_cap_bytes: cap,
         poster_cache_size_bytes: cache_size,
+        library_mode,
+        home_folder_path,
+        home_folder_exists,
+        host_address,
+        host_auth_token,
     })
+}
+
+// ── Networked-Library commands (Phase 1) ─────────────────────────────
+
+/// Set this install's role. Only validates the input string; the
+/// real consequences (HTTP server up / Client proxy on / etc) land
+/// in Phase 2.
+#[tauri::command]
+pub fn library_set_mode(
+    db: State<'_, LibraryDb>,
+    mode: String,
+) -> Result<(), String> {
+    if mode != "standalone" && mode != "host" && mode != "client" {
+        return Err(format!(
+            "Mode must be 'standalone', 'host', or 'client' (got '{mode}')"
+        ));
+    }
+    crate::log!("library", "set_mode → {mode}");
+    let conn = db.lock();
+    crate::library::db::set_setting(&conn, LIBRARY_MODE_KEY, &mode)?;
+    // If switching INTO Host and we don't have a token yet, mint one
+    // now so Settings can display it immediately. Token is 32 random
+    // bytes hex-encoded. We rotate via a separate command.
+    if mode == "host"
+        && crate::library::db::get_setting(&conn, HOST_AUTH_TOKEN_KEY)?
+            .is_none()
+    {
+        let tok = mint_auth_token();
+        crate::library::db::set_setting(&conn, HOST_AUTH_TOKEN_KEY, &tok)?;
+        crate::log!(
+            "library",
+            "set_mode: minted Host auth token (len={})",
+            tok.len()
+        );
+    }
+    Ok(())
+}
+
+/// Set the home folder. When the path is Some, bootstrap the on-disk
+/// structure (poster-cache/, README.txt, auth-token file, host-discovery
+/// placeholder). When None, just clears the setting — files left on the
+/// share intact so other installs still see them.
+#[tauri::command]
+pub fn library_set_home_folder(
+    db: State<'_, LibraryDb>,
+    path: Option<String>,
+) -> Result<(), String> {
+    match path.as_deref() {
+        None => {
+            crate::log!("library", "set_home_folder → cleared");
+            let conn = db.lock();
+            conn.execute(
+                "DELETE FROM library_settings WHERE key = ?1",
+                params![HOME_FOLDER_PATH_KEY],
+            )
+            .map_err(|e| format!("clear home folder: {e}"))?;
+            return Ok(());
+        }
+        Some(p) => {
+            let pb = std::path::PathBuf::from(p);
+            if !pb.exists() {
+                return Err(format!("Path does not exist: {p}"));
+            }
+            if !pb.is_dir() {
+                return Err(format!("Path is not a directory: {p}"));
+            }
+            crate::log!("library", "set_home_folder → {p}");
+            let conn = db.lock();
+            crate::library::db::set_setting(&conn, HOME_FOLDER_PATH_KEY, p)?;
+            // Bootstrap the share-side structure. We DO NOT yet move the
+            // poster cache here — that copy happens in Phase 2 when the
+            // Host actually starts serving from the home folder. Phase 1
+            // just creates empty scaffolding so users browsing the share
+            // see something coherent.
+            let token = crate::library::db::get_setting(
+                &conn,
+                HOST_AUTH_TOKEN_KEY,
+            )?;
+            drop(conn);
+            if let Err(e) = bootstrap_home_folder(&pb, token.as_deref()) {
+                // Bootstrap failure is non-fatal — log and continue. User
+                // can still SEE the path is set and we'll retry on next
+                // launch. Most common cause: SMB perms or a momentarily
+                // unreachable share.
+                crate::log!(
+                    "library",
+                    "set_home_folder: bootstrap of \"{}\" failed: {e} (path saved anyway, will retry)",
+                    pb.display()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Client mode only: address of the Host to talk to (Phase 2 wiring).
+/// Phase 1 stores it; no networking happens yet.
+#[tauri::command]
+pub fn library_set_host_address(
+    db: State<'_, LibraryDb>,
+    address: Option<String>,
+) -> Result<(), String> {
+    let conn = db.lock();
+    match address.as_deref() {
+        None => {
+            crate::log!("library", "set_host_address → cleared");
+            conn.execute(
+                "DELETE FROM library_settings WHERE key = ?1",
+                params![HOST_ADDRESS_KEY],
+            )
+            .map_err(|e| format!("clear host address: {e}"))?;
+        }
+        Some(addr) => {
+            // Light validation — must be http[s]://host[:port].
+            if !addr.starts_with("http://") && !addr.starts_with("https://") {
+                return Err(
+                    "Host address must start with http:// or https://".into(),
+                );
+            }
+            crate::log!("library", "set_host_address → {addr}");
+            crate::library::db::set_setting(&conn, HOST_ADDRESS_KEY, addr)?;
+        }
+    }
+    Ok(())
+}
+
+/// Mint a NEW auth token and rotate the existing one. Invalidates any
+/// Clients currently using the old token (they'll see 401 + need to
+/// re-read it from the home folder). Returns the new token so the UI
+/// can show it without an extra round-trip.
+#[tauri::command]
+pub fn library_rotate_auth_token(
+    db: State<'_, LibraryDb>,
+) -> Result<String, String> {
+    let tok = mint_auth_token();
+    let conn = db.lock();
+    crate::library::db::set_setting(&conn, HOST_AUTH_TOKEN_KEY, &tok)?;
+    // Push the rotated token into the home folder's auth file too so
+    // Clients pick it up. Skip silently if no home folder set yet —
+    // user wants to rotate before designating a home.
+    let home = crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?;
+    drop(conn);
+    if let Some(p) = home {
+        let path = std::path::PathBuf::from(&p);
+        if let Err(e) = write_auth_token_file(&path, &tok) {
+            crate::log!(
+                "library",
+                "rotate_auth_token: wrote DB but failed to push to home folder: {e}"
+            );
+        }
+    }
+    crate::log!("library", "rotate_auth_token: minted new token (len={})", tok.len());
+    Ok(tok)
+}
+
+fn mint_auth_token() -> String {
+    // 32 random bytes → 64-char hex. Source: getrandom via rand 0.8.
+    // We already pull rand in for fingerprint shuffles so no new dep.
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn write_auth_token_file(
+    home: &std::path::Path,
+    token: &str,
+) -> std::io::Result<()> {
+    let p = home.join("auth-token");
+    std::fs::write(p, token.as_bytes())
+}
+
+/// Create / refresh the on-share structure: README.txt, poster-cache/,
+/// auth-token file. Idempotent — safe to call repeatedly. Token arg is
+/// the token to write (typically the one minted when switching to Host
+/// mode); when None we don't touch the existing auth-token file.
+fn bootstrap_home_folder(
+    home: &std::path::Path,
+    token: Option<&str>,
+) -> std::io::Result<()> {
+    use std::fs;
+    fs::create_dir_all(home.join("poster-cache"))?;
+    // README so anyone browsing the share knows what they're looking at.
+    let readme = "Freedom Video Player — shared library home\n\
+                  ===========================================\n\n\
+                  This folder is the network home for one or more FVP installs.\n\
+                  It holds the shared poster cache, the LAN auth token, and\n\
+                  discovery info so other devices can find the Library Host.\n\n\
+                  Safe to back up. Do NOT edit files here by hand unless you\n\
+                  know what you're doing — FVP rewrites them automatically.\n\n\
+                  - poster-cache/      TMDb poster thumbnails (shared by all installs)\n\
+                  - auth-token         LAN auth secret for the HTTP API (32-byte hex)\n\
+                  - host-discovery.json  Last-known Host address (IP, port, name)\n\
+                  - settings.json      Shared FVP settings (TMDb token, library roots)\n";
+    fs::write(home.join("README.txt"), readme)?;
+    // host-discovery.json placeholder. Phase 2 fills in real data.
+    let placeholder = "{\"version\":1,\"host\":null,\"updated_at\":null,\"note\":\"Phase 1: placeholder. The Host writes its IP/port here on launch in Phase 2.\"}";
+    let disc = home.join("host-discovery.json");
+    if !disc.exists() {
+        fs::write(disc, placeholder)?;
+    }
+    if let Some(tok) = token {
+        write_auth_token_file(home, tok)?;
+    }
+    crate::log!(
+        "library",
+        "bootstrap_home_folder: \"{}\" ready (poster-cache/, README.txt, host-discovery.json{})",
+        home.display(),
+        if token.is_some() { ", auth-token" } else { "" }
+    );
+    Ok(())
 }
 
 #[tauri::command]

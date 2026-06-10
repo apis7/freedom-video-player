@@ -101,6 +101,9 @@ export function LibrarySettingsPanel() {
       {snap && libraryEnabled && (
         <>
           <Divider />
+          <LibraryNetworkingSection snap={snap} reload={reload} />
+
+          <Divider />
 
           <SubHeading>Watched folders</SubHeading>
           <p className="text-[11px] text-fvp-muted">
@@ -391,6 +394,327 @@ function SubHeading({ children }: { children: React.ReactNode }) {
     <h4 className="text-[11px] uppercase tracking-wider text-fvp-muted">
       {children}
     </h4>
+  );
+}
+
+/**
+ * Library Networking section — Phase 1 (persistence + UI only).
+ *
+ * Lets the user pick a role (Standalone / Host / Client), designate a
+ * shared "home folder" on a network share, and view/rotate the LAN auth
+ * token. Phase 2 wires up the actual HTTP server + Client proxy; Phase
+ * 3 adds the offline-read-only mode. The settings live here now so we
+ * don't need a settings migration when Phase 2 lands — only behavior.
+ *
+ * IMPORTANT: per architectural assessment, we DO NOT put the library
+ * SQLite DB itself on the share. SQLite over SMB corrupts. The home
+ * folder holds the shared poster cache + auth token + Host discovery
+ * info; the DB stays local to whoever's running as Host.
+ */
+function LibraryNetworkingSection({
+  snap,
+  reload,
+}: {
+  snap: LibrarySettingsSnapshot;
+  reload: () => Promise<void>;
+}) {
+  const showToast = useAppStore((s) => s.showToast);
+  const [tokenVisible, setTokenVisible] = useState(false);
+  const [rotating, setRotating] = useState(false);
+
+  const pickHomeFolder = async () => {
+    const picked = await openDialog({ directory: true, multiple: false });
+    if (typeof picked !== "string") return;
+    try {
+      await libraryIpc.setHomeFolder(picked);
+      showToast(`Home folder set: ${picked}`, "info", 3000);
+      await reload();
+    } catch (err) {
+      showToast(`Set home folder failed: ${err}`, "error");
+    }
+  };
+  const clearHomeFolder = async () => {
+    if (
+      !window.confirm(
+        "Clear the home folder setting? Files on the share are left intact; this install just stops pointing at it.",
+      )
+    )
+      return;
+    try {
+      await libraryIpc.setHomeFolder(null);
+      showToast("Home folder cleared.", "info", 2000);
+      await reload();
+    } catch (err) {
+      showToast(`Clear failed: ${err}`, "error");
+    }
+  };
+  const setMode = async (mode: "standalone" | "host" | "client") => {
+    try {
+      await libraryIpc.setMode(mode);
+      await reload();
+    } catch (err) {
+      showToast(`Set mode failed: ${err}`, "error");
+    }
+  };
+  const rotate = async () => {
+    if (
+      !window.confirm(
+        "Rotate the auth token? Any Clients currently connected to this Host will need to re-read the new token from the home folder (happens automatically on their next launch).",
+      )
+    )
+      return;
+    setRotating(true);
+    try {
+      await libraryIpc.rotateAuthToken();
+      showToast("Auth token rotated.", "info", 2500);
+      await reload();
+    } catch (err) {
+      showToast(`Rotate failed: ${err}`, "error");
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  return (
+    <>
+      <SubHeading>Library Networking (Alpha — Phase 1 of 3)</SubHeading>
+      <div className="text-[11px] text-fvp-muted space-y-1">
+        <p>
+          Share your library across multiple devices (Windows / Mac / iOS /
+          Android) via a designated <strong>home folder</strong> on a network
+          share. Phase 1 (this build) ships settings + folder bootstrap only —
+          the actual Host/Client networking lands in the next update.
+        </p>
+        <p className="italic">
+          The library DB itself stays local to the Host device for safety
+          (SQLite over SMB corrupts) — the home folder holds the shared
+          poster cache, auth token, and Host discovery info.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
+          This install&apos;s role
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <RoleRadio
+            checked={snap.library_mode === "standalone"}
+            onChange={() => void setMode("standalone")}
+            title="Standalone (default)"
+            description="Library lives only on this device. No networking. Best when you only ever use FVP on one machine."
+          />
+          <RoleRadio
+            checked={snap.library_mode === "host"}
+            onChange={() => void setMode("host")}
+            title="Host"
+            description="This device IS the library. Other FVP installs (desktop or mobile) connect to it over the LAN. DB stays local; shared cache lives in the home folder."
+          />
+          <RoleRadio
+            checked={snap.library_mode === "client"}
+            onChange={() => void setMode("client")}
+            title="Client"
+            description="Talk to a Library Host on the LAN. Read/edit the same library, see the same watch progress, share posters. Falls back to read-only when the Host is offline (Phase 3)."
+          />
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
+          Home folder
+        </div>
+        {snap.home_folder_path ? (
+          <div className="flex items-start gap-2">
+            <div className="flex-1">
+              <div className="font-mono text-[11px] break-all px-2 py-1 bg-fvp-bg border border-fvp-border rounded">
+                {snap.home_folder_path}
+              </div>
+              <div className="text-[10px] mt-0.5">
+                {snap.home_folder_exists ? (
+                  <span className="text-fvp-ok">✓ Reachable</span>
+                ) : (
+                  <span className="text-fvp-err">
+                    ✗ Path not reachable right now — the share may be offline.
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={() => void pickHomeFolder()}
+              className="px-2 py-1 text-[11px] bg-fvp-bg border border-fvp-border rounded hover:border-fvp-muted shrink-0"
+            >
+              Change…
+            </button>
+            <button
+              onClick={() => void clearHomeFolder()}
+              className="px-2 py-1 text-[11px] text-fvp-err hover:bg-fvp-err/10 rounded shrink-0"
+            >
+              Clear
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => void pickHomeFolder()}
+              className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90"
+            >
+              Browse for home folder…
+            </button>
+            <span className="text-[11px] text-fvp-muted italic">
+              Not set — Standalone is fine; pick a network folder if you want
+              shared library later.
+            </span>
+          </div>
+        )}
+        {snap.home_folder_path && (
+          <p className="text-[10px] text-fvp-muted">
+            FVP creates <code>poster-cache/</code>, <code>README.txt</code>,
+            <code> host-discovery.json</code>, and (Host mode) an{" "}
+            <code>auth-token</code> file inside this folder. Safe to back up;
+            don&apos;t edit by hand.
+          </p>
+        )}
+      </div>
+
+      {snap.library_mode === "host" && snap.host_auth_token && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
+            Host auth token
+          </div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 px-2 py-1 bg-fvp-bg border border-fvp-border rounded text-[10px] font-mono break-all">
+              {tokenVisible
+                ? snap.host_auth_token
+                : "•".repeat(Math.min(48, snap.host_auth_token.length))}
+            </code>
+            <button
+              onClick={() => setTokenVisible((v) => !v)}
+              className="px-2 py-1 text-[11px] bg-fvp-bg border border-fvp-border rounded hover:border-fvp-muted shrink-0"
+            >
+              {tokenVisible ? "Hide" : "Show"}
+            </button>
+            <button
+              onClick={() => {
+                void navigator.clipboard.writeText(snap.host_auth_token!);
+                showToast("Token copied.", "info", 1500);
+              }}
+              className="px-2 py-1 text-[11px] bg-fvp-bg border border-fvp-border rounded hover:border-fvp-muted shrink-0"
+            >
+              Copy
+            </button>
+            <button
+              onClick={() => void rotate()}
+              disabled={rotating}
+              className="px-2 py-1 text-[11px] text-fvp-err hover:bg-fvp-err/10 rounded shrink-0 disabled:opacity-50"
+            >
+              {rotating ? "Rotating…" : "Rotate"}
+            </button>
+          </div>
+          <p className="text-[10px] text-fvp-muted">
+            Clients read this from <code>auth-token</code> in the home folder
+            automatically. Rotate if you think it leaked.
+          </p>
+        </div>
+      )}
+
+      {snap.library_mode === "client" && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
+            Host address
+          </div>
+          <HostAddressField
+            current={snap.host_address}
+            onSaved={async (v) => {
+              try {
+                await libraryIpc.setHostAddress(v);
+                await reload();
+                showToast(v ? "Host address saved." : "Host cleared.", "info", 1500);
+              } catch (err) {
+                showToast(`${err}`, "error");
+              }
+            }}
+          />
+          <p className="text-[10px] text-fvp-muted">
+            E.g. <code>http://192.168.1.7:42171</code>. In Phase 2 we&apos;ll
+            also auto-discover the Host via the home folder&apos;s
+            <code> host-discovery.json</code>.
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+
+function RoleRadio({
+  checked,
+  onChange,
+  title,
+  description,
+}: {
+  checked: boolean;
+  onChange: () => void;
+  title: string;
+  description: string;
+}) {
+  return (
+    <label
+      className={
+        "flex items-start gap-2 px-2 py-1.5 rounded cursor-pointer border " +
+        (checked
+          ? "border-fvp-accent bg-fvp-accent/10"
+          : "border-fvp-border hover:border-fvp-muted")
+      }
+    >
+      <input
+        type="radio"
+        checked={checked}
+        onChange={onChange}
+        className="accent-fvp-accent mt-0.5"
+      />
+      <div className="flex-1 min-w-0">
+        <div className="text-xs font-semibold text-fvp-text">{title}</div>
+        <div className="text-[10px] text-fvp-muted leading-snug">
+          {description}
+        </div>
+      </div>
+    </label>
+  );
+}
+
+function HostAddressField({
+  current,
+  onSaved,
+}: {
+  current: string | null;
+  onSaved: (v: string | null) => Promise<void>;
+}) {
+  const [val, setVal] = useState(current ?? "");
+  useEffect(() => {
+    setVal(current ?? "");
+  }, [current]);
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="text"
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        placeholder="http://192.168.1.7:42171"
+        className="flex-1 px-2 py-1 text-xs bg-fvp-bg border border-fvp-border rounded font-mono"
+      />
+      <button
+        onClick={() => void onSaved(val.trim() || null)}
+        className="px-3 py-1 text-xs bg-fvp-accent text-white rounded hover:opacity-90"
+      >
+        Save
+      </button>
+      {current && (
+        <button
+          onClick={() => void onSaved(null)}
+          className="px-2 py-1 text-[11px] text-fvp-err hover:bg-fvp-err/10 rounded"
+        >
+          Clear
+        </button>
+      )}
+    </div>
   );
 }
 

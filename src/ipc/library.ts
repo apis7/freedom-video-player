@@ -221,6 +221,13 @@ export const libraryIpc = {
     invoke<void>("library_set_delete_default", { default: deleteDefault }),
   setPosterCacheCap: (capBytes: number) =>
     invoke<void>("library_set_poster_cache_cap", { capBytes }),
+  setMode: (mode: LibraryMode) =>
+    invoke<void>("library_set_mode", { mode }),
+  setHomeFolder: (path: string | null) =>
+    invoke<void>("library_set_home_folder", { path }),
+  setHostAddress: (address: string | null) =>
+    invoke<void>("library_set_host_address", { address }),
+  rotateAuthToken: () => invoke<string>("library_rotate_auth_token"),
   findProbablePairs: () =>
     invoke<ProbablePair[]>("library_find_probable_pairs"),
   transferCuration: (
@@ -419,6 +426,8 @@ export interface TransferChecklist {
   watch_history: boolean;
 }
 
+export type LibraryMode = "standalone" | "host" | "client";
+
 export interface LibrarySettingsSnapshot {
   has_pin: boolean;
   family_view_allowed: boolean;
@@ -427,6 +436,12 @@ export interface LibrarySettingsSnapshot {
   delete_default: "remove" | "recycle";
   poster_cache_cap_bytes: number;
   poster_cache_size_bytes: number;
+  // Networked-Library (Phase 1: persistence + UI only; networking lands in Phase 2).
+  library_mode: LibraryMode;
+  home_folder_path: string | null;
+  home_folder_exists: boolean;
+  host_address: string | null;
+  host_auth_token: string | null;
 }
 
 /** Emitted when a TMDb enrichment pass completes for one identity.

@@ -8,6 +8,7 @@ import { formatBytes, formatRuntime } from "./libraryFormat";
 import { setIdentityDragData } from "./dragKinds";
 import { displayTitle } from "./titleDisplay";
 import { actlog } from "../../utils/actlog";
+import { diag } from "../../utils/uiErrorReporter";
 import { useAppStore } from "../../state/appStore";
 import {
   DndContext,
@@ -220,9 +221,19 @@ export function LibraryThumbnailView({
 
   // Empty-state messaging is handled by the parent so it can be
   // context-aware (empty scope vs. filter mismatch vs. no library).
-  if (rows.length === 0) return null;
+  if (rows.length === 0) {
+    diag(
+      "thumb-view",
+      `render skipped: rows.length=0 scopeKey=${scopeKey} reorderMode=${reorderMode ?? "null"}`,
+    );
+    return null;
+  }
 
   const columnCount = Math.max(1, Math.floor(dims.w / CARD_W));
+  diag(
+    "thumb-view",
+    `render scopeKey=${scopeKey} rows=${rows.length} reorderMode=${reorderMode ?? "null"} dims=${dims.w}x${dims.h} cols=${columnCount}`,
+  );
 
   // When seasons are on, pad the cell array so each new season starts
   // at column 0 of a fresh row. We insert `null` items into the
@@ -331,6 +342,10 @@ export function LibraryThumbnailView({
   // virtualization fights @dnd-kit (off-screen items aren't in the
   // DOM, so the SortableContext can't see them).
   if (reorderMode) {
+    diag(
+      "thumb-view",
+      `→ReorderableGrid scopeKey=${scopeKey} rows=${rows.length} reorderMode=${reorderMode}`,
+    );
     return (
       <ReorderableGrid
         rows={rows}
@@ -343,6 +358,10 @@ export function LibraryThumbnailView({
       />
     );
   }
+  diag(
+    "thumb-view",
+    `→react-window scopeKey=${scopeKey} rowCount=${rowCount} cols=${columnCount} dims=${dims.w}x${dims.h}`,
+  );
 
   return (
     <div ref={containerRef} className="h-full w-full">

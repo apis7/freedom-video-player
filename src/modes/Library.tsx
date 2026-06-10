@@ -593,6 +593,18 @@ export function LibraryMode() {
   // false-positive. The underlying DB row is unchanged; the next
   // scan-done event triggers a refreshItems that fetches the
   // post-scan truth.
+  // Diagnostic: log filteredRows count whenever activeScope or rows
+  // change. Helps catch the "I scoped into X but nothing shows up"
+  // class of bugs by surfacing the actual count post-filter.
+  useEffect(() => {
+    void import("../utils/uiErrorReporter").then(({ diag }) =>
+      diag(
+        "library",
+        `filtered scope=${activeScope.kind}-${activeScope.id ?? "root"} rows=${rows.length} → filtered=${filteredRows.length}`,
+      ),
+    );
+  }, [activeScope.kind, activeScope.id, rows.length, filteredRows.length]);
+
   const maskedFilteredRows = useMemo(() => {
     if (scanningFolderIds.size === 0) return filteredRows;
     return filteredRows.map((r) =>

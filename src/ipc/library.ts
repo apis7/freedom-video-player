@@ -228,6 +228,13 @@ export const libraryIpc = {
   setHostAddress: (address: string | null) =>
     invoke<void>("library_set_host_address", { address }),
   rotateAuthToken: () => invoke<string>("library_rotate_auth_token"),
+  hostServerStatus: () =>
+    invoke<HostServerStatus>("library_host_server_status"),
+  testHostConnection: (url: string, token: string | null) =>
+    invoke<HostConnectionTestResult>("library_test_host_connection", {
+      url,
+      token,
+    }),
   findProbablePairs: () =>
     invoke<ProbablePair[]>("library_find_probable_pairs"),
   transferCuration: (
@@ -427,6 +434,30 @@ export interface TransferChecklist {
 }
 
 export type LibraryMode = "standalone" | "host" | "client";
+
+/** Live status of the LAN HTTP server when this install is the Host.
+ *  Used by Settings to show "Host running on 192.168.x.y:42171". */
+export interface HostServerStatus {
+  running: boolean;
+  bound_address: string | null;
+  lan_ip: string;
+  port: number;
+  protocol_version: number;
+}
+
+/** Result of probing a Host URL from a Client. `reachable` reports
+ *  whether /v1/health returned anything; `authenticated` reports
+ *  whether an auth-protected endpoint accepted the token (None if no
+ *  token was supplied). */
+export interface HostConnectionTestResult {
+  reachable: boolean;
+  authenticated: boolean | null;
+  product: string | null;
+  fvp_version: string | null;
+  protocol: number | null;
+  elapsed_ms: number;
+  error: string | null;
+}
 
 export interface LibrarySettingsSnapshot {
   has_pin: boolean;

@@ -124,6 +124,15 @@ pub fn run() {
                             // off-thread; indexer hands off new identity
                             // ids to it via library::enrich::enqueue.
                             library::enrich::init(app.app_handle().clone(), db.clone(), dir);
+                            // Library Networking Phase 2: if this install is
+                            // configured as a Host (mode == "host" + token
+                            // minted), spin up the LAN HTTP server now so
+                            // Clients can connect at boot. Mode changes
+                            // mid-session route through `host_supervisor`
+                            // which holds the live HostServerHandle.
+                            let supervisor = commands::library::HostSupervisor::default();
+                            commands::library::supervisor_boot(&db, &supervisor);
+                            app.manage(supervisor);
                             app.manage(db);
                         }
                         Err(e) => {
@@ -241,6 +250,8 @@ pub fn run() {
             commands::library::library_set_home_folder,
             commands::library::library_set_host_address,
             commands::library::library_rotate_auth_token,
+            commands::library::library_host_server_status,
+            commands::library::library_test_host_connection,
             commands::library::library_set_poster_cache_cap,
             commands::library::library_find_probable_pairs,
             commands::library::library_transfer_curation,

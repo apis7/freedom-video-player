@@ -4,14 +4,127 @@
 //! re-scanning go through the orchestrator (which owns the watchers
 //! and worker thread); reads come straight off the DB.
 
+use crate::library::host_server::{self, HostServerHandle, DEFAULT_HOST_PORT};
 use crate::library::model::{LibraryFile, LibraryIdentity, LibraryRow, ProfileStatus, WatchedFolder};
 use crate::library::{orchestrator, suggestions, LibraryDb};
 use rand::SeedableRng;
 use rusqlite::params;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
 use std::time::SystemTime;
 use tauri::{AppHandle, Manager, State};
+
+// ── Host server supervisor ───────────────────────────────────────────
+//
+// Owns the currently-running HostServerHandle (or None). All
+// transitions go through `bring_up` / `tear_down` so we never leak a
+// server thread.
+
+#[derive(Default)]
+pub struct HostSupervisor {
+    inner: StdMutex<Option<HostServerHandle>>,
+}
+
+impl HostSupervisor {
+    fn is_running(&self) -> bool {
+        self.inner.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+    fn replace(&self, h: Option<HostServerHandle>) {
+        if let Ok(mut g) = self.inner.lock() {
+            // Old handle's Drop signals shutdown.
+            *g = h;
+        }
+    }
+}
+
+/// Boot-time bring-up: if this install was configured as Host last
+/// session, start the server now. Called once during `setup`.
+pub fn supervisor_boot(db: &LibraryDb, supervisor: &HostSupervisor) {
+    let (mode, token, home) = {
+        let conn = db.lock();
+        (
+            crate::library::db::get_setting(&conn, LIBRARY_MODE_KEY)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "standalone".to_string()),
+            crate::library::db::get_setting(&conn, HOST_AUTH_TOKEN_KEY)
+                .ok()
+                .flatten(),
+            crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)
+                .ok()
+                .flatten(),
+        )
+    };
+    if mode != "host" {
+        crate::log!(
+            "library:host",
+            "supervisor_boot: mode={mode}, server NOT started"
+        );
+        return;
+    }
+    let Some(tok) = token else {
+        crate::log!(
+            "library:host",
+            "supervisor_boot: mode=host but no auth token saved — refusing to start server"
+        );
+        return;
+    };
+    bring_up(db, supervisor, &tok, home.as_deref());
+}
+
+/// Start the host server and (when a home folder is configured)
+/// refresh `host-discovery.json` so Clients can find this Host.
+/// Idempotent — if already running, this is a no-op.
+fn bring_up(
+    db: &LibraryDb,
+    supervisor: &HostSupervisor,
+    token: &str,
+    home: Option<&str>,
+) {
+    if supervisor.is_running() {
+        crate::log!("library:host", "bring_up: server already running, no-op");
+        return;
+    }
+    match host_server::start(db.clone(), token.to_string(), DEFAULT_HOST_PORT) {
+        Ok(handle) => {
+            let addr = handle.addr();
+            supervisor.replace(Some(handle));
+            // Discovery file write — non-fatal if it fails (the Host
+            // still runs; users can also configure Clients manually).
+            if let Some(h) = home {
+                let lan = host_server::detect_lan_ip();
+                let pb = std::path::Path::new(h);
+                if let Err(e) =
+                    host_server::write_discovery_file(pb, &lan, addr.port())
+                {
+                    crate::log!(
+                        "library:host",
+                        "bring_up: discovery file write failed: {e}"
+                    );
+                }
+            } else {
+                crate::log!(
+                    "library:host",
+                    "bring_up: no home folder set — skipping discovery file write \
+                     (clients will need the Host URL manually)"
+                );
+            }
+        }
+        Err(e) => {
+            crate::log!("library:host", "bring_up: server start FAILED: {e}");
+        }
+    }
+}
+
+/// Stop the host server if running. Idempotent.
+fn tear_down(supervisor: &HostSupervisor) {
+    if !supervisor.is_running() {
+        return;
+    }
+    crate::log!("library:host", "tear_down: shutting down server");
+    supervisor.replace(None);
+}
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -2445,12 +2558,13 @@ pub fn library_get_settings(
 
 // ── Networked-Library commands (Phase 1) ─────────────────────────────
 
-/// Set this install's role. Only validates the input string; the
-/// real consequences (HTTP server up / Client proxy on / etc) land
-/// in Phase 2.
+/// Set this install's role. When entering Host mode, also starts the
+/// LAN HTTP server (Phase 2). When leaving Host mode, gracefully
+/// shuts it down. Client-mode networking is wired in Phase 2b.
 #[tauri::command]
 pub fn library_set_mode(
     db: State<'_, LibraryDb>,
+    supervisor: State<'_, HostSupervisor>,
     mode: String,
 ) -> Result<(), String> {
     if mode != "standalone" && mode != "host" && mode != "client" {
@@ -2459,22 +2573,32 @@ pub fn library_set_mode(
         ));
     }
     crate::log!("library", "set_mode → {mode}");
-    let conn = db.lock();
-    crate::library::db::set_setting(&conn, LIBRARY_MODE_KEY, &mode)?;
-    // If switching INTO Host and we don't have a token yet, mint one
-    // now so Settings can display it immediately. Token is 32 random
-    // bytes hex-encoded. We rotate via a separate command.
-    if mode == "host"
-        && crate::library::db::get_setting(&conn, HOST_AUTH_TOKEN_KEY)?
-            .is_none()
-    {
-        let tok = mint_auth_token();
-        crate::library::db::set_setting(&conn, HOST_AUTH_TOKEN_KEY, &tok)?;
-        crate::log!(
-            "library",
-            "set_mode: minted Host auth token (len={})",
-            tok.len()
-        );
+    let (current_mode, token, home) = {
+        let conn = db.lock();
+        crate::library::db::set_setting(&conn, LIBRARY_MODE_KEY, &mode)?;
+        // If switching INTO Host and we don't have a token yet, mint one
+        // now so Settings can display it immediately. Token is 32 random
+        // bytes hex-encoded. Rotation is a separate command.
+        let token = match crate::library::db::get_setting(&conn, HOST_AUTH_TOKEN_KEY)? {
+            Some(t) => t,
+            None => {
+                let t = mint_auth_token();
+                crate::library::db::set_setting(&conn, HOST_AUTH_TOKEN_KEY, &t)?;
+                crate::log!(
+                    "library",
+                    "set_mode: minted Host auth token (len={})",
+                    t.len()
+                );
+                t
+            }
+        };
+        let home = crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?;
+        (mode.clone(), token, home)
+    };
+    // Server lifecycle: only running when mode == "host".
+    match current_mode.as_str() {
+        "host" => bring_up(&db, &supervisor, &token, home.as_deref()),
+        _ => tear_down(&supervisor),
     }
     Ok(())
 }
@@ -2486,6 +2610,7 @@ pub fn library_set_mode(
 #[tauri::command]
 pub fn library_set_home_folder(
     db: State<'_, LibraryDb>,
+    supervisor: State<'_, HostSupervisor>,
     path: Option<String>,
 ) -> Result<(), String> {
     match path.as_deref() {
@@ -2531,6 +2656,20 @@ pub fn library_set_home_folder(
                     pb.display()
                 );
             }
+            // If the Host server is already running, refresh the
+            // discovery file in the new home folder so Clients can
+            // find us there. Best-effort; uses LAN IP detection.
+            if supervisor.is_running() {
+                let lan = host_server::detect_lan_ip();
+                if let Err(e) =
+                    host_server::write_discovery_file(&pb, &lan, DEFAULT_HOST_PORT)
+                {
+                    crate::log!(
+                        "library:host",
+                        "set_home_folder: discovery file refresh failed: {e}"
+                    );
+                }
+            }
             Ok(())
         }
     }
@@ -2570,21 +2709,27 @@ pub fn library_set_host_address(
 /// Mint a NEW auth token and rotate the existing one. Invalidates any
 /// Clients currently using the old token (they'll see 401 + need to
 /// re-read it from the home folder). Returns the new token so the UI
-/// can show it without an extra round-trip.
+/// can show it without an extra round-trip. When the Host server is
+/// running, this also restarts it with the new token so the old one
+/// stops working immediately.
 #[tauri::command]
 pub fn library_rotate_auth_token(
     db: State<'_, LibraryDb>,
+    supervisor: State<'_, HostSupervisor>,
 ) -> Result<String, String> {
     let tok = mint_auth_token();
-    let conn = db.lock();
-    crate::library::db::set_setting(&conn, HOST_AUTH_TOKEN_KEY, &tok)?;
+    let (mode, home) = {
+        let conn = db.lock();
+        crate::library::db::set_setting(&conn, HOST_AUTH_TOKEN_KEY, &tok)?;
+        let mode = crate::library::db::get_setting(&conn, LIBRARY_MODE_KEY)?;
+        let home = crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?;
+        (mode, home)
+    };
     // Push the rotated token into the home folder's auth file too so
     // Clients pick it up. Skip silently if no home folder set yet —
     // user wants to rotate before designating a home.
-    let home = crate::library::db::get_setting(&conn, HOME_FOLDER_PATH_KEY)?;
-    drop(conn);
-    if let Some(p) = home {
-        let path = std::path::PathBuf::from(&p);
+    if let Some(p) = &home {
+        let path = std::path::PathBuf::from(p);
         if let Err(e) = write_auth_token_file(&path, &tok) {
             crate::log!(
                 "library",
@@ -2592,8 +2737,150 @@ pub fn library_rotate_auth_token(
             );
         }
     }
+    // Bounce the server so connections using the old token start
+    // failing 401 immediately.
+    if mode.as_deref() == Some("host") {
+        crate::log!(
+            "library:host",
+            "rotate_auth_token: bouncing server with new token"
+        );
+        tear_down(&supervisor);
+        bring_up(&db, &supervisor, &tok, home.as_deref());
+    }
     crate::log!("library", "rotate_auth_token: minted new token (len={})", tok.len());
     Ok(tok)
+}
+
+/// Status of the local Host HTTP server. UI uses this to show "Host is
+/// running on 192.168.x.y:42171" in Settings. Cheap call — no DB
+/// access, just inspects the supervisor.
+#[derive(serde::Serialize)]
+pub struct HostServerStatus {
+    pub running: bool,
+    pub bound_address: Option<String>, // "0.0.0.0:42171"
+    pub lan_ip: String,                // best-effort, what Clients should use
+    pub port: u16,
+    pub protocol_version: u32,
+}
+
+#[tauri::command]
+pub fn library_host_server_status(
+    supervisor: State<'_, HostSupervisor>,
+) -> Result<HostServerStatus, String> {
+    let (running, bound) = {
+        let g = supervisor.inner.lock().map_err(|e| format!("lock: {e}"))?;
+        match g.as_ref() {
+            Some(h) => (true, Some(h.addr().to_string())),
+            None => (false, None),
+        }
+    };
+    Ok(HostServerStatus {
+        running,
+        bound_address: bound,
+        lan_ip: host_server::detect_lan_ip(),
+        port: DEFAULT_HOST_PORT,
+        protocol_version: host_server::PROTOCOL_VERSION,
+    })
+}
+
+/// Hit GET /v1/health on the given Host URL and report what came back.
+/// Used by the Client-side Settings UI to confirm the URL is reachable
+/// before we commit to talking to it for real library operations.
+///
+/// Token is optional here because /v1/health is unauthenticated by
+/// design — we want a Client to be able to verify reachability before
+/// it has its token sorted out. When a token IS provided, we also
+/// hit one auth-protected endpoint (`/v1/ipc/list_folders`) so the
+/// user gets feedback like "reachable but auth failed" in one click.
+#[derive(serde::Serialize)]
+pub struct HostConnectionTestResult {
+    pub reachable: bool,
+    pub authenticated: Option<bool>,    // None = wasn't tested
+    pub product: Option<String>,
+    pub fvp_version: Option<String>,
+    pub protocol: Option<u32>,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub fn library_test_host_connection(
+    url: String,
+    token: Option<String>,
+) -> Result<HostConnectionTestResult, String> {
+    let started = std::time::Instant::now();
+    let trimmed = url.trim_end_matches('/').to_string();
+    let health_url = format!("{trimmed}/v1/health");
+    crate::log!("library:host", "test_host_connection: GET {health_url}");
+    let health_resp = ureq::get(&health_url)
+        .timeout(std::time::Duration::from_secs(4))
+        .call();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    match health_resp {
+        Ok(resp) => {
+            let body: serde_json::Value = resp
+                .into_json()
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let product = body
+                .get("product")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let fvp_version = body
+                .get("fvp_version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let protocol = body.get("protocol").and_then(|v| v.as_u64()).map(|n| n as u32);
+
+            // If a token was supplied, also try one auth'd request so
+            // we can report "reachable but bad token".
+            let authenticated = if let Some(tok) = token {
+                let ipc_url = format!("{trimmed}/v1/ipc/list_folders");
+                let r = ureq::post(&ipc_url)
+                    .timeout(std::time::Duration::from_secs(4))
+                    .set("X-FVP-Auth", &tok)
+                    .send_string("{}");
+                let ok = match r {
+                    Ok(_) => true,
+                    Err(ureq::Error::Status(401, _)) => false,
+                    Err(ureq::Error::Status(403, _)) => false,
+                    Err(_) => false,
+                };
+                Some(ok)
+            } else {
+                None
+            };
+            crate::log!(
+                "library:host",
+                "test_host_connection: reachable in {elapsed_ms}ms, auth_ok={:?}",
+                authenticated
+            );
+            Ok(HostConnectionTestResult {
+                reachable: true,
+                authenticated,
+                product,
+                fvp_version,
+                protocol,
+                elapsed_ms,
+                error: None,
+            })
+        }
+        Err(e) => {
+            crate::log!(
+                "library:host",
+                "test_host_connection: unreachable: {e}"
+            );
+            Ok(HostConnectionTestResult {
+                reachable: false,
+                authenticated: None,
+                product: None,
+                fvp_version: None,
+                protocol: None,
+                elapsed_ms,
+                error: Some(e.to_string()),
+            })
+        }
+    }
 }
 
 fn mint_auth_token() -> String {

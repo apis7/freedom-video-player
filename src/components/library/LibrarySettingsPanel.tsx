@@ -3,6 +3,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../../state/appStore";
 import {
   libraryIpc,
+  type HostConnectionTestResult,
+  type HostServerStatus,
   type LibrarySettingsSnapshot,
   type WatchedFolder,
 } from "../../ipc/library";
@@ -421,6 +423,27 @@ function LibraryNetworkingSection({
   const showToast = useAppStore((s) => s.showToast);
   const [tokenVisible, setTokenVisible] = useState(false);
   const [rotating, setRotating] = useState(false);
+  const [serverStatus, setServerStatus] = useState<HostServerStatus | null>(
+    null,
+  );
+
+  // Re-poll host server status whenever the snap reloads (mode change,
+  // token rotate, etc.) so the visible "running / not running" badge
+  // matches reality. Cheap call — just a Mutex peek.
+  useEffect(() => {
+    let cancelled = false;
+    libraryIpc
+      .hostServerStatus()
+      .then((s) => {
+        if (!cancelled) setServerStatus(s);
+      })
+      .catch(() => {
+        if (!cancelled) setServerStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [snap.library_mode, snap.host_auth_token, snap.home_folder_path]);
 
   const pickHomeFolder = async () => {
     const picked = await openDialog({ directory: true, multiple: false });
@@ -575,6 +598,33 @@ function LibraryNetworkingSection({
         )}
       </div>
 
+      {snap.library_mode === "host" && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
+            Host server
+          </div>
+          {serverStatus?.running ? (
+            <div className="px-2 py-1.5 bg-fvp-ok/10 border border-fvp-ok rounded text-[11px] space-y-0.5">
+              <div className="text-fvp-ok font-semibold">
+                ✓ Listening on {serverStatus.bound_address}
+              </div>
+              <div className="text-fvp-muted">
+                Clients should use{" "}
+                <code className="text-fvp-text">
+                  http://{serverStatus.lan_ip}:{serverStatus.port}
+                </code>{" "}
+                (protocol v{serverStatus.protocol_version})
+              </div>
+            </div>
+          ) : (
+            <div className="px-2 py-1.5 bg-fvp-err/10 border border-fvp-err rounded text-[11px] text-fvp-err">
+              ✗ Server not running. Check the terminal log for the bind
+              error (most often the port is already in use).
+            </div>
+          )}
+        </div>
+      )}
+
       {snap.library_mode === "host" && snap.host_auth_token && (
         <div className="space-y-1.5">
           <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
@@ -634,13 +684,102 @@ function LibraryNetworkingSection({
             }}
           />
           <p className="text-[10px] text-fvp-muted">
-            E.g. <code>http://192.168.1.7:42171</code>. In Phase 2 we&apos;ll
-            also auto-discover the Host via the home folder&apos;s
+            E.g. <code>http://192.168.1.7:42171</code>. Phase 2b will
+            auto-discover the Host via the home folder&apos;s
             <code> host-discovery.json</code>.
           </p>
+          <ClientTestConnectionRow
+            url={snap.host_address}
+            token={snap.host_auth_token}
+          />
         </div>
       )}
     </>
+  );
+}
+
+/** Hit the configured Host URL's /v1/health and report what came back.
+ *  Phase 2a's smoke test for the Client-side networking — proves the
+ *  wire works before we re-route the whole IPC layer in Phase 2b. */
+function ClientTestConnectionRow({
+  url,
+  token,
+}: {
+  url: string | null;
+  token: string | null;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState<HostConnectionTestResult | null>(null);
+
+  const run = async () => {
+    if (!url) return;
+    setBusy(true);
+    try {
+      const r = await libraryIpc.testHostConnection(url, token);
+      setLast(r);
+    } catch (e) {
+      setLast({
+        reachable: false,
+        authenticated: null,
+        product: null,
+        fvp_version: null,
+        protocol: null,
+        elapsed_ms: 0,
+        error: `${e}`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1">
+      <button
+        onClick={() => void run()}
+        disabled={!url || busy}
+        className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
+      >
+        {busy ? "Testing…" : "Test connection to Host"}
+      </button>
+      {last && (
+        <div
+          className={
+            "text-[11px] px-2 py-1 border rounded " +
+            (last.reachable
+              ? "border-fvp-ok bg-fvp-ok/10"
+              : "border-fvp-err bg-fvp-err/10")
+          }
+        >
+          {last.reachable ? (
+            <>
+              <div className="text-fvp-ok font-semibold">
+                ✓ Reachable in {last.elapsed_ms}ms
+              </div>
+              <div className="text-fvp-muted">
+                {last.product ?? "?"} v{last.fvp_version ?? "?"} (protocol v
+                {last.protocol ?? "?"})
+              </div>
+              {last.authenticated === false && (
+                <div className="text-fvp-err mt-0.5">
+                  ✗ Auth FAILED — token mismatch. Re-read the token from
+                  the home folder&apos;s <code>auth-token</code> file.
+                </div>
+              )}
+              {last.authenticated === true && (
+                <div className="text-fvp-ok mt-0.5">✓ Auth OK</div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="text-fvp-err font-semibold">✗ Unreachable</div>
+              <div className="text-fvp-muted break-all">
+                {last.error ?? "no detail"}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

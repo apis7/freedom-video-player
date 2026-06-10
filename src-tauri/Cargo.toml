@@ -53,6 +53,15 @@ trash = "5"
 # faster than SHA-256 and we don't need crypto strength here, just a
 # stable content ID.
 blake3 = "1"
+# Library Networking Phase 2: the Host runs an HTTP server (axum) so
+# other FVP installs (Clients) can hit the same library over the LAN.
+# Tauri 2 already runs a tokio runtime — we add it explicitly so axum
+# can pick up the right features without depending on transitive flags.
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+# LAN IP detection for the host-discovery.json we drop in the home
+# folder — clients read it to know where the Host is listening.
+local-ip-address = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

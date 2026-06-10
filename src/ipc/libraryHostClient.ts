@@ -175,12 +175,12 @@ export async function clientCall<T>(
 
 // ── Mode + dispatch ──────────────────────────────────────────────────
 
-let currentMode: "standalone" | "host" | "client" = "standalone";
+let currentMode: "standalone" | "host" | "client" | "sync" = "standalone";
 
-export function setLibraryMode(m: "standalone" | "host" | "client") {
+export function setLibraryMode(m: "standalone" | "host" | "client" | "sync") {
   currentMode = m;
 }
-export function getLibraryMode(): "standalone" | "host" | "client" {
+export function getLibraryMode(): "standalone" | "host" | "client" | "sync" {
   return currentMode;
 }
 

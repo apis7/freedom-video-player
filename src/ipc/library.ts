@@ -251,6 +251,10 @@ export const libraryIpc = {
   firstRunComplete: () => invoke<void>("library_first_run_complete"),
   diagnoseHomeFolder: () =>
     invoke<HomeFolderDiagnosis>("library_diagnose_home_folder"),
+  syncStatus: () => invoke<SyncStatus>("library_sync_status"),
+  syncPushNow: () => invoke<string>("library_sync_push_now"),
+  syncSetCadence: (minutes: number) =>
+    invoke<void>("library_sync_set_cadence", { minutes }),
   snapshotStatus: () => invoke<SnapshotStatus>("library_snapshot_status"),
   snapshotSetEnabled: (enabled: boolean) =>
     invoke<void>("library_snapshot_set_enabled", { enabled }),
@@ -478,7 +482,21 @@ export interface TransferChecklist {
   watch_history: boolean;
 }
 
-export type LibraryMode = "standalone" | "host" | "client";
+export type LibraryMode = "standalone" | "host" | "client" | "sync";
+
+/** Sync mode (passive home folder + periodic push/pull) status. */
+export interface SyncStatus {
+  mode_is_sync: boolean;
+  home_folder_path: string | null;
+  sync_file_path: string | null;
+  sync_file_exists: boolean;
+  sync_file_mtime: number;
+  sync_file_size_bytes: number;
+  local_db_mtime: number;
+  last_push_at: number;
+  last_pull_at: number;
+  cadence_minutes: number;
+}
 
 /** Live status of the LAN HTTP server when this install is the Host.
  *  Used by Settings to show "Host running on 192.168.x.y:42171". */

@@ -794,7 +794,9 @@ function LibraryNetworkingSection({
       showToast(`Clear failed: ${err}`, "error");
     }
   };
-  const setMode = async (mode: "standalone" | "host" | "client") => {
+  const setMode = async (
+    mode: "standalone" | "host" | "client" | "sync",
+  ) => {
     try {
       await libraryIpc.setMode(mode);
       await reload();
@@ -859,8 +861,14 @@ function LibraryNetworkingSection({
           <RoleRadio
             checked={snap.library_mode === "client"}
             onChange={() => void setMode("client")}
-            title="Client"
-            description="Talk to a Library Host on the LAN. Read/edit the same library, see the same watch progress, share posters. Falls back to read-only when the Host is offline (Phase 3)."
+            title="Client (live)"
+            description="Talk to a live Library Host on the LAN. Read/edit the same library in real time. Library locks out when the Host is offline."
+          />
+          <RoleRadio
+            checked={snap.library_mode === "sync"}
+            onChange={() => void setMode("sync")}
+            title="Sync (via NAS)"
+            description="Single-source-of-truth on THIS device, mirrored to the home folder every 5 minutes. Other devices pull the mirror on launch. Works without an always-on Host; last-writer-wins on concurrent edits."
           />
         </div>
       </div>
@@ -993,7 +1001,139 @@ function LibraryNetworkingSection({
       {snap.library_mode === "client" && (
         <ClientModeSection snap={snap} reload={reload} />
       )}
+
+      {snap.library_mode === "sync" && <SyncModeSection />}
     </>
+  );
+}
+
+/** Sync mode UI in Settings. Shows the mirror file state, last
+ *  push / pull timestamps, cadence, and a "Push now" button. */
+function SyncModeSection() {
+  const showToast = useAppStore((s) => s.showToast);
+  const [status, setStatus] = useState<import("../../ipc/library").SyncStatus | null>(
+    null,
+  );
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await libraryIpc.syncStatus());
+    } catch (err) {
+      showToast(`${err}`, "error");
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void refresh();
+    const t = window.setInterval(() => void refresh(), 10_000);
+    return () => window.clearInterval(t);
+  }, [refresh]);
+
+  const pushNow = async () => {
+    setBusy(true);
+    try {
+      const p = await libraryIpc.syncPushNow();
+      showToast(`Pushed to ${p}`, "info", 3000);
+      await refresh();
+    } catch (err) {
+      showToast(`${err}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) return null;
+
+  const ago = (ts: number) =>
+    ts > 0 ? `${Math.round((Date.now() / 1000 - ts) / 60)} min ago` : "(never)";
+
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] uppercase tracking-wider text-fvp-muted">
+        Sync status
+      </div>
+      <div className="bg-fvp-bg border border-fvp-border rounded p-2 text-[11px] space-y-1">
+        <Row label="Sync file" value={status.sync_file_path ?? "(none)"} mono />
+        <Row
+          label="Exists on share"
+          value={
+            status.sync_file_exists ? (
+              <span className="text-fvp-ok">
+                ✓ {(status.sync_file_size_bytes / 1024 / 1024).toFixed(1)} MB
+              </span>
+            ) : (
+              <span className="text-fvp-warn">
+                ✗ not yet (will be written on first push)
+              </span>
+            )
+          }
+        />
+        <Row label="Last push (this device → share)" value={ago(status.last_push_at)} />
+        <Row label="Last pull (share → this device)" value={ago(status.last_pull_at)} />
+        <Row
+          label="Cadence"
+          value={`every ${status.cadence_minutes} minute(s)`}
+        />
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => void pushNow()}
+          disabled={busy}
+          className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? "Pushing…" : "Push to share now"}
+        </button>
+        <label className="text-[11px] text-fvp-muted flex items-center gap-1.5">
+          Change cadence:
+          <input
+            type="number"
+            min={1}
+            max={1440}
+            value={status.cadence_minutes}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              if (!Number.isFinite(n) || n < 1) return;
+              void libraryIpc
+                .syncSetCadence(n)
+                .then(refresh)
+                .catch((err) => showToast(`${err}`, "error"));
+            }}
+            className="bg-fvp-bg border border-fvp-border rounded px-2 py-1 text-xs w-16 text-fvp-text"
+          />
+          min
+        </label>
+      </div>
+      <p className="text-[10px] text-fvp-muted">
+        Pulls happen automatically when this device launches AND the
+        share&apos;s copy is newer than the local DB. Concurrent edits
+        across devices use last-writer-wins; for true real-time multi-
+        device, use Host/Client mode instead.
+      </p>
+    </div>
+  );
+}
+
+function Row({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: React.ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex gap-2 items-baseline">
+      <span className="text-fvp-muted shrink-0 w-44">{label}:</span>
+      <span
+        className={
+          "flex-1 min-w-0 break-all " + (mono ? "font-mono text-[10px]" : "")
+        }
+      >
+        {value}
+      </span>
+    </div>
   );
 }
 

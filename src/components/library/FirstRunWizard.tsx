@@ -8,8 +8,15 @@ import {
   setLibraryMode,
 } from "../../ipc/library";
 
-type Step = "welcome" | "pick-role" | "host-setup" | "client-setup" | "done";
-type Role = "standalone" | "host" | "client";
+type Step =
+  | "welcome"
+  | "how-it-works"
+  | "pick-role"
+  | "host-setup"
+  | "client-setup"
+  | "sync-setup"
+  | "done";
+type Role = "standalone" | "host" | "client" | "sync";
 
 /**
  * First-run wizard. Shown automatically the first time the user opens
@@ -70,6 +77,29 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
       setLibraryMode("host");
       setHomeFolderPicked(picked);
       showToast(`Host configured: ${picked}`, "info", 3000);
+      await finish();
+    } catch (err) {
+      setErrorMsg(`${err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickHomeFolderForSync = async () => {
+    setErrorMsg(null);
+    const picked = await openDialog({ directory: true, multiple: false });
+    if (typeof picked !== "string") return;
+    setBusy(true);
+    try {
+      await libraryIpc.setHomeFolder(picked);
+      await libraryIpc.setMode("sync");
+      setLibraryMode("sync");
+      setHomeFolderPicked(picked);
+      showToast(
+        `Sync set up — your DB will mirror to ${picked} every 5 minutes.`,
+        "info",
+        4000,
+      );
       await finish();
     } catch (err) {
       setErrorMsg(`${err}`);
@@ -161,7 +191,16 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
             </div>
           )}
 
-          {step === "welcome" && <WelcomeStep onNext={() => setStep("pick-role")} />}
+          {step === "welcome" && (
+            <WelcomeStep onNext={() => setStep("how-it-works")} />
+          )}
+
+          {step === "how-it-works" && (
+            <HowItWorksStep
+              onNext={() => setStep("pick-role")}
+              onBack={() => setStep("welcome")}
+            />
+          )}
 
           {step === "pick-role" && (
             <RolePickerStep
@@ -169,9 +208,10 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
               onPick={(role: Role) => {
                 if (role === "standalone") void pickStandalone();
                 else if (role === "host") setStep("host-setup");
+                else if (role === "sync") setStep("sync-setup");
                 else setStep("client-setup");
               }}
-              onBack={() => setStep("welcome")}
+              onBack={() => setStep("how-it-works")}
             />
           )}
 
@@ -193,6 +233,15 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
               onBack={() => setStep("pick-role")}
             />
           )}
+
+          {step === "sync-setup" && (
+            <SyncSetupStep
+              busy={busy}
+              homeFolderPicked={homeFolderPicked}
+              onPickFolder={pickHomeFolderForSync}
+              onBack={() => setStep("pick-role")}
+            />
+          )}
         </div>
 
         {/* Footer */}
@@ -209,35 +258,30 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-fvp-text leading-relaxed">
-        FVP plays videos and lets you create <strong>profiles</strong> that
-        skip / silence / freeze parts you don&apos;t want to watch — saved as
-        a tiny <code>.free</code> file next to each movie.
+        FVP is a video player that does three things most others don&apos;t:
       </p>
-      <p className="text-sm text-fvp-text leading-relaxed">
-        It also has a <strong>Library</strong> mode that indexes your movie
-        folders, pulls TMDb metadata, tracks watch progress, organizes by
-        collections and series, and lets you share one library across
-        multiple devices.
-      </p>
-      <div className="bg-fvp-bg border border-fvp-border rounded p-3 text-xs space-y-1.5">
-        <div className="font-semibold text-fvp-text">Three quick choices:</div>
-        <div className="text-fvp-muted">
-          <span className="text-fvp-text">One device only?</span> →{" "}
-          <em>Standalone.</em> Done in one click.
-        </div>
-        <div className="text-fvp-muted">
-          <span className="text-fvp-text">Want your library on multiple devices?</span>{" "}
-          → Pick <em>Host</em> on your main device (the one that&apos;s on most
-          often), <em>Client</em> on the others. All point at one shared
-          <em> home folder</em> on your network (usually a NAS).
-        </div>
-      </div>
-      <div className="text-[10px] text-fvp-muted bg-fvp-surface2/40 rounded p-2 leading-relaxed">
-        <strong className="text-fvp-text">Quick clarification:</strong> the
-        &quot;Host&quot; is the <em>device running FVP</em>, not where your
-        media is stored. Your NAS can hold the media + the home folder
-        without needing FVP installed on it — but some device with FVP
-        running has to be the Host.
+      <div className="space-y-2">
+        <FeatureLine
+          icon="✂️"
+          title="Profiles"
+          detail={
+            <>
+              Skip / silence / freeze-frame regions saved as a tiny{" "}
+              <code>.free</code> file next to each movie. Share profiles with
+              friends without sharing the video.
+            </>
+          }
+        />
+        <FeatureLine
+          icon="📚"
+          title="Library"
+          detail="Indexes your movie folders, pulls posters + plots from TMDb, tracks watch progress, organizes by collections + series, finds duplicates."
+        />
+        <FeatureLine
+          icon="🔗"
+          title="Multi-device library (optional)"
+          detail="Use the same library across your laptop, desktop, phone, tablet — your edits and watch progress sync."
+        />
       </div>
       <div className="flex justify-end pt-1">
         <button
@@ -245,7 +289,112 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
           className="px-4 py-2 bg-fvp-accent text-white text-sm rounded hover:opacity-90"
           autoFocus
         >
-          Let&apos;s set this up →
+          Tell me how it works →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FeatureLine({
+  icon,
+  title,
+  detail,
+}: {
+  icon: string;
+  title: string;
+  detail: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-3 px-3 py-2 bg-fvp-bg border border-fvp-border rounded">
+      <span className="text-xl select-none mt-0.5">{icon}</span>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold text-fvp-text">{title}</div>
+        <div className="text-[11px] text-fvp-muted leading-snug">{detail}</div>
+      </div>
+    </div>
+  );
+}
+
+function HowItWorksStep({
+  onNext,
+  onBack,
+}: {
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <h2 className="text-sm font-semibold text-fvp-text">
+        How the multi-device setup works
+      </h2>
+      <p className="text-xs text-fvp-text leading-relaxed">
+        FVP doesn&apos;t need cloud accounts or subscriptions. Everything
+        lives on your network. Here&apos;s the model:
+      </p>
+      <div className="bg-fvp-bg border border-fvp-border rounded p-3 text-xs space-y-2 leading-relaxed">
+        <div>
+          <strong className="text-fvp-text">Your videos</strong> stay where
+          they are. Typically a NAS or network share. FVP just reads them.
+        </div>
+        <div>
+          <strong className="text-fvp-text">Your library data</strong>{" "}
+          (movie list, tags, watch progress, etc.) lives in a small SQLite
+          database. ONE machine — the one with FVP running — owns it.
+        </div>
+        <div>
+          <strong className="text-fvp-text">The &ldquo;home folder&rdquo;</strong>{" "}
+          (optional) is a folder on your NAS that FVP uses for shared stuff:
+          poster cache, weekly backups, and (depending on which mode) either
+          a live discovery file (for live-multi-device) or a mirror of the
+          library DB (for sync-multi-device).
+        </div>
+      </div>
+
+      <div className="text-xs leading-relaxed">
+        <div className="font-semibold text-fvp-text mb-1.5">
+          Two ways to do multi-device:
+        </div>
+        <div className="space-y-2">
+          <div className="px-3 py-2 bg-fvp-accent/10 border border-fvp-accent rounded">
+            <div className="text-fvp-text font-semibold">
+              📡 Live (Host + Client)
+            </div>
+            <div className="text-fvp-muted text-[11px] leading-snug mt-0.5">
+              One device is the &ldquo;Host&rdquo; — runs FVP&apos;s library
+              service. Others connect as &ldquo;Clients&rdquo; over the LAN
+              in real time. Best when you have an always-on desktop.
+              Clients can&apos;t use the library when the Host is offline.
+            </div>
+          </div>
+          <div className="px-3 py-2 bg-fvp-ok/10 border border-fvp-ok rounded">
+            <div className="text-fvp-text font-semibold">
+              🔄 Sync (passive home folder)
+            </div>
+            <div className="text-fvp-muted text-[11px] leading-snug mt-0.5">
+              Each device has its own local library DB. Every 5 minutes,
+              the device pushes a copy of its DB to a file on the NAS.
+              Other devices pull that copy when they launch. Works even
+              when no other device is on. Best for single-user
+              multi-device. Concurrent edits use last-writer-wins.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between pt-1">
+        <button
+          onClick={onBack}
+          className="px-3 py-1.5 text-xs text-fvp-muted hover:text-fvp-text"
+        >
+          ← Back
+        </button>
+        <button
+          onClick={onNext}
+          className="px-4 py-2 bg-fvp-accent text-white text-sm rounded hover:opacity-90"
+          autoFocus
+        >
+          Pick a mode →
         </button>
       </div>
     </div>
@@ -278,20 +427,29 @@ function RolePickerStep({
           disabled={busy}
         />
         <RoleCard
+          accent="ok"
+          icon="🔄"
+          title="Sync via NAS"
+          tagline="Multi-device, no always-on Host needed"
+          detail="Your library DB lives on THIS device but mirrors to a folder on your NAS every 5 minutes. Other FVP installs pull the mirror when they launch. Best when you have a NAS but no always-on FVP host. Concurrent edits use last-writer-wins."
+          onClick={() => onPick("sync")}
+          disabled={busy}
+        />
+        <RoleCard
           accent="accent"
           icon="📡"
-          title="Library Host"
-          tagline="This is my main device — others will connect to it"
-          detail="THIS DEVICE runs the FVP library service. The library DB lives here, and other FVP installs on your LAN (eventually iOS/Android too) connect to it. Your media can live anywhere reachable — usually a NAS or network share."
+          title="Library Host (live)"
+          tagline="This device runs the FVP service; others connect live"
+          detail="THIS DEVICE runs the FVP library service over the LAN. Other devices connect as Clients in real time. Best when this device is always on (e.g., a desktop). Clients lock out when this device is off."
           onClick={() => onPick("host")}
           disabled={busy}
         />
         <RoleCard
-          accent="ok"
+          accent="accent"
           icon="📱"
-          title="Library Client"
-          tagline="Another device already runs FVP as the Host"
-          detail="This device reads + edits the library from another FVP install on your LAN. Requires that Host device to be online when you want to use the Library here. (Player and Profile Creator work offline.)"
+          title="Library Client (live)"
+          tagline="Another device is already a live Host"
+          detail="This device reads + edits the library from a live Host on your LAN. Requires the Host device to be online when you want to use the Library here. (Player and Profile Creator work offline.)"
           onClick={() => onPick("client")}
           disabled={busy}
         />
@@ -417,6 +575,71 @@ function HostSetupStep({
           className="px-4 py-2 bg-fvp-accent text-white text-sm rounded hover:opacity-90 disabled:opacity-50"
         >
           {busy ? "Setting up…" : "Browse for home folder…"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SyncSetupStep({
+  busy,
+  homeFolderPicked,
+  onPickFolder,
+  onBack,
+}: {
+  busy: boolean;
+  homeFolderPicked: string | null;
+  onPickFolder: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <h2 className="text-sm font-semibold text-fvp-text">
+        🔄 Set up Sync via NAS
+      </h2>
+      <p className="text-xs text-fvp-muted leading-relaxed">
+        Pick a folder on your <strong>NAS</strong> (or any network share)
+        to hold the sync file. FVP will mirror this device&apos;s library
+        DB there every 5 minutes. Any other device you install FVP on
+        later can point at the SAME folder, also pick Sync mode, and the
+        two will keep in step automatically.
+      </p>
+      <div className="bg-fvp-bg border border-fvp-border rounded p-3 text-[11px] space-y-1.5">
+        <div className="text-fvp-muted">
+          <strong className="text-fvp-text">What goes in this folder:</strong>{" "}
+          <code>library-sync.db</code> (the mirror — small, &lt;50 MB
+          typically), plus the shared poster cache + weekly snapshot backups.
+        </div>
+        <div className="text-fvp-muted">
+          <strong className="text-fvp-text">Concurrent edits:</strong> if
+          you edit on two devices simultaneously, last-writer-wins (other
+          device&apos;s changes from that 5-minute window are lost).
+          Single-user-one-device-at-a-time is the sweet spot.
+        </div>
+        <div className="text-fvp-muted">
+          Example path:{" "}
+          <code className="text-fvp-text">{"\\\\NAS\\Shared\\FVP_Library"}</code>
+        </div>
+      </div>
+      {homeFolderPicked && (
+        <div className="bg-fvp-ok/10 border border-fvp-ok rounded p-2 text-[11px] text-fvp-ok font-mono break-all">
+          ✓ {homeFolderPicked}
+        </div>
+      )}
+      <div className="flex items-center justify-between pt-2">
+        <button
+          onClick={onBack}
+          disabled={busy}
+          className="px-3 py-1.5 text-xs text-fvp-muted hover:text-fvp-text"
+        >
+          ← Back
+        </button>
+        <button
+          onClick={onPickFolder}
+          disabled={busy}
+          className="px-4 py-2 bg-fvp-ok text-white text-sm rounded hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? "Setting up…" : "Browse for sync folder…"}
         </button>
       </div>
     </div>

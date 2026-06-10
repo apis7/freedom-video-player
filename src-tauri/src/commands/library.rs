@@ -2629,9 +2629,9 @@ pub fn library_set_mode(
     app: AppHandle,
     mode: String,
 ) -> Result<(), String> {
-    if mode != "standalone" && mode != "host" && mode != "client" {
+    if mode != "standalone" && mode != "host" && mode != "client" && mode != "sync" {
         return Err(format!(
-            "Mode must be 'standalone', 'host', or 'client' (got '{mode}')"
+            "Mode must be 'standalone', 'host', 'client', or 'sync' (got '{mode}')"
         ));
     }
     crate::log!("library", "set_mode → {mode}");
@@ -3229,6 +3229,32 @@ pub fn library_read_home_discovery(
             .map(|n| n as u32),
         updated_at: disc.get("updated_at").and_then(|v| v.as_i64()),
     }))
+}
+
+// ── Sync mode commands ───────────────────────────────────────────────
+
+#[tauri::command]
+pub fn library_sync_status(
+    db: State<'_, LibraryDb>,
+) -> Result<crate::library::sync::SyncStatus, String> {
+    Ok(crate::library::sync::read_full_status(&db))
+}
+
+#[tauri::command]
+pub fn library_sync_push_now(
+    db: State<'_, LibraryDb>,
+) -> Result<String, String> {
+    let p = crate::library::sync::force_push(&db)?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn library_sync_set_cadence(
+    db: State<'_, LibraryDb>,
+    minutes: i64,
+) -> Result<(), String> {
+    crate::log!("library:sync", "set_cadence_minutes → {minutes}");
+    crate::library::sync::set_cadence_minutes(&db, minutes)
 }
 
 // ── First-run wizard state ───────────────────────────────────────────

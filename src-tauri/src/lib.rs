@@ -164,6 +164,10 @@ pub fn run() {
                             // on the home folder when one is configured
                             // (travels with the migration).
                             library::snapshot::init(db.clone());
+                            // Sync mode tick — once-per-minute check that
+                            // pushes/pulls the home folder's library-sync.db
+                            // when mode == "sync". No-op for other modes.
+                            library::sync::init(db.clone());
                             app.manage(db);
                         }
                         Err(e) => {
@@ -294,6 +298,9 @@ pub fn run() {
             commands::library::library_snapshot_schedule_restore,
             commands::library::library_first_run_status,
             commands::library::library_first_run_complete,
+            commands::library::library_sync_status,
+            commands::library::library_sync_push_now,
+            commands::library::library_sync_set_cadence,
             commands::library::library_set_poster_cache_cap,
             commands::library::library_find_probable_pairs,
             commands::library::library_transfer_curation,

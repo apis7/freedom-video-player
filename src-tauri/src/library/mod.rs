@@ -28,5 +28,6 @@ pub mod poster_cache;
 pub mod reconcile;
 pub mod snapshot;
 pub mod suggestions;
+pub mod sync;
 
 pub use db::LibraryDb;

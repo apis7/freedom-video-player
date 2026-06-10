@@ -116,70 +116,53 @@ fn render_graph(snips: &[PlannedEffect]) -> String {
     }
     out.push_str(";\n");
 
-    // Main branch — volume-gate with linear ramps OUTSIDE each snip
-    // window, then mute through the snip window. Same paren-free
-    // expression trick as audio_replace.
-    out.push_str("[main_in] ");
-    let mut first = true;
-    for p in snips {
-        let xfade_s = ms_to_secs_str(p.xfade_ms);
-        let fade_out_start_ms = p.start_ms - p.xfade_ms;
-        let fade_in_end_ms = p.end_ms + p.xfade_ms;
-        let fade_out_start = ms_to_secs_str(fade_out_start_ms);
-        let fade_out_end = ms_to_secs_str(p.start_ms);
-        let mute_end = ms_to_secs_str(p.end_ms);
-        let fade_in_end = ms_to_secs_str(fade_in_end_ms);
-        let xfade_secs = p.xfade_ms as f64 / 1000.0;
-        let k_out = p.start_ms as f64 / 1000.0 / xfade_secs;
-        let k_in = p.end_ms as f64 / 1000.0 / xfade_secs;
-        if !first {
-            out.push_str(", ");
-        }
-        first = false;
-        out.push_str(&format!(
-            "volume=eval=frame:enable='between(t,{fade_out_start},{fade_out_end})':volume={k_out:.6}-t/{xfade_s}, ",
-        ));
-        out.push_str(&format!(
-            "volume=eval=frame:enable='between(t,{fade_out_end},{mute_end})':volume=0, ",
-        ));
-        out.push_str(&format!(
-            "volume=eval=frame:enable='between(t,{mute_end},{fade_in_end})':volume=t/{xfade_s}-{k_in:.6}",
-        ));
-    }
-    out.push_str(" [main];\n");
+    // Build a single piecewise volume envelope per snip. Each envelope
+    // evaluates to:
+    //   0                          when t is outside [snip_start - xfade,
+    //                                                 snip_end   + xfade]
+    //   ramp 0→1 over xfade_ms     during the lead-in
+    //   1                          during the snip itself
+    //   ramp 1→0 over xfade_ms     during the lead-out
+    //
+    // Critical: we evaluate the WHOLE envelope inside a single volume
+    // filter (no `enable=between(...)` wrapping). A volume filter with
+    // `enable=false` PASSES THROUGH at unity gain, which is the wrong
+    // direction for the effect branch — we'd leak the processed audio
+    // (afftfilt / vibrato / chorus / ...) outside the snip window and
+    // amix would double it up with the main signal forever. The
+    // `if(between(t,…),…,0)` form explicitly returns 0 outside the
+    // window so the effect branch is silent except when intended.
+    let envelopes: Vec<String> = snips.iter().map(effect_envelope_expr).collect();
 
-    // One effect branch per snip. Each branch:
-    //   1. apply the effect filter chain to the main-derived audio
-    //   2. volume-gate so the branch is at 0 OUTSIDE the snip window
-    //      and at 1 INSIDE (with matching crossfades to align with main)
+    // Main branch carries the DRY audio and ducks down to 0 inside each
+    // snip window. main_env = clip(1 − Σ effect_env, 0, 1). The snips are
+    // sorted by the planner; clipping defends against any future overlap.
+    let main_expr = if envelopes.is_empty() {
+        "1".to_string()
+    } else {
+        format!("clip(1-({}),0,1)", envelopes.join("+"))
+    };
+    out.push_str(&format!(
+        "[main_in] volume=eval=frame:volume='{main_expr}' [main];\n"
+    ));
+
+    // One effect branch per snip: run the effect chain, then apply this
+    // snip's envelope so the branch contributes audio ONLY inside its
+    // own [start − xfade, end + xfade] window.
     for (idx, p) in snips.iter().enumerate() {
-        let xfade_s = ms_to_secs_str(p.xfade_ms);
-        let fade_in_start_ms = p.start_ms - p.xfade_ms;
-        let fade_out_end_ms = p.end_ms + p.xfade_ms;
-        let fade_in_start = ms_to_secs_str(fade_in_start_ms);
-        let fade_in_end_s = ms_to_secs_str(p.start_ms);
-        let active_end = ms_to_secs_str(p.end_ms);
-        let fade_out_end = ms_to_secs_str(fade_out_end_ms);
-        let xfade_secs = p.xfade_ms as f64 / 1000.0;
-        // Effect branch ramp UP from 0 → 1 between fade_in_start and snip start.
-        //   gain(t) = (t - fade_in_start)/xfade   = t/xfade - K_up
-        // Ramp DOWN from 1 → 0 between snip end and fade_out_end.
-        //   gain(t) = (fade_out_end - t)/xfade   = K_down - t/xfade
-        let k_up = fade_in_start_ms as f64 / 1000.0 / xfade_secs;
-        let k_down = fade_out_end_ms as f64 / 1000.0 / xfade_secs;
-
         let effect_chain = effect_filter_chain(&p.kind);
+        let env_expr = &envelopes[idx];
         out.push_str(&format!(
             "[e{n}_in] {effect_chain}, \
-             volume=eval=frame:enable='between(t,{fade_in_start},{fade_in_end_s})':volume=t/{xfade_s}-{k_up:.6}, \
-             volume=eval=frame:enable='between(t,{fade_in_end_s},{active_end})':volume=1, \
-             volume=eval=frame:enable='between(t,{active_end},{fade_out_end})':volume={k_down:.6}-t/{xfade_s} \
+             volume=eval=frame:volume='{env_expr}' \
              [eff{n}];\n",
             n = idx + 1,
         ));
     }
 
-    // Mix main + all effect branches.
+    // Mix main + all effect branches. normalize=0 because our envelopes
+    // already sum to 1 across every t — the post-amix level matches
+    // the dry signal everywhere.
     out.push_str("[main]");
     for idx in 0..snips.len() {
         out.push_str(&format!("[eff{}]", idx + 1));
@@ -190,6 +173,26 @@ fn render_graph(snips: &[PlannedEffect]) -> String {
     ));
 
     out
+}
+
+/// Returns the piecewise envelope expression for a single planned effect:
+/// 0 outside the [start − xfade, end + xfade] window, linear ramps at the
+/// edges, 1 inside the snip itself. Suitable as the inner `volume=`
+/// expression of a single volume filter (no enable= needed).
+fn effect_envelope_expr(p: &PlannedEffect) -> String {
+    let fade_in_start = ms_to_secs_str(p.start_ms - p.xfade_ms);
+    let snip_start = ms_to_secs_str(p.start_ms);
+    let snip_end = ms_to_secs_str(p.end_ms);
+    let fade_out_end = ms_to_secs_str(p.end_ms + p.xfade_ms);
+    let xfade_s = ms_to_secs_str(p.xfade_ms);
+    format!(
+        "if(between(t,{fis},{ss}),(t-{fis})/{xf},if(between(t,{ss},{se}),1,if(between(t,{se},{foe}),({foe}-t)/{xf},0)))",
+        fis = fade_in_start,
+        ss = snip_start,
+        se = snip_end,
+        foe = fade_out_end,
+        xf = xfade_s,
+    )
 }
 
 /// Produce the FFmpeg filter chain for a single effect kind. Returned

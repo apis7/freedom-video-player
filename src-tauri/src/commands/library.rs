@@ -102,17 +102,28 @@ fn bring_up(
             supervisor.replace(Some(handle));
             // Discovery file write — non-fatal if it fails (the Host
             // still runs; users can also configure Clients manually).
+            //
+            // The home folder is usually on SMB and the write can be
+            // multi-second when the share is slow. Deferring this to
+            // a background thread keeps the boot thread on its tight
+            // budget. Clients that race the write find the previous
+            // discovery file (or none); discovery is eventually
+            // consistent.
             if let Some(h) = home {
-                let lan = host_server::detect_lan_ip();
-                let pb = std::path::Path::new(h);
-                if let Err(e) =
-                    host_server::write_discovery_file(pb, &lan, addr.port())
-                {
-                    crate::log!(
-                        "library:host",
-                        "bring_up: discovery file write failed: {e}"
-                    );
-                }
+                let port = addr.port();
+                let home_owned = h.to_string();
+                crate::library::boot::defer_host_bring_up(move || {
+                    let lan = host_server::detect_lan_ip();
+                    let pb = std::path::Path::new(&home_owned);
+                    if let Err(e) =
+                        host_server::write_discovery_file(pb, &lan, port)
+                    {
+                        crate::log!(
+                            "library:host",
+                            "bring_up: discovery file write failed: {e}"
+                        );
+                    }
+                });
             } else {
                 crate::log!(
                     "library:host",

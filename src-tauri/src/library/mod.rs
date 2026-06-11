@@ -16,6 +16,7 @@
 //! All library work runs on background threads — Player Mode must never be
 //! blocked by an indexer pass or a fingerprint compute.
 
+pub mod boot;
 pub mod db;
 pub mod enrich;
 pub mod fingerprint;

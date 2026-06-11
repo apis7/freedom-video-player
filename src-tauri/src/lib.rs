@@ -67,25 +67,58 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let window = app
-                .get_webview_window("main")
-                .ok_or_else(|| "main window not found".to_string())?;
+            // ────────────────────────────────────────────────────────
+            // SYNCHRONOUS BOOT — RULES OF THE ROAD
+            //
+            // The body of this setup() callback runs on the Tauri
+            // main thread and BLOCKS the UI mount until it returns.
+            // Every line here must be local-IO only:
+            //   - libmpv DLL load       (unavoidable, ~500ms)
+            //   - local SQLite          (<100ms)
+            //   - AppData reads/writes  (<10ms)
+            //   - HashMap / Vec init    (instant)
+            //
+            // Anything that touches SMB, remote shares, network
+            // sockets, or registers a `notify` watcher on a UNC path
+            // MUST go through `library::boot::defer_startup(...)` so
+            // the user gets a snappy UI mount even on a flaky NAS.
+            //
+            // Every phase below is wrapped in `library::boot::phase(...)`
+            // which logs its wall-clock duration. If startup ever
+            // regresses, the slow phase shows up as a single
+            // unmissable log line.
+            //
+            // The contract is checked at the end with
+            // `boot::log_total(...)` — if the total prints anything
+            // above ~1 second on a healthy machine, something on the
+            // sync path drifted out of compliance.
+            // ────────────────────────────────────────────────────────
+            let boot_started = std::time::Instant::now();
+
+            let window = library::boot::phase("window_handle", || {
+                app.get_webview_window("main")
+                    .ok_or_else(|| "main window not found".to_string())
+            })?;
 
             #[cfg(target_os = "windows")]
-            let hwnd: Option<i64> = {
+            let hwnd: Option<i64> = library::boot::phase("hwnd_extract", || {
                 let h = window
                     .hwnd()
                     .map_err(|e| format!("hwnd extraction failed: {e}"))?;
-                Some(h.0 as i64)
-            };
+                Ok::<Option<i64>, String>(Some(h.0 as i64))
+            })?;
             #[cfg(not(target_os = "windows"))]
             let hwnd: Option<i64> = None;
 
             #[cfg(target_os = "windows")]
-            playback::video_subclass::init(app.app_handle().clone());
+            library::boot::phase("video_subclass", || {
+                playback::video_subclass::init(app.app_handle().clone());
+            });
 
-            let player = MpvPlayer::new(hwnd, app.app_handle().clone())
-                .map_err(|e| format!("MpvPlayer init failed: {e}"))?;
+            let player = library::boot::phase("mpv_init", || {
+                MpvPlayer::new(hwnd, app.app_handle().clone())
+                    .map_err(|e| format!("MpvPlayer init failed: {e}"))
+            })?;
             app.manage(player);
 
             // Open the Library SQLite store at the standard app-local
@@ -93,32 +126,36 @@ pub fn run() {
             // so commands can grab it via `State<LibraryDb>`. If init
             // fails (e.g. unwritable AppData), log loudly and continue —
             // Library Mode just won't work; Player Mode is unaffected.
-            match app.path().app_local_data_dir() {
+            let mut library_db_opened = false;
+            match library::boot::phase("app_local_data_dir", || app.path().app_local_data_dir()) {
                 Ok(dir) => {
                     let db_path = dir.join("library.db");
                     // Restore marker (from Settings → Restore from
-                    // snapshot) is consumed BEFORE the DB is opened.
-                    // The Tauri command writes the marker; the boot
-                    // sequence completes the restore. Idempotent on
-                    // a clean launch (no marker → no-op).
-                    match library::snapshot::consume_restore_marker(&db_path) {
-                        Ok(true) => {
-                            log!(
+                    // snapshot, OR from sync.rs scheduling a pull).
+                    // Wrapped in a 500ms reachability probe — if the
+                    // snapshot file lives on an SMB share that's
+                    // currently unresponsive, we abandon the restore
+                    // for this launch instead of stalling startup for
+                    // 30+ seconds on a kernel SMB timeout. The marker
+                    // file is left in place so the next launch
+                    // retries.
+                    library::boot::phase("consume_restore_marker", || {
+                        match library::boot::consume_restore_marker_with_probe(&db_path) {
+                            Ok(true) => log!(
                                 "library:snapshot",
                                 "restore-from-snapshot completed at {}",
                                 db_path.display()
-                            );
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            log!(
+                            ),
+                            Ok(false) => {}
+                            Err(e) => log!(
                                 "library:snapshot",
                                 "restore marker consumption FAILED: {e} (continuing with existing DB)"
-                            );
+                            ),
                         }
-                    }
-                    match library::LibraryDb::open(&db_path) {
+                    });
+                    match library::boot::phase("library_db_open", || library::LibraryDb::open(&db_path)) {
                         Ok(db) => {
+                            library_db_opened = true;
                             log!(
                                 "library",
                                 "opened DB at {} ({} files indexed)",
@@ -142,7 +179,7 @@ pub fn run() {
                             // same NAS-recycle ghosts re-appear after every delete.
                             // Strip them out unconditionally on open — the scan
                             // would never have added them in the first place.
-                            {
+                            library::boot::phase("recycle_bin_purge", || {
                                 let conn = db.lock();
                                 let rows: Vec<(i64, String)> = conn
                                     .prepare("SELECT id, path FROM library_files")
@@ -182,42 +219,46 @@ pub fn run() {
                                         ),
                                     }
                                 }
-                            }
-                            // Spin up the scan orchestrator (watchers +
-                            // indexer worker). It reattaches notify
-                            // watchers for every folder already in the DB
-                            // and queues an initial pass to catch up with
-                            // on-disk changes made while the app was
-                            // closed.
-                            library::orchestrator::init(app.app_handle().clone(), db.clone());
+                            });
+                            // Spin up the scan orchestrator. The synchronous
+                            // part is just channel + worker-thread + cadence
+                            // heartbeat spawn (~<5ms); the SMB-heavy
+                            // watcher reattach + boot ScanAll run on a
+                            // background thread spawned from inside
+                            // orchestrator::init.
+                            library::boot::phase("orchestrator_init", || {
+                                library::orchestrator::init(app.app_handle().clone(), db.clone());
+                            });
                             // Separate background worker for TMDb metadata
-                            // enrichment + poster caching. Throttled +
-                            // off-thread; indexer hands off new identity
-                            // ids to it via library::enrich::enqueue.
-                            library::enrich::init(app.app_handle().clone(), db.clone(), dir);
-                            // Library Networking Phase 2: if this install is
-                            // configured as a Host (mode == "host" + token
-                            // minted), spin up the LAN HTTP server now so
-                            // Clients can connect at boot. Mode changes
-                            // mid-session route through `host_supervisor`
-                            // which holds the live HostServerHandle.
+                            // enrichment + poster caching. Just a thread spawn.
+                            library::boot::phase("enrich_init", || {
+                                library::enrich::init(app.app_handle().clone(), db.clone(), dir);
+                            });
+                            // Host supervisor — synchronous part reads
+                            // local settings. When mode==host this also
+                            // used to call bring_up which binds a TCP
+                            // socket AND writes host-discovery.json to a
+                            // possibly-SMB home folder. Now bring_up is
+                            // deferred to a background thread so a slow
+                            // home folder doesn't stall startup; the local
+                            // settings read stays here.
                             let supervisor = commands::library::HostSupervisor::default();
-                            commands::library::supervisor_boot(
-                                &db,
-                                &supervisor,
-                                app.app_handle(),
-                            );
+                            library::boot::phase("supervisor_boot", || {
+                                commands::library::supervisor_boot(
+                                    &db,
+                                    &supervisor,
+                                    app.app_handle(),
+                                );
+                            });
                             app.manage(supervisor);
-                            // Snapshot backup tick — hourly check, weekly
-                            // by default. Default ON; user can disable +
-                            // tune cadence/keep-count in Settings. Lives
-                            // on the home folder when one is configured
-                            // (travels with the migration).
-                            library::snapshot::init(db.clone());
-                            // Sync mode tick — once-per-minute check that
-                            // pushes/pulls the home folder's library-sync.db
-                            // when mode == "sync". No-op for other modes.
-                            library::sync::init(db.clone());
+                            // Snapshot backup tick — just a thread spawn.
+                            library::boot::phase("snapshot_init", || {
+                                library::snapshot::init(db.clone());
+                            });
+                            // Sync mode tick — just a thread spawn.
+                            library::boot::phase("sync_init", || {
+                                library::sync::init(db.clone());
+                            });
                             app.manage(db);
                         }
                         Err(e) => {
@@ -247,6 +288,14 @@ pub fn run() {
                     let _ = app_handle.emit("cli-open-file", path);
                 });
             }
+
+            // Final boot anchor — one log line that gives the total
+            // wall-clock duration of synchronous boot. If this ever
+            // prints anything beyond ~1 second on a healthy machine,
+            // something on the sync path has drifted out of compliance
+            // with the "no remote IO on the boot thread" contract at
+            // the top of this file.
+            library::boot::log_total(boot_started, library_db_opened);
 
             Ok(())
         })

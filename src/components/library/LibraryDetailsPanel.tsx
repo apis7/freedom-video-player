@@ -100,6 +100,11 @@ function SingleRowPanel({
   const [tagInput, setTagInput] = useState("");
   // Inline context menu coords for the poster right-click. Closed by
   // ContextMenu's own click-outside handler.
+  // Two-step confirm for "Remove metadata". First click flips this to
+  // true + starts a 3s timer that auto-reverts; second click within the
+  // window actually fires the IPC. Avoids window.confirm — Tauri 2
+  // routes that through the dialog plugin which isn't in our ACL.
+  const [removeMetaArmed, setRemoveMetaArmed] = useState(false);
   const [posterMenu, setPosterMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -475,31 +480,41 @@ function SingleRowPanel({
         </button>
         <button
           onClick={() => {
-            if (
-              !window.confirm(
-                "Remove all metadata for this movie?\n\n" +
-                  "Title resets to the filename, and TMDb-sourced fields " +
-                  "(director, plot, stars, year, posters, ratings) are " +
-                  "wiped. Runtime, resolution, and filesize are recalculated " +
-                  "from disk. You can re-run 'Refresh metadata from TMDb' " +
-                  "afterwards to repopulate."
-              )
-            )
+            if (!removeMetaArmed) {
+              setRemoveMetaArmed(true);
+              window.setTimeout(() => setRemoveMetaArmed(false), 3000);
               return;
+            }
+            setRemoveMetaArmed(false);
             void libraryIpc
               .removeIdentityMetadata(id.id)
               .then(() => {
-                showToast("Metadata removed — title reset to filename.", "info", 3000);
+                showToast(
+                  "Metadata removed — title reset to filename. Auto-enrich won't refill this entry until you click Refresh.",
+                  "info",
+                  4000,
+                );
                 onRefreshList();
               })
               .catch((err) => {
                 showToast(`Remove metadata failed: ${err}`, "error", 4000);
               });
           }}
-          className="w-full px-2 py-1 bg-fvp-bg border border-fvp-border hover:border-fvp-err/40 rounded text-left text-fvp-text"
-          title="Wipes metadata back to the basics (title=filename, runtime/resolution/filesize recalculated). Use before re-running TMDb auto-fill."
+          className={
+            "w-full px-2 py-1 rounded text-left border " +
+            (removeMetaArmed
+              ? "bg-fvp-err/15 border-fvp-err text-fvp-err font-semibold"
+              : "bg-fvp-bg border-fvp-border hover:border-fvp-err/40 text-fvp-text")
+          }
+          title={
+            removeMetaArmed
+              ? "Click again to confirm. Auto-cancels in 3 seconds."
+              : "Wipes metadata back to the basics (title=filename). Auto-enrichment will skip this row until you click Refresh metadata."
+          }
         >
-          ✕ Remove metadata
+          {removeMetaArmed
+            ? "✕ Click again to confirm metadata removal"
+            : "✕ Remove metadata"}
         </button>
         <div className="text-[10px] text-fvp-muted font-mono break-all pt-2">
           {f.path}

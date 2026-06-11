@@ -2146,6 +2146,10 @@ pub fn apply_tmdb_id_core(
             manual_director = 1,
             manual_plot = 1,
             manual_thumbnail = 1,
+            -- User explicitly picked this TMDb match. Clear the
+            -- wipe-was-deliberate flag so background enrichment is
+            -- allowed again going forward.
+            metadata_user_removed = 0,
             last_updated_at = ?12
          WHERE id = ?13",
         params![
@@ -3922,6 +3926,7 @@ pub fn library_remove_identity_metadata(
                manual_plot = 0,
                is_3d = 0,
                is_extended = 0,
+               metadata_user_removed = 1,
                last_updated_at = ?3
          WHERE id = ?1
         "#,
@@ -3998,26 +4003,51 @@ pub async fn library_generate_thumbnail_from_random_frame(
     let temp_path = cache_dir.join(format!("grab-{identity_id}-{ts}.jpg"));
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
+    // Pick the random percent UP FRONT so we can pass --start=N% to
+    // libmpv directly — no need to load, read duration, then seek.
+    // mpv handles the percent-to-seconds calc internally.
+    let percent_int = 25 + (rand_unit() * 50.0) as u32;
+    let percent_int = percent_int.clamp(25, 74);
+    let start_arg = format!("{percent_int}%");
+    crate::log!(
+        "library",
+        "generate_thumbnail: target start={start_arg} (mpv will hr-seek there during loadfile)"
+    );
+
     // Frame grab runs on a blocking thread so the libmpv handle never
-    // touches the Tauri async runtime. Same pattern fingerprint::compute
-    // and the resolution-probe path use.
+    // touches the Tauri async runtime. We use mpv's ENCODING MODE
+    // (--frames=1 + --o=file) which is the canonical "extract a still
+    // from a video" pipeline — mpv decodes exactly ONE frame at the
+    // start position and writes it out, no race between seek
+    // completion and screenshot capture. Replaces the older
+    // loadfile→seek→screenshot-to-file dance which produced black
+    // frames when the screenshot fired before the post-seek decode
+    // landed.
     let media_path_inner = media_path.clone();
     let temp_path_inner = temp_path_str.clone();
-    let result: Result<f64, String> = tauri::async_runtime::spawn_blocking(move || {
+    let start_inner = start_arg.clone();
+    let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         use libmpv2::Mpv;
         let mpv = Mpv::with_initializer(|init| {
             init.set_option("vo", "null")?;
             init.set_option("ao", "null")?;
-            init.set_option("pause", true)?;
+            init.set_option("audio", false)?;
             init.set_option("hr-seek", "yes")?;
+            // Encoding-mode params: start at our random %, decode
+            // exactly one frame, encode as MJPEG into our temp file.
+            init.set_option("start", start_inner.as_str())?;
+            init.set_option("frames", 1i64)?;
+            init.set_option("o", temp_path_inner.as_str())?;
+            init.set_option("of", "image2")?;
+            init.set_option("ovc", "mjpeg")?;
+            // qscale 2..5 are typical for stills; 3 is "very good".
+            init.set_option("ovcopts", "qscale=3")?;
             Ok(())
         })
         .map_err(|e| format!("libmpv init: {e:?}"))?;
         let _ = mpv.set_property("msg-level", "all=fatal");
         let handle = mpv.ctx.as_ptr();
 
-        // loadfile via raw FFI (libmpv2 v4 doesn't expose a high-level
-        // command helper; same approach used by the resolution-probe).
         fn mpv_run(handle: *mut libmpv2_sys::mpv_handle, args: &[&str]) -> Result<(), String> {
             let cstrs = args
                 .iter()
@@ -4035,57 +4065,25 @@ pub async fn library_generate_thumbnail_from_random_frame(
         }
 
         mpv_run(handle, &["loadfile", &media_path_inner])?;
-        // Poll for duration. Cap 8s for slow SMB.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        let mut dur: f64 = 0.0;
-        while std::time::Instant::now() < deadline {
-            if dur <= 0.0 {
-                dur = mpv.get_property::<f64>("duration").unwrap_or(0.0);
+        // Wait for mpv to finish — frames=1 forces playback-end as
+        // soon as the single frame is encoded. Cap at 15s for slow
+        // SMB + long demux for codecs that need to scan to find a
+        // keyframe near the start position.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err("encoding-mode timeout (15s) — file may be unsupported or share unresponsive".into());
             }
-            if dur > 0.0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(120));
-        }
-        if dur <= 0.0 {
-            return Err("probe: could not determine duration within 8s".into());
-        }
-        // Random point in [25%, 75%]. Each invocation uses the
-        // sub-nanosecond clock + Knuth multiplicative mix so consecutive
-        // re-rolls don't land within milliseconds of each other.
-        let frac = 0.25 + (rand_unit() * 0.50);
-        let seek_target = dur * frac;
-        crate::log!(
-            "library",
-            "generate_thumbnail: duration={dur:.1}s, seeking to {seek_target:.1}s ({:.0}%)",
-            frac * 100.0
-        );
-        mpv_run(
-            handle,
-            &["seek", &format!("{seek_target:.3}"), "absolute+exact"],
-        )?;
-        // Wait for the seek to settle. time-pos should land within
-        // ~250ms of the target on a healthy decoder; cap at 4s.
-        let seek_deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-        while std::time::Instant::now() < seek_deadline {
-            let pos = mpv.get_property::<f64>("time-pos").unwrap_or(-1.0);
-            if pos > 0.0 && (pos - seek_target).abs() < 0.5 {
+            let idle: bool = mpv.get_property::<bool>("idle-active").unwrap_or(false);
+            if idle {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(80));
         }
-        // screenshot-to-file <path> video. The 3rd arg "video" grabs the
-        // post-filter decoded frame (no OSD, no subs); works with
-        // vo=null because it reads the decoded buffer, not the
-        // rendered output.
-        mpv_run(handle, &["screenshot-to-file", &temp_path_inner, "video"])?;
-        // Give the IO a moment to flush the JPEG to disk.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        Ok(seek_target)
+        Ok(())
     })
     .await
     .map_err(|e| format!("frame-grab task join: {e}"))?;
-    let seek_target = result?;
     if !temp_path.exists() {
         return Err(format!(
             "screenshot wasn't written to {} — libmpv accepted the command but produced no file",
@@ -4099,8 +4097,9 @@ pub async fn library_generate_thumbnail_from_random_frame(
     let _ = std::fs::remove_file(&temp_path);
     crate::log!(
         "library",
-        "generate_thumbnail: identity {identity_id} set from random frame at {seek_target:.1}s"
+        "generate_thumbnail: identity {identity_id} set from random frame at {start_arg}"
     );
+    let _ = result;
     Ok(())
 }
 

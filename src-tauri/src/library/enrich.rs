@@ -147,6 +147,19 @@ fn run_enrich(
         batch_bump_then_maybe_flush(|b| b.skipped_already_enriched += 1);
         return;
     }
+    // Respect the user's "Remove Metadata" action. force=true (the
+    // manual Refresh / Replace path) overrides — the user is asking
+    // to re-fetch right now and we'll clear the flag as part of the
+    // write further down. Background enrichment from a scan does NOT
+    // override; it just logs and skips.
+    if snap.metadata_user_removed && !force {
+        crate::log!(
+            "library:enrich",
+            "{identity_id} SKIP (metadata_user_removed=1 — user wiped this entry; respect that until they ask for a refresh)"
+        );
+        batch_bump_then_maybe_flush(|b| b.skipped_already_enriched += 1);
+        return;
+    }
     let Some(query_title) = snap.movie_title.as_deref() else {
         batch_bump_then_maybe_flush(|b| b.no_match += 1);
         return;
@@ -238,6 +251,11 @@ struct IdentitySnapshot {
     manual_thumbnail: bool,
     manual_genres: bool,
     manual_stars: bool,
+    /// User clicked "Remove Metadata" — auto-enrichment must skip this
+    /// identity until a user-initiated "Refresh metadata" clears the
+    /// flag. force=true (manual refresh) bypasses the skip and clears
+    /// the flag as part of the write.
+    metadata_user_removed: bool,
 }
 
 fn read_snapshot(db: &LibraryDb, identity_id: i64) -> Option<IdentitySnapshot> {
@@ -245,7 +263,8 @@ fn read_snapshot(db: &LibraryDb, identity_id: i64) -> Option<IdentitySnapshot> {
     conn.query_row(
         "SELECT tmdb_id, movie_title, movie_year,
                 manual_title, manual_year, manual_director, manual_plot, manual_thumbnail,
-                manual_genres, manual_stars
+                manual_genres, manual_stars,
+                metadata_user_removed
          FROM library_identities WHERE id = ?1",
         params![identity_id],
         |r| {
@@ -260,6 +279,7 @@ fn read_snapshot(db: &LibraryDb, identity_id: i64) -> Option<IdentitySnapshot> {
                 manual_thumbnail: r.get::<_, i64>(7)? != 0,
                 manual_genres: r.get::<_, i64>(8)? != 0,
                 manual_stars: r.get::<_, i64>(9)? != 0,
+                metadata_user_removed: r.get::<_, i64>(10)? != 0,
             })
         },
     )
@@ -327,7 +347,12 @@ fn apply_details(
             imdb_rating = COALESCE(?9, imdb_rating),
             poster_url = COALESCE(?10, poster_url),
             poster_local_path = COALESCE(?11, poster_local_path),
-            last_updated_at = ?12
+            last_updated_at = ?12,
+            -- We got here via the manual Refresh / Replace path (force=true)
+            -- or because no metadata existed at all. Either way the user
+            -- now wants this row to participate in enrichment again, so
+            -- clear the wipe-was-deliberate flag.
+            metadata_user_removed = 0
          WHERE id = ?13",
         params![
             d.tmdb_id as i64,

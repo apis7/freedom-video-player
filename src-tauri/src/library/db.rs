@@ -346,6 +346,22 @@ const MIGRATIONS: &[&str] = &[
     UPDATE library_files SET resolution =  '640x360'  WHERE LOWER(resolution) = '360p';
     UPDATE library_files SET resolution =  '426x240'  WHERE LOWER(resolution) = '240p';
     "#,
+    // ── v14 — Remove Metadata "do not re-enrich" persistence ─────────
+    //
+    // When the user clicks "Remove metadata" in Library Mode they
+    // expect the entry to STAY barebones — title=filename, no posters,
+    // no TMDb fields. Without this flag the background enrich worker
+    // would happily re-fill the row on the next scan, undoing the
+    // user's deliberate wipe.
+    //
+    // metadata_user_removed = 1 means "skip auto-enrichment for this
+    // identity until the user explicitly clicks Refresh metadata or
+    // Replace metadata, which clear the flag."
+    r#"
+    ALTER TABLE library_identities ADD COLUMN metadata_user_removed INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX idx_library_identities_metadata_user_removed
+        ON library_identities(metadata_user_removed);
+    "#,
 ];
 
 /// Thread-safe handle around a single `Connection`. SQLite's serialized

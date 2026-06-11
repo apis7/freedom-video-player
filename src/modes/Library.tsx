@@ -672,7 +672,13 @@ export function LibraryMode() {
       });
       return { labels, groups, active: true, hasSeasons: false };
     }
-    let currentSeason: number | null = null;
+    // Use `undefined` as the "no group started yet" sentinel so the
+    // first iteration ALWAYS pushes a group — even if every episode's
+    // season is null (which happens immediately after the user flips
+    // has_seasons on but before any season assignments exist). Without
+    // this, groups stays empty and the `groups[groups.length - 1]!`
+    // write below crashes the render.
+    let currentSeason: number | null | undefined = undefined;
     let inSeasonCounter = 0;
     filteredRows.forEach((r, i) => {
       const season = r.series?.season ?? null;

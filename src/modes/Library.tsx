@@ -47,6 +47,7 @@ import { PossibleDuplicatesModal } from "../components/library/PossibleDuplicate
 import { GooglePosterModal } from "../components/library/GooglePosterModal";
 import { FmrSummaryBadge } from "../components/library/FmrSummaryBadge";
 import { AnalyticsDashboard } from "../components/library/AnalyticsDashboard";
+import { FreeformNotesModal } from "../components/library/FreeformNotesModal";
 import { AutoDetectSeriesModal } from "../components/library/AutoDetectSeriesModal";
 import { BrokenFileModal } from "../components/library/BrokenFileModal";
 import { AutoDetectSeasonsModal } from "../components/library/AutoDetectSeasonsModal";
@@ -180,6 +181,7 @@ export function LibraryMode() {
   const [googlePosterFor, setGooglePosterFor] = useState<LibraryRow | null>(null);
   const [familyExplainerOpen, setFamilyExplainerOpen] = useState(false);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
+  const [freeformNotesOpen, setFreeformNotesOpen] = useState(false);
   const [autoSeriesOpen, setAutoSeriesOpen] = useState(false);
   const [autoSeasonsOpen, setAutoSeasonsOpen] = useState<{
     seriesId: number;
@@ -1581,6 +1583,10 @@ export function LibraryMode() {
             actlog("tools", "open analytics");
             setAnalyticsOpen(true);
           }}
+          onOpenFreeformNotes={() => {
+            actlog("tools", "open freeform notes");
+            setFreeformNotesOpen(true);
+          }}
           onOpenDetectSeries={() => {
             actlog("tools", "open detect-series");
             setAutoSeriesOpen(true);
@@ -2202,10 +2208,17 @@ export function LibraryMode() {
           }}
         />
       )}
+      {freeformNotesOpen && (
+        <FreeformNotesModal onClose={() => setFreeformNotesOpen(false)} />
+      )}
       {analyticsOpen && (
         <AnalyticsDashboard
           rows={rows}
           onClose={() => setAnalyticsOpen(false)}
+          onJumpToSeries={(seriesId, name) => {
+            actlog("tools", `analytics → jump to series ${seriesId} "${name}"`);
+            setActiveScope({ kind: "series", id: seriesId, name });
+          }}
         />
       )}
       {autoSeriesOpen && (
@@ -2343,6 +2356,7 @@ function LibraryToolsMenu({
   onOpenDetectSeries,
   onRunPossibleDuplicates,
   onRunFullMetadataRefresh,
+  onOpenFreeformNotes,
 }: {
   onRunDuplicates: () => void;
   onRunUpgrades: () => void;
@@ -2350,6 +2364,7 @@ function LibraryToolsMenu({
   onOpenDetectSeries: () => void;
   onRunPossibleDuplicates: () => void;
   onRunFullMetadataRefresh: () => void;
+  onOpenFreeformNotes: () => void;
 }) {
   const [open, setOpen] = useState(false);
   // Close on Esc + outside-click.
@@ -2412,6 +2427,11 @@ function LibraryToolsMenu({
           {item("📺 Detect series", "Scan folders and propose series groupings", onOpenDetectSeries)}
           {item("↻ Full metadata refresh", "Queue a TMDb refresh for every item without a poster. Backend throttles to one request at a time.", onRunFullMetadataRefresh)}
           {item("📊 Analytics", "Watch patterns by tag, time window, and movie", onOpenAnalytics)}
+          {item(
+            "📝 Freeform Notes",
+            "A general scratchpad for organizing your thoughts and profile-creation efforts in FVP. Autosaves whatever you type; stays on this machine.",
+            onOpenFreeformNotes,
+          )}
         </div>
       )}
     </div>

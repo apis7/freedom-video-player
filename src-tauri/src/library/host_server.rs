@@ -1359,7 +1359,9 @@ fn call_find_probable_pairs(
 fn call_analytics(db: &LibraryDb, args: Value) -> Result<Value, String> {
     let days = arg_i64(&args, "days").unwrap_or(30);
     let tag = arg_opt_str(&args, "tag");
-    let snap = crate::commands::library::analytics_core(db, days, tag)?;
+    let start_unix = arg_i64(&args, "start_unix").ok();
+    let end_unix = arg_i64(&args, "end_unix").ok();
+    let snap = crate::commands::library::analytics_core(db, days, tag, start_unix, end_unix)?;
     serde_json::to_value(snap).map_err(|e| format!("serialize: {e}"))
 }
 

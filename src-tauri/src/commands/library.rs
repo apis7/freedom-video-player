@@ -5354,6 +5354,25 @@ pub struct AnalyticsTagSlice {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct AnalyticsSeriesProgress {
+    pub series_id: i64,
+    pub name: String,
+    pub has_seasons: bool,
+    pub total_episodes: i64,
+    pub watched_episodes: i64,
+    /// Most recently watched season — surfaced as "Season N" alongside
+    /// the overall series progress. None when no seasons defined or
+    /// when no episode of this series was opened in the window.
+    pub current_season: Option<i64>,
+    pub current_season_total: i64,
+    pub current_season_watched: i64,
+    /// Unix seconds of the latest 'opened' event for any episode in
+    /// the series within the window — used both to sort the list and
+    /// to render a "last watched X ago" line.
+    pub last_watched_at: Option<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct AnalyticsSnapshot {
     /// Time-bucketed daily series, oldest → newest.
     pub daily: Vec<AnalyticsDailyBucket>,
@@ -5361,33 +5380,59 @@ pub struct AnalyticsSnapshot {
     pub top_movies: Vec<AnalyticsTopRow>,
     /// Tag-sliced summary in the window.
     pub by_tag: Vec<AnalyticsTagSlice>,
+    /// Per-series progress. Only includes series the user has touched
+    /// within the window — empty when no series have any opens.
+    pub series_progress: Vec<AnalyticsSeriesProgress>,
     /// Total opens and watched_ms in the window — pre-aggregated so the
     /// UI doesn't have to sum the daily series.
     pub total_opens: i64,
     pub total_watched_ms: i64,
     pub total_distinct_files: i64,
+    /// Echo of the actual window bounds the snapshot covers (unix
+    /// seconds). Useful for the UI when the bounds were computed
+    /// server-side from a days parameter.
+    pub window_start_unix: i64,
+    pub window_end_unix: i64,
 }
 
-/// Analytics rollup over a window of days, optionally restricted to a
-/// specific tag. Reads from library_watch_log. Per directive's analytics
-/// dashboard.
+/// Analytics rollup over a window. Accepts either:
+///   - `days` alone (recent rolling window of N days from now), OR
+///   - explicit `start_unix` + `end_unix` for a custom date range.
+/// When both are provided the explicit range wins.
 #[tauri::command]
 pub fn library_analytics(
     db: State<'_, LibraryDb>,
     days: i64,
     tag: Option<String>,
+    start_unix: Option<i64>,
+    end_unix: Option<i64>,
 ) -> Result<AnalyticsSnapshot, String> {
-    analytics_core(&db, days, tag)
+    analytics_core(&db, days, tag, start_unix, end_unix)
 }
 
 pub fn analytics_core(
     db: &LibraryDb,
     days: i64,
     tag: Option<String>,
+    start_unix: Option<i64>,
+    end_unix: Option<i64>,
 ) -> Result<AnalyticsSnapshot, String> {
-    let days = days.clamp(1, 365 * 5);
     let now = now_unix();
-    let cutoff = now - days * 86_400;
+    // Resolve the window. Custom dates beat the days parameter. We
+    // accept either bound being None: missing-start defaults to N
+    // days back from end, missing-end defaults to now.
+    let (cutoff, end_at) = match (start_unix, end_unix) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        (Some(s), None) => (s, now),
+        (None, Some(e)) => {
+            let days_clamped = days.clamp(1, 365 * 5);
+            (e - days_clamped * 86_400, e)
+        }
+        _ => {
+            let days_clamped = days.clamp(1, 365 * 5);
+            (now - days_clamped * 86_400, now)
+        }
+    };
     let conn = db.lock();
 
     // Daily buckets — group by local date. SQLite's strftime+'unixepoch'
@@ -5402,6 +5447,7 @@ pub fn analytics_core(
                    SUM(CASE WHEN event_type = 'progress' THEN COALESCE(end_progress_ms, 0) ELSE 0 END) AS watched_ms
             FROM library_watch_log
             WHERE started_at >= ?1
+              AND started_at <= ?3
               AND (?2 IS NULL OR file_id IN (
                   SELECT lf.id FROM library_files lf
                   JOIN library_tags lt ON lt.identity_id = lf.identity_id
@@ -5413,7 +5459,7 @@ pub fn analytics_core(
         )
         .map_err(|e| format!("prepare daily: {e}"))?;
     let daily_rows = daily_stmt
-        .query_map(params![cutoff, tag.as_deref()], |r| {
+        .query_map(params![cutoff, tag.as_deref(), end_at], |r| {
             Ok(AnalyticsDailyBucket {
                 day: r.get(0)?,
                 opens: r.get(1).unwrap_or_default(),
@@ -5436,6 +5482,7 @@ pub fn analytics_core(
                 r#"
                 SELECT COUNT(DISTINCT file_id) FROM library_watch_log
                 WHERE started_at >= ?1
+                  AND started_at <= ?3
                   AND (?2 IS NULL OR file_id IN (
                       SELECT lf.id FROM library_files lf
                       JOIN library_tags lt ON lt.identity_id = lf.identity_id
@@ -5444,8 +5491,10 @@ pub fn analytics_core(
                 "#,
             )
             .map_err(|e| format!("prepare distinct: {e}"))?;
-        stmt.query_row(params![cutoff, tag.as_deref()], |r| r.get::<_, i64>(0))
-            .unwrap_or_default()
+        stmt.query_row(params![cutoff, tag.as_deref(), end_at], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap_or_default()
     };
 
     let mut top_stmt = conn
@@ -5458,6 +5507,7 @@ pub fn analytics_core(
             JOIN library_files lf ON lf.id = lwl.file_id
             JOIN library_identities li ON li.id = lf.identity_id
             WHERE lwl.started_at >= ?1
+              AND lwl.started_at <= ?3
               AND (?2 IS NULL OR lf.id IN (
                   SELECT lf2.id FROM library_files lf2
                   JOIN library_tags lt ON lt.identity_id = lf2.identity_id
@@ -5470,7 +5520,7 @@ pub fn analytics_core(
         )
         .map_err(|e| format!("prepare top: {e}"))?;
     let top_movies: Vec<AnalyticsTopRow> = top_stmt
-        .query_map(params![cutoff, tag.as_deref()], |r| {
+        .query_map(params![cutoff, tag.as_deref(), end_at], |r| {
             Ok(AnalyticsTopRow {
                 identity_id: r.get(0)?,
                 movie_title: r.get(1).ok(),
@@ -5492,6 +5542,7 @@ pub fn analytics_core(
             JOIN library_files lf ON lf.id = lwl.file_id
             JOIN library_tags lt ON lt.identity_id = lf.identity_id
             WHERE lwl.started_at >= ?1
+              AND lwl.started_at <= ?2
             GROUP BY lt.tag
             ORDER BY opens DESC
             LIMIT 20
@@ -5499,7 +5550,7 @@ pub fn analytics_core(
         )
         .map_err(|e| format!("prepare tag: {e}"))?;
     let by_tag: Vec<AnalyticsTagSlice> = tag_stmt
-        .query_map(params![cutoff], |r| {
+        .query_map(params![cutoff, end_at], |r| {
             Ok(AnalyticsTagSlice {
                 tag: r.get(0)?,
                 opens: r.get(1).unwrap_or_default(),
@@ -5510,14 +5561,158 @@ pub fn analytics_core(
         .filter_map(|r| r.ok())
         .collect();
 
+    let series_progress = compute_series_progress(&conn, cutoff, end_at).unwrap_or_default();
+
     Ok(AnalyticsSnapshot {
         daily,
         top_movies,
         by_tag,
+        series_progress,
         total_opens,
         total_watched_ms,
         total_distinct_files,
+        window_start_unix: cutoff,
+        window_end_unix: end_at,
     })
+}
+
+/// Per-series watch progress, scoped to a [cutoff, end_at] window.
+/// Only includes series the user has opened at least one episode of
+/// within the window. Ordered most-recently-touched first.
+fn compute_series_progress(
+    conn: &rusqlite::Connection,
+    cutoff: i64,
+    end_at: i64,
+) -> Result<Vec<AnalyticsSeriesProgress>, String> {
+    // First: which series have ANY opened event in the window, and
+    // what was the most recent watch time?
+    let mut series_stmt = conn
+        .prepare(
+            r#"
+            SELECT s.id, s.name, s.has_seasons,
+                   MAX(lwl.started_at) AS last_watched_at
+            FROM library_series s
+            JOIN library_series_items lsi ON lsi.series_id = s.id
+            JOIN library_files lf ON lf.identity_id = lsi.identity_id
+            JOIN library_watch_log lwl ON lwl.file_id = lf.id
+            WHERE lwl.event_type = 'opened'
+              AND lwl.started_at >= ?1
+              AND lwl.started_at <= ?2
+            GROUP BY s.id
+            ORDER BY last_watched_at DESC
+            "#,
+        )
+        .map_err(|e| format!("prepare series_progress: {e}"))?;
+    let series_rows: Vec<(i64, String, bool, Option<i64>)> = series_stmt
+        .query_map(params![cutoff, end_at], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query series_progress: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if series_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(series_rows.len());
+    for (series_id, name, has_seasons, last_watched_at) in series_rows {
+        // Total episodes in the series (across all seasons).
+        let total_episodes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM library_series_items WHERE series_id = ?1",
+                params![series_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        // Distinct episodes the user has watched within the window.
+        let watched_episodes: i64 = conn
+            .query_row(
+                r#"
+                SELECT COUNT(DISTINCT lsi.identity_id)
+                FROM library_series_items lsi
+                JOIN library_files lf ON lf.identity_id = lsi.identity_id
+                JOIN library_watch_log lwl ON lwl.file_id = lf.id
+                WHERE lsi.series_id = ?1
+                  AND lwl.event_type = 'opened'
+                  AND lwl.started_at >= ?2
+                  AND lwl.started_at <= ?3
+                "#,
+                params![series_id, cutoff, end_at],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        // "Current season" = the season whose most-recent watched
+        // episode was the most-recent overall. Only meaningful when
+        // the series has discrete seasons.
+        let mut current_season: Option<i64> = None;
+        let mut current_season_total: i64 = 0;
+        let mut current_season_watched: i64 = 0;
+        if has_seasons {
+            current_season = conn
+                .query_row(
+                    r#"
+                    SELECT lsi.season
+                    FROM library_series_items lsi
+                    JOIN library_files lf ON lf.identity_id = lsi.identity_id
+                    JOIN library_watch_log lwl ON lwl.file_id = lf.id
+                    WHERE lsi.series_id = ?1
+                      AND lsi.season IS NOT NULL
+                      AND lwl.event_type = 'opened'
+                      AND lwl.started_at >= ?2
+                      AND lwl.started_at <= ?3
+                    ORDER BY lwl.started_at DESC
+                    LIMIT 1
+                    "#,
+                    params![series_id, cutoff, end_at],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .unwrap_or(None);
+            if let Some(season_num) = current_season {
+                current_season_total = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM library_series_items WHERE series_id = ?1 AND season = ?2",
+                        params![series_id, season_num],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                current_season_watched = conn
+                    .query_row(
+                        r#"
+                        SELECT COUNT(DISTINCT lsi.identity_id)
+                        FROM library_series_items lsi
+                        JOIN library_files lf ON lf.identity_id = lsi.identity_id
+                        JOIN library_watch_log lwl ON lwl.file_id = lf.id
+                        WHERE lsi.series_id = ?1
+                          AND lsi.season = ?2
+                          AND lwl.event_type = 'opened'
+                          AND lwl.started_at >= ?3
+                          AND lwl.started_at <= ?4
+                        "#,
+                        params![series_id, season_num, cutoff, end_at],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+            }
+        }
+        out.push(AnalyticsSeriesProgress {
+            series_id,
+            name,
+            has_seasons,
+            total_episodes,
+            watched_episodes,
+            current_season,
+            current_season_total,
+            current_season_watched,
+            last_watched_at,
+        });
+    }
+    Ok(out)
 }
 
 fn load_series_membership(

@@ -339,8 +339,18 @@ export const libraryIpc = {
     }),
   setSeriesHasSeasons: (seriesId: number, hasSeasons: boolean) =>
     libInvoke<void>("set_series_has_seasons", { seriesId, hasSeasons }),
-  analytics: (days: number, tag: string | null) =>
-    libInvoke<AnalyticsSnapshot>("analytics", { days, tag }),
+  analytics: (
+    days: number,
+    tag: string | null,
+    startUnix?: number | null,
+    endUnix?: number | null,
+  ) =>
+    libInvoke<AnalyticsSnapshot>("analytics", {
+      days,
+      tag,
+      startUnix: startUnix ?? null,
+      endUnix: endUnix ?? null,
+    }),
   setSeriesItemSeason: (
     seriesId: number,
     identityId: number,
@@ -459,13 +469,28 @@ export interface AnalyticsTagSlice {
   distinct_files: number;
 }
 
+export interface AnalyticsSeriesProgress {
+  series_id: number;
+  name: string;
+  has_seasons: boolean;
+  total_episodes: number;
+  watched_episodes: number;
+  current_season: number | null;
+  current_season_total: number;
+  current_season_watched: number;
+  last_watched_at: number | null;
+}
+
 export interface AnalyticsSnapshot {
   daily: AnalyticsDailyBucket[];
   top_movies: AnalyticsTopRow[];
   by_tag: AnalyticsTagSlice[];
+  series_progress: AnalyticsSeriesProgress[];
   total_opens: number;
   total_watched_ms: number;
   total_distinct_files: number;
+  window_start_unix: number;
+  window_end_unix: number;
 }
 
 export interface TransferChecklist {

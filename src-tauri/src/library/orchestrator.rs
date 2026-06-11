@@ -266,15 +266,41 @@ pub fn init(app: AppHandle, db: LibraryDb) {
     // fire. Decoupled from notify so it can do its safety-net job
     // even when notify is unreliable (some SMB servers).
     spawn_cadence_heartbeat();
-    // Re-attach watchers for every folder already in the DB.
-    reattach_all_watchers(&db, &app);
-    // Boot pass — only scans folders flagged scan_on_startup=1. Others
-    // stay watched (notify still fires) but skip the boot scan.
-    let _ = ORCHESTRATOR
-        .get()
-        .unwrap()
-        .job_tx
-        .send(Job::ScanAll { startup_only: true });
+    // SLOW PATH MOVED OFF THE BOOT THREAD.
+    //
+    // reattach_all_watchers + the boot ScanAll send used to run
+    // INLINE here. On a healthy local disk that's ~5 ms. On a SMB
+    // share with a stale or missing folder it was ~55 seconds — a
+    // pb.is_dir() on a known-missing UNC path costs one SMB negative-
+    // cache timeout (~15s), and notify's RecursiveMode::Recursive
+    // watch on a live SMB share has to register ReadDirectoryChangesW
+    // against the share which can take 30+ seconds depending on
+    // server. The whole boot thread blocked behind that, so the UI
+    // didn't mount for almost a minute.
+    //
+    // Now: the orchestrator is fully usable as soon as init() returns
+    // (ORCHESTRATOR is set, worker thread spawned, cadence ticking).
+    // The watcher reattach + boot scan run in a background thread.
+    // Real fs changes that arrive before watchers attach are simply
+    // not noticed; the boot ScanAll catches up on them.
+    let db_boot = db.clone();
+    let app_boot = app.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        crate::log!(
+            "library:boot",
+            "deferred init: reattaching notify watchers + queueing boot ScanAll (off-thread so UI mounts now)"
+        );
+        reattach_all_watchers(&db_boot, &app_boot);
+        if let Some(o) = ORCHESTRATOR.get() {
+            let _ = o.job_tx.send(Job::ScanAll { startup_only: true });
+        }
+        crate::log!(
+            "library:boot",
+            "deferred init: completed in {:?}",
+            start.elapsed()
+        );
+    });
 }
 
 fn spawn_cadence_heartbeat() {

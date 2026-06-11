@@ -52,61 +52,170 @@ enum EffectKind {
     AudioBlur { mode: String, intensity: u8 },
 }
 
+#[derive(Debug, Clone)]
+struct PlannedCrop {
+    start_ms: u64,
+    end_ms: u64,
+    x_pct: f32,
+    y_pct: f32,
+    w_pct: f32,
+    h_pct: f32,
+}
+
 pub fn build(inputs: EffectInputs) -> EffectGraph {
     let mut planned: Vec<PlannedEffect> = Vec::new();
+    let mut crops: Vec<PlannedCrop> = Vec::new();
     for snip in inputs.snips {
         if snip.end_ms <= snip.start_ms {
             continue;
         }
-        let kind = match &snip.action {
-            SnipAction::MuteDialogue { mode, intensity } => EffectKind::MuteDialogue {
-                mode: mode.clone(),
-                intensity: *intensity,
-            },
-            SnipAction::AudioBlur { mode, intensity } => EffectKind::AudioBlur {
-                mode: mode.clone(),
-                intensity: *intensity,
-            },
+        match &snip.action {
+            SnipAction::MuteDialogue { mode, intensity } => {
+                let half_dur = (snip.end_ms - snip.start_ms) / 2;
+                let xfade_ms = CROSSFADE_MS.min(half_dur);
+                if snip.start_ms < xfade_ms
+                    || snip.end_ms + xfade_ms > inputs.file_duration_ms
+                {
+                    crate::log!(
+                        "overlay",
+                        "audio_filter: snip {} at boundary — dropping",
+                        snip.id
+                    );
+                    continue;
+                }
+                planned.push(PlannedEffect {
+                    start_ms: snip.start_ms,
+                    end_ms: snip.end_ms,
+                    xfade_ms,
+                    kind: EffectKind::MuteDialogue {
+                        mode: mode.clone(),
+                        intensity: *intensity,
+                    },
+                });
+            }
+            SnipAction::AudioBlur { mode, intensity } => {
+                // garbled_slice is intended to be handled offline via a
+                // precompute-at-open pipeline (libmpv encode → in-Rust
+                // slice/reverse → audio_replace overlay swap). That
+                // pipeline is NOT yet wired — for now the runtime drops
+                // garbled_slice snips here, which means the apply
+                // engine sees no overlay engaged for them and falls
+                // back to plain silence (the existing audio_blur
+                // silence-fallback). Logs loudly so users know what's
+                // going on.
+                if mode == "garbled_slice" {
+                    crate::log!(
+                        "overlay",
+                        "audio_filter: snip {} uses garbled_slice — precompute pipeline NOT YET WIRED, falling back to silence",
+                        snip.id
+                    );
+                    continue;
+                }
+                let half_dur = (snip.end_ms - snip.start_ms) / 2;
+                let xfade_ms = CROSSFADE_MS.min(half_dur);
+                if snip.start_ms < xfade_ms
+                    || snip.end_ms + xfade_ms > inputs.file_duration_ms
+                {
+                    crate::log!(
+                        "overlay",
+                        "audio_filter: snip {} at boundary — dropping",
+                        snip.id
+                    );
+                    continue;
+                }
+                planned.push(PlannedEffect {
+                    start_ms: snip.start_ms,
+                    end_ms: snip.end_ms,
+                    xfade_ms,
+                    kind: EffectKind::AudioBlur {
+                        mode: mode.clone(),
+                        intensity: *intensity,
+                    },
+                });
+            }
+            SnipAction::CropVideo {
+                x_pct,
+                y_pct,
+                w_pct,
+                h_pct,
+            } => {
+                crops.push(PlannedCrop {
+                    start_ms: snip.start_ms,
+                    end_ms: snip.end_ms,
+                    x_pct: *x_pct,
+                    y_pct: *y_pct,
+                    w_pct: *w_pct,
+                    h_pct: *h_pct,
+                });
+            }
             _ => continue,
-        };
-        // Clamp the crossfade if the snip is short.
-        let half_dur = (snip.end_ms - snip.start_ms) / 2;
-        let xfade_ms = CROSSFADE_MS.min(half_dur);
-        // Need room for the OUTSIDE crossfade on both edges.
-        if snip.start_ms < xfade_ms || snip.end_ms + xfade_ms > inputs.file_duration_ms {
-            crate::log!(
-                "overlay",
-                "audio_filter: snip {} at boundary — dropping",
-                snip.id
-            );
-            continue;
         }
-        planned.push(PlannedEffect {
-            start_ms: snip.start_ms,
-            end_ms: snip.end_ms,
-            xfade_ms,
-            kind,
-        });
     }
 
-    if planned.is_empty() {
+    if planned.is_empty() && crops.is_empty() {
         return EffectGraph::None;
     }
     planned.sort_by_key(|p| p.start_ms);
+    crops.sort_by_key(|c| c.start_ms);
 
     crate::log!(
         "overlay",
-        "audio_filter: planning {} effect snip(s)",
-        planned.len()
+        "audio_filter: planning {} effect snip(s) + {} crop snip(s)",
+        planned.len(),
+        crops.len()
     );
-    EffectGraph::Graph(render_graph(&planned))
+    EffectGraph::Graph(render_graph(&planned, &crops))
 }
 
-fn render_graph(snips: &[PlannedEffect]) -> String {
+fn render_graph(snips: &[PlannedEffect], crops: &[PlannedCrop]) -> String {
     let mut out = String::new();
 
-    // Video: pass-through.
-    out.push_str("[vid1] null [vo];\n");
+    // Video branch: pass-through unless we have crop snips, in which
+    // case we chain one `crop` filter per snip, each gated by
+    // enable='between(t,A,B)'. ffmpeg's crop filter respects enable
+    // correctly — when enable is false it passes the frame through
+    // UNCHANGED at full size (no clipping), so outside any snip
+    // window the video is the original frame. Inside a snip window
+    // the crop produces a smaller frame; mpv's video output stretches
+    // it to fill the player area, giving the zoom-to-fit behaviour
+    // the user picked.
+    //
+    // Multiple crops chain — only one can be active at a time because
+    // their windows are sorted + non-overlapping (the planner enforces
+    // sort; overlap is a profile authoring mistake the UI prevents).
+    if crops.is_empty() {
+        out.push_str("[vid1] null [vo];\n");
+    } else {
+        out.push_str("[vid1] ");
+        let mut first = true;
+        for c in crops {
+            if !first {
+                out.push_str(", ");
+            }
+            first = false;
+            let start = ms_to_secs_str(c.start_ms);
+            let end = ms_to_secs_str(c.end_ms);
+            // crop=w=iw*W:h=ih*H:x=iw*X:y=ih*Y — fractional crop
+            // independent of source resolution. exact_pad keeps the
+            // numerical filter from rounding a 1px edge off on odd
+            // dimensions; the filter normalises internally.
+            out.push_str(&format!(
+                "crop=w='iw*{w:.4}':h='ih*{h:.4}':x='iw*{x:.4}':y='ih*{y:.4}':enable='between(t,{start},{end})'",
+                w = c.w_pct,
+                h = c.h_pct,
+                x = c.x_pct,
+                y = c.y_pct,
+            ));
+        }
+        out.push_str(" [vo];\n");
+    }
+
+    // If we have ONLY crops and no audio effects, the rest of the
+    // graph collapses to a simple audio pass-through.
+    if snips.is_empty() {
+        out.push_str("[aid1] anull [ao]");
+        return out;
+    }
 
     // Split [aid1] into 1 main + N effect branches.
     out.push_str(&format!("[aid1] asplit={}", snips.len() + 1));

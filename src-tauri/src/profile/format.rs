@@ -263,6 +263,24 @@ pub enum SnipAction {
         #[serde(default = "default_audio_blur_intensity")]
         intensity: u8,
     },
+    /// Crop a rectangular region of the video frame for the duration of
+    /// the snip. All four fields are fractions of the source frame in
+    /// the range 0.0..=1.0 — resolution-independent so the same .free
+    /// works for 1080p, 4K, etc. The cropped region is scaled to the
+    /// player area (zoom-to-fit) so the visible image stays the same
+    /// size; outside the snip window, the video plays uncropped.
+    ///
+    /// Schema invariants enforced by validate():
+    ///   - 0.0 <= x_pct, y_pct < 1.0
+    ///   - 0.0 < w_pct, h_pct <= 1.0
+    ///   - x_pct + w_pct <= 1.0, y_pct + h_pct <= 1.0
+    ///   - w_pct * h_pct >= 0.01  (no zero-area / sliver crops)
+    CropVideo {
+        x_pct: f32,
+        y_pct: f32,
+        w_pct: f32,
+        h_pct: f32,
+    },
 }
 
 fn default_crossfade_ms() -> u32 {
@@ -288,7 +306,17 @@ fn default_audio_blur_intensity() -> u8 {
 }
 
 pub const MUTE_DIALOGUE_MODES: &[&str] = &["auto", "center_channel", "stereo_cancel"];
-pub const AUDIO_BLUR_MODES: &[&str] = &["muffled", "garbled_grain", "garbled_phase"];
+pub const AUDIO_BLUR_MODES: &[&str] = &[
+    "muffled",
+    "garbled_grain",
+    "garbled_phase",
+    // "garbled_slice" → 200ms slices, odd-indexed reversed. NOT applied
+    // by the realtime lavfi pipeline (areverse is stream-incompatible).
+    // Handled offline by the audio_slice precompute module: a per-snip
+    // WAV is built on file open and swapped in via the audio_replace
+    // overlay machinery.
+    "garbled_slice",
+];
 
 /// Hard cap on Beep snip duration. Enforced by the frontend's action picker
 /// (which offers to shorten longer snips) and by the apply engine as a
@@ -610,6 +638,49 @@ fn validate_action(snip_id: &str, action: &SnipAction) -> Result<(), ValidationE
                     snip_id: snip_id.to_string(),
                     reason: format!(
                         "level_db={level_db} outside [{MIN_BEEP_LEVEL_DB}, {MAX_BEEP_LEVEL_DB}]"
+                    ),
+                });
+            }
+            Ok(())
+        }
+        SnipAction::CropVideo {
+            x_pct,
+            y_pct,
+            w_pct,
+            h_pct,
+        } => {
+            if !(0.0..1.0).contains(x_pct) || !(0.0..1.0).contains(y_pct) {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "crop_video origin out of range: x={x_pct}, y={y_pct}"
+                    ),
+                });
+            }
+            if !(0.0..=1.0).contains(w_pct) || !(0.0..=1.0).contains(h_pct) {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "crop_video size out of range: w={w_pct}, h={h_pct}"
+                    ),
+                });
+            }
+            if *x_pct + *w_pct > 1.0001 || *y_pct + *h_pct > 1.0001 {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "crop_video rect overflows frame: x+w={}, y+h={}",
+                        x_pct + w_pct,
+                        y_pct + h_pct
+                    ),
+                });
+            }
+            if w_pct * h_pct < 0.01 {
+                return Err(ValidationError::AudioReplaceOutOfRange {
+                    snip_id: snip_id.to_string(),
+                    reason: format!(
+                        "crop_video rect too small: area={} (min 0.01)",
+                        w_pct * h_pct
                     ),
                 });
             }

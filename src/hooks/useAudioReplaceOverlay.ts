@@ -90,7 +90,14 @@ async function applyOrClear(snips: Snip[], durationSec: number): Promise<void> {
   const hasAudioReplace = snips.some((s) => s.action.type === "audio_replace");
   const hasEffect = snips.some(
     (s) =>
-      s.action.type === "mute_dialogue" || s.action.type === "audio_blur",
+      s.action.type === "mute_dialogue" ||
+      s.action.type === "audio_blur" ||
+      // Crop snips ride the same lavfi-complex pipeline as the audio
+      // effects (video-side `crop=...:enable=between(...)`). Treat them
+      // as "effect" for the engage/clear decision so adding a crop snip
+      // to a profile with no audio effects still triggers the overlay
+      // to load the crop chain.
+      s.action.type === "crop_video",
   );
 
   // V1 limitation: if a profile mixes audio_replace WITH mute/blur,

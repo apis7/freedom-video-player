@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../state/appStore";
 import { TransportBar } from "../components/TransportBar";
 import { HotkeyTicker } from "../components/HotkeyTicker";
+import { CropOverlay } from "../components/CropOverlay";
 import { ContextMenu, type MenuItem } from "../components/ContextMenu";
 import { ExportProfileModal } from "../components/ExportProfileModal";
 import { ProfilePickerModal } from "../components/ProfilePickerModal";
@@ -1526,6 +1527,7 @@ function ActionPicker({
     "beep",
     "mute_dialogue",
     "audio_blur",
+    "crop_video",
   ] as const;
   return (
     <div className="space-y-2">
@@ -1560,6 +1562,18 @@ function ActionPicker({
                   mode: "muffled",
                   intensity: 70,
                 });
+              } else if (t === "crop_video") {
+                // Default to a centered 50% rect — gives the user a
+                // visible starting handle they can drag from. The
+                // CropOverlay then lets them refine on the actual
+                // frame.
+                onChange({
+                  type: "crop_video",
+                  x_pct: 0.25,
+                  y_pct: 0.25,
+                  w_pct: 0.5,
+                  h_pct: 0.5,
+                });
               } else {
                 onChange({ type: t } as SnipAction);
               }
@@ -1591,6 +1605,55 @@ function ActionPicker({
       {value.type === "audio_blur" && (
         <AudioBlurSettings value={value} onChange={onChange} />
       )}
+      {value.type === "crop_video" && (
+        <CropVideoSettings value={value} onChange={onChange} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Settings panel for a crop_video snip. Surfaces the four percentages
+ * read-only — the user adjusts the crop by dragging the rectangle on
+ * the video itself (CropOverlay). This panel is just feedback +
+ * "Reset to centered 50%" button so they always have an out.
+ */
+function CropVideoSettings({
+  value,
+  onChange,
+}: {
+  value: Extract<SnipAction, { type: "crop_video" }>;
+  onChange: (a: SnipAction) => void;
+}) {
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] text-fvp-muted leading-relaxed">
+        Drag the rectangle on the video to set the crop region. During
+        the snip, the rectangle is zoomed to fill the player. Outside
+        the snip the video plays uncropped.
+      </div>
+      <div className="grid grid-cols-2 gap-1 text-[11px] font-mono text-fvp-text">
+        <div>x: {pct(value.x_pct)}</div>
+        <div>y: {pct(value.y_pct)}</div>
+        <div>w: {pct(value.w_pct)}</div>
+        <div>h: {pct(value.h_pct)}</div>
+      </div>
+      <button
+        className="text-[11px] px-2 py-1 bg-fvp-bg border border-fvp-border rounded hover:border-fvp-muted text-fvp-text"
+        onClick={() =>
+          onChange({
+            type: "crop_video",
+            x_pct: 0.25,
+            y_pct: 0.25,
+            w_pct: 0.5,
+            h_pct: 0.5,
+          })
+        }
+        title="Restore the default centered 50% rectangle"
+      >
+        Reset to centered 50%
+      </button>
     </div>
   );
 }
@@ -2179,6 +2242,11 @@ function VideoPreviewArea({
           className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none z-10"
         />
       )}
+      {/* Crop editor overlay — only renders when the primary-selected
+          snip is a crop_video. Pointer events pass through outside the
+          rect + handles, so the rest of the video area still receives
+          clicks normally. */}
+      {hasFile && <CropOverlay />}
       {/* Loading takes precedence over no-file (same precedence as
           Player Mode). Black overlay + spinner masks the libmpv HWND
           during the attach gap, killing the white flash. */}
@@ -3356,6 +3424,8 @@ function actionLabelByType(t: SnipAction["type"]): string {
       return "Remove dialogue";
     case "audio_blur":
       return "Audio blur";
+    case "crop_video":
+      return "Crop video";
   }
 }
 

@@ -25,6 +25,7 @@ function actionPriority(a: SnipAction): number {
     case "audio_replace":
     case "mute_dialogue":
     case "audio_blur":
+    case "crop_video":
       return 1;
   }
 }
@@ -256,6 +257,9 @@ export function useProfileApplication() {
             what = state.audioOverlayActive
               ? `VIDEO: plays through normally • AUDIO: libmpv overlay blurring (mode=${a.mode}, intensity=${a.intensity})`
               : "VIDEO: plays through normally • AUDIO: muted (overlay off — silence fallback)";
+            break;
+          case "crop_video":
+            what = `VIDEO: cropped ${(a.w_pct * 100).toFixed(0)}%×${(a.h_pct * 100).toFixed(0)}% at (${(a.x_pct * 100).toFixed(0)}%, ${(a.y_pct * 100).toFixed(0)}%), zoom-to-fit • AUDIO: plays through normally`;
             break;
         }
         console.log(`${head}\n            ${what}${prev ? ` (was in snip ${prev})` : ""}`);

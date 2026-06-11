@@ -152,10 +152,24 @@ export type SnipAction =
       mode: AudioBlurMode;
       /** 0..100 — preset-specific (lowpass cutoff, grain size, etc.). */
       intensity: number;
+    }
+  | {
+      /** Crop a rectangular region of the frame and zoom-to-fit during
+       *  the snip. All four numbers are 0..1 fractions of the source
+       *  frame, so the same .free works at any resolution. */
+      type: "crop_video";
+      x_pct: number;
+      y_pct: number;
+      w_pct: number;
+      h_pct: number;
     };
 
 export type MuteDialogueMode = "auto" | "center_channel" | "stereo_cancel";
-export type AudioBlurMode = "muffled" | "garbled_grain" | "garbled_phase";
+export type AudioBlurMode =
+  | "muffled"
+  | "garbled_grain"
+  | "garbled_phase"
+  | "garbled_slice";
 
 export const MUTE_DIALOGUE_MODE_LABELS: Record<MuteDialogueMode, string> = {
   auto: "Auto (recommended)",
@@ -166,6 +180,7 @@ export const AUDIO_BLUR_MODE_LABELS: Record<AudioBlurMode, string> = {
   muffled: "Muffled (lowpass + reverb)",
   garbled_grain: "Garbled — modulation",
   garbled_phase: "Garbled — phase scramble",
+  garbled_slice: "Garbled — slice & reverse",
 };
 export const AUDIO_BLUR_MODE_DESCRIPTIONS: Record<AudioBlurMode, string> = {
   muffled:
@@ -174,6 +189,8 @@ export const AUDIO_BLUR_MODE_DESCRIPTIONS: Record<AudioBlurMode, string> = {
     "Aggressive modulation (vibrato + flanger + chorus). Speech becomes drunken nonsense; music smears.",
   garbled_phase:
     "FFT phase scramble. The original timbre and loudness are preserved, but the time structure that conveys words is gone. Very textural.",
+  garbled_slice:
+    "200 ms slices, alternating reversed/forward. Sounds like rewind stutter. Pre-rendered on file open (you'll see a brief 'Preparing audio…' indicator the first time) then plays back instantly.",
 };
 
 export interface Snip {

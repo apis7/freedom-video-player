@@ -200,7 +200,9 @@ pub fn apply_audio_overlay(
         .filter(|s| {
             matches!(
                 s.action,
-                SnipAction::MuteDialogue { .. } | SnipAction::AudioBlur { .. }
+                SnipAction::MuteDialogue { .. }
+                    | SnipAction::AudioBlur { .. }
+                    | SnipAction::CropVideo { .. }
             )
         })
         .count();

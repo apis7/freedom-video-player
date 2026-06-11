@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useAppStore } from "../../state/appStore";
 import { getHostEndpoint, getLibraryMode } from "../../ipc/library";
 
@@ -16,6 +16,11 @@ interface Props {
    *  underlying poster image still renders so visual recognition holds,
    *  but the badge makes "this won't play" unmistakable at a glance. */
   isMissing?: boolean;
+  /** Optional click handler for the red ✕ badge. When provided, the
+   *  badge becomes clickable + shows a hover ring; FVP runs the
+   *  re-find heuristic and the caller updates the UI based on the
+   *  outcome (clear/merge/rebind/still-missing toast). */
+  onMissingClick?: (e: ReactMouseEvent) => void;
   /** Cache-buster appended to the image URL so the webview reloads
    *  whenever the underlying file changes. Pass `identity.last_updated_at`
    *  — the backend bumps it on every set_custom_thumbnail and
@@ -44,6 +49,7 @@ export function LibraryPoster({
   widthPx,
   alt = "",
   isMissing = false,
+  onMissingClick,
   cacheKey = null,
 }: Props) {
   const source = customThumbnailPath || posterLocalPath || null;
@@ -136,12 +142,22 @@ export function LibraryPoster({
       {/* Missing-file badge: overlaid on top of (greyed) poster so the
           user can still recognize the title visually. */}
       {isMissing && showImage && (
-        <div
-          className="absolute top-1 left-1 w-7 h-7 rounded-full bg-fvp-err border-2 border-white/80 flex items-center justify-center text-white text-base font-bold shadow-lg pointer-events-none"
-          title="File location is broken — double-click to recover"
-        >
-          ✕
-        </div>
+        onMissingClick ? (
+          <button
+            onClick={onMissingClick}
+            className="absolute top-1 left-1 w-7 h-7 rounded-full bg-fvp-err border-2 border-white/80 hover:border-white hover:scale-110 transition flex items-center justify-center text-white text-base font-bold shadow-lg cursor-pointer"
+            title="File location is broken — click to try to find it again, or right-click → Search for broken filepath"
+          >
+            ✕
+          </button>
+        ) : (
+          <div
+            className="absolute top-1 left-1 w-7 h-7 rounded-full bg-fvp-err border-2 border-white/80 flex items-center justify-center text-white text-base font-bold shadow-lg pointer-events-none"
+            title="File location is broken"
+          >
+            ✕
+          </div>
+        )
       )}
     </div>
   );

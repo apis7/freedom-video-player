@@ -374,6 +374,7 @@ pub fn run() {
             commands::library::library_save_actual_resolution,
             commands::library::library_remove_identity_metadata,
             commands::library::library_generate_thumbnail_from_random_frame,
+            commands::library::library_try_refind_file,
             commands::library::library_set_watch_progress,
             commands::library::library_mark_watched,
             commands::library::library_reset_progress,

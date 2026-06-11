@@ -345,6 +345,8 @@ export const libraryIpc = {
     libInvoke<void>("remove_identity_metadata", { identityId }),
   generateThumbnailFromRandomFrame: (identityId: number) =>
     libInvoke<void>("generate_thumbnail_from_random_frame", { identityId }),
+  tryRefindFile: (fileId: number) =>
+    libInvoke<RefindResult>("try_refind_file", { fileId }),
   analytics: (
     days: number,
     tag: string | null,
@@ -474,6 +476,16 @@ export interface AnalyticsTagSlice {
   opens: number;
   distinct_files: number;
 }
+
+/** Tagged union returned by tryRefindFile — describes what happened
+ *  when the user clicked the red ✕ icon (or right-clicked → Search for
+ *  broken filepath) on a missing library row. */
+export type RefindResult =
+  | { kind: "StillPresent" }
+  | { kind: "Recovered" }
+  | { kind: "MergedInto"; target_file_id: number; target_path: string }
+  | { kind: "Rebound"; new_path: string }
+  | { kind: "StillMissing" };
 
 export interface AnalyticsSeriesProgress {
   series_id: number;

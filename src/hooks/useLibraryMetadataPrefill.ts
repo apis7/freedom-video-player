@@ -96,9 +96,11 @@ export function useLibraryMetadataPrefill(): void {
           if (s.imdbRating == null && id.imdb_rating != null) {
             patch.imdbRating = id.imdb_rating;
           }
-          if (!s.imdbUrl && id.imdb_id) {
-            patch.imdbUrl = `https://www.imdb.com/title/${id.imdb_id}/`;
-          }
+          // imdbUrl is INTENTIONALLY not auto-prefilled. The user uses
+          // that field for parental-advisory links (PluggedIn, Common
+          // Sense Media, IMDb's /parentalguide page, etc.) and prefers
+          // to fill it in manually rather than have it auto-populated
+          // with the generic /title/ page.
           // MAPS ratings: library stores filtered / unfiltered as
           // tier + summary pairs. Translate to the Creator-store
           // shape (MapsRating = { tier, summary }). Backend stores

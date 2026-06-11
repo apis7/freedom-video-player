@@ -778,6 +778,53 @@ export function LibraryMode() {
   // pending set drains; safety timeout prevents a stuck banner if the
   // backend silently drops an enrichment (e.g. TMDb 404 with no
   // identity-updated emission).
+  /** Run the "try to recover this broken link" backend heuristic and
+   *  toast the outcome. Same function is wired to the clickable red
+   *  ✕ icon AND the right-click "Search for broken filepath" menu
+   *  item so both entry points have identical behaviour. */
+  const tryRefindRow = useCallback(
+    (row: LibraryRow) => {
+      actlog("thumb-view", `try-refind file_id=${row.file.id}`);
+      void libraryIpc
+        .tryRefindFile(row.file.id)
+        .then((res) => {
+          if (res.kind === "StillPresent") {
+            showToast("The file is still where it should be.", "info", 2500);
+            void refreshItems();
+          } else if (res.kind === "Recovered") {
+            showToast("Found it — file is back.", "info", 3000);
+            void refreshItems();
+          } else if (res.kind === "MergedInto") {
+            showToast(
+              "The file had already been re-indexed at its new location — broken entry merged.",
+              "info",
+              4000,
+            );
+            void refreshItems();
+          } else if (res.kind === "Rebound") {
+            const basename = res.new_path.split(/[\\/]/).pop() ?? res.new_path;
+            showToast(
+              `Found it at a new path: ${basename}`,
+              "info",
+              4500,
+            );
+            void refreshItems();
+          } else {
+            showToast(
+              "Still missing — couldn't find this file anywhere under your watched folders.",
+              "warn",
+              4000,
+            );
+          }
+        })
+        .catch((err) => {
+          showToast(`Recovery failed: ${err}`, "error", 4000);
+        });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [refreshItems, showToast],
+  );
+
   const refreshManyMetadata = useCallback(
     async (
       identityIds: number[],
@@ -983,7 +1030,23 @@ export function LibraryMode() {
           ),
         ).then(refreshItems);
       };
+      // When the file is missing on disk, surface the recovery action
+      // at the TOP of the menu since it's the most important thing the
+      // user can do with this row right now.
+      const brokenLinkItems: MenuItem[] = row.file.is_missing
+        ? [
+            {
+              kind: "item" as const,
+              label: "🔎 Search for broken filepath",
+              title:
+                "Try to recover this broken link. Stats the original path, looks for an already-indexed copy at a new location (auto-merges), and walks watched folders for a same-named file.",
+              onClick: () => tryRefindRow(row),
+            },
+            { kind: "separator" as const },
+          ]
+        : [];
       return [
+        ...brokenLinkItems,
         {
           kind: "item",
           label: "Play",
@@ -1988,6 +2051,7 @@ export function LibraryMode() {
                   );
                   void refreshManyMetadata([row.identity.id]);
                 }}
+                onTryRefind={(row) => tryRefindRow(row)}
               />
             </div>
           ) : (

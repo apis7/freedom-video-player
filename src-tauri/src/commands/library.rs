@@ -3650,6 +3650,217 @@ pub fn library_set_poster_cache_cap(
 
 // ── Watch tracking ───────────────────────────────────────────────────
 
+/// Outcome of `library_try_refind_file`. Single discriminated union so
+/// the frontend can show different toasts depending on what happened.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind")]
+pub enum RefindResult {
+    /// Path still exists on disk; row was already marked present.
+    StillPresent,
+    /// Path still exists on disk; row was flagged missing — cleared.
+    Recovered,
+    /// Path is gone but another file row under the same identity is
+    /// present on disk. The broken row was DELETED silently so the
+    /// library shows the moved/renamed copy as the single entry.
+    MergedInto { target_path: String, target_file_id: i64 },
+    /// Path is gone, no sibling identity. Walked watched folders and
+    /// found a file with the same basename — re-pointed the row at
+    /// the new path.
+    Rebound { new_path: String },
+    /// Path is gone, no sibling, no basename match anywhere watched.
+    StillMissing,
+}
+
+/// "Try to recover this broken-link row." Called by the click-the-red-X
+/// button AND by the right-click "Search for broken filepath" menu
+/// item. Single command for both entry points so the UI doesn't have
+/// to keep track of which heuristic to run.
+///
+/// Algorithm:
+///   1. stat() the row's path. If it exists → clear is_missing →
+///      Recovered (or StillPresent if it was never missing).
+///   2. Look for another file row with the same identity_id AND
+///      is_missing = 0. If found, delete this row and return
+///      MergedInto — silently consolidating the duplicate the user
+///      created by moving the file.
+///   3. Walk every watched folder for files with the same basename
+///      (case-insensitive). If found exactly one match, rewrite the
+///      row's path to point at it → Rebound.
+///   4. Else StillMissing.
+///
+/// All branches use ONE SQLite write at most so the call returns
+/// quickly even on a slow SMB share. The watched-folder walk in step
+/// 3 can be slow; we cap recursion depth + skip recycle-bin folders
+/// the same way the indexer does.
+#[tauri::command]
+pub fn library_try_refind_file(
+    db: State<'_, LibraryDb>,
+    file_id: i64,
+) -> Result<RefindResult, String> {
+    // 1. Look up the row.
+    let (path, identity_id, was_missing): (String, i64, bool) = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path, identity_id, is_missing FROM library_files WHERE id = ?1",
+            params![file_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)? != 0,
+                ))
+            },
+        )
+        .map_err(|e| format!("lookup file_id {file_id}: {e}"))?
+    };
+    crate::log!(
+        "library",
+        "try_refind: file_id={file_id} path={path} (was_missing={was_missing})"
+    );
+    // Step 1: stat the original path.
+    if std::path::Path::new(&path).exists() {
+        if was_missing {
+            let conn = db.lock();
+            let _ = conn.execute(
+                "UPDATE library_files
+                    SET is_missing = 0, missing_since = NULL
+                  WHERE id = ?1",
+                params![file_id],
+            );
+            crate::log!(
+                "library",
+                "try_refind: file_id={file_id} RECOVERED (path now reachable)"
+            );
+            return Ok(RefindResult::Recovered);
+        }
+        return Ok(RefindResult::StillPresent);
+    }
+
+    // Step 2: look for a sibling row under the same identity that IS
+    // present. That's the signature of "user moved/renamed the file
+    // and the scanner picked up the new path as a separate row."
+    let sibling: Option<(i64, String)> = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT id, path FROM library_files
+              WHERE identity_id = ?1 AND id != ?2 AND is_missing = 0
+              ORDER BY id ASC LIMIT 1",
+            params![identity_id, file_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok()
+    };
+    if let Some((target_file_id, target_path)) = sibling {
+        let conn = db.lock();
+        let _ = conn.execute("DELETE FROM library_files WHERE id = ?1", params![file_id]);
+        crate::log!(
+            "library",
+            "try_refind: file_id={file_id} MERGED into sibling {target_file_id} at {target_path}"
+        );
+        return Ok(RefindResult::MergedInto {
+            target_file_id,
+            target_path,
+        });
+    }
+
+    // Step 3: walk watched folders for a same-basename match.
+    let needle = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase());
+    let Some(needle) = needle else {
+        return Ok(RefindResult::StillMissing);
+    };
+    let watched: Vec<String> = {
+        let conn = db.lock();
+        let mut stmt = conn
+            .prepare("SELECT path FROM watched_folders")
+            .map_err(|e| format!("prepare watched: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("query watched: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows.flatten() {
+            out.push(r);
+        }
+        out
+    };
+    let mut found_path: Option<String> = None;
+    'roots: for root in watched {
+        let root_pb = std::path::PathBuf::from(&root);
+        if !root_pb.is_dir() {
+            continue;
+        }
+        if let Some(p) = walk_for_basename(&root_pb, &needle, 0, 8) {
+            found_path = Some(p);
+            break 'roots;
+        }
+    }
+    if let Some(new_path) = found_path {
+        let conn = db.lock();
+        let _ = conn.execute(
+            "UPDATE library_files
+                SET path = ?1, is_missing = 0, missing_since = NULL
+              WHERE id = ?2",
+            params![&new_path, file_id],
+        );
+        crate::log!(
+            "library",
+            "try_refind: file_id={file_id} REBOUND to {new_path}"
+        );
+        return Ok(RefindResult::Rebound { new_path });
+    }
+    crate::log!(
+        "library",
+        "try_refind: file_id={file_id} STILL MISSING (no sibling, no basename match in any watched folder)"
+    );
+    Ok(RefindResult::StillMissing)
+}
+
+/// Recursive walk under `dir` looking for a file whose basename
+/// matches `needle_lower` (case-insensitive). Skips recycle bins the
+/// same way the indexer does. Bounded by `max_depth` so a circular
+/// junction can't trap the search.
+fn walk_for_basename(
+    dir: &std::path::Path,
+    needle_lower: &str,
+    depth: usize,
+    max_depth: usize,
+) -> Option<String> {
+    if depth >= max_depth {
+        return None;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if let Ok(ft) = e.file_type() {
+            if ft.is_dir() {
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if crate::library::index::path_is_in_recycle_bin(name) {
+                        continue;
+                    }
+                }
+                subdirs.push(p);
+                continue;
+            }
+        }
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            if name.to_lowercase() == needle_lower {
+                return Some(p.to_string_lossy().to_string());
+            }
+        }
+    }
+    for sub in subdirs {
+        if let Some(hit) = walk_for_basename(&sub, needle_lower, depth + 1, max_depth) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 /// Wipe TMDb-sourced + curated metadata from a library identity,
 /// leaving only the basics that can be derived directly from disk:
 ///   - movie_title is reset to the filename stem (from the first file

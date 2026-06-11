@@ -66,6 +66,10 @@ interface Props {
    *  badge that appears on the bottom-right of every thumbnail that
    *  has neither a custom thumbnail nor a cached poster. */
   onRefreshMetadata?: (row: LibraryRow) => void;
+  /** Click on the red ✕ broken-link badge — runs the re-find heuristic
+   *  (stat path → check for sibling identity → walk watched folders).
+   *  Caller toasts the result and triggers a list refresh. */
+  onTryRefind?: (row: LibraryRow) => void;
 }
 
 // Card width includes its outer gap; height = poster (228 = 152*1.5) +
@@ -99,6 +103,7 @@ export function LibraryThumbnailView({
   onPlay,
   onContextMenu,
   onRefreshMetadata,
+  onTryRefind,
 }: Props) {
   // Save + restore scroll offset by scope.
   //
@@ -334,6 +339,7 @@ export function LibraryThumbnailView({
     onPlay,
     onContextMenu,
     onRefreshMetadata,
+    onTryRefind,
   };
 
   // @dnd-kit-based reorderable grid for series/collection scopes.
@@ -417,6 +423,7 @@ interface CellData {
   onPlay: Props["onPlay"];
   onContextMenu: Props["onContextMenu"];
   onRefreshMetadata?: Props["onRefreshMetadata"];
+  onTryRefind?: Props["onTryRefind"];
 }
 
 function Cell({
@@ -460,6 +467,7 @@ function Cell({
         onPlay={data.onPlay}
         onContextMenu={data.onContextMenu}
         onRefreshMetadata={data.onRefreshMetadata}
+        onTryRefind={data.onTryRefind}
       />
     </div>
   );
@@ -486,6 +494,7 @@ function ThumbCard({
   onPlay,
   onContextMenu,
   onRefreshMetadata,
+  onTryRefind,
 }: {
   row: LibraryRow;
   selected: boolean;
@@ -511,6 +520,7 @@ function ThumbCard({
   onPlay: Props["onPlay"];
   onContextMenu: Props["onContextMenu"];
   onRefreshMetadata?: Props["onRefreshMetadata"];
+  onTryRefind?: Props["onTryRefind"];
 }) {
   const id = row.identity;
   const f = row.file;
@@ -649,6 +659,14 @@ function ThumbCard({
           alt={title}
           isMissing={!synthSeries && row.file.is_missing}
           cacheKey={id.last_updated_at}
+          onMissingClick={
+            onTryRefind && !synthSeries
+              ? (e) => {
+                  e.stopPropagation();
+                  onTryRefind(row);
+                }
+              : undefined
+          }
         />
         <div className="absolute left-0 right-0 bottom-0 px-2 py-1 bg-gradient-to-t from-black/85 via-black/60 to-transparent rounded-b pointer-events-none">
           <div className="text-[11px] font-medium text-white leading-tight line-clamp-2">

@@ -3938,20 +3938,182 @@ pub fn library_remove_identity_metadata(
 
 /// Capture a frame from a random point in the video (between 25% and
 /// 75% of total duration) and save it as the identity's album art.
-/// V1 STUB: the full libmpv-based frame grab pipeline will land in
-/// the next session; right now the command logs the intent and
-/// returns a clear "not yet implemented" error so the UI can show a
-/// toast.
+/// Uses a SEPARATE one-shot libmpv instance so the user's main
+/// playback (if any) is completely undisturbed. Each invocation picks
+/// a fresh random point — re-selecting the menu item produces a
+/// different frame.
+///
+/// Pipeline:
+///   1. Pick the first present file under the identity.
+///   2. spawn_blocking off the main thread:
+///      a. Init a private libmpv with vo=null + ao=null (no audio /
+///         video output; we just decode).
+///      b. loadfile + poll duration (cap at 8s for slow SMB sources).
+///      c. Seek to start + frac*duration where frac ∈ [0.25, 0.75].
+///         Use exact seek so we land on a true keyframe-decoded image
+///         rather than the previous keyframe (avoids "always grabs
+///         the chapter break frame" syndrome).
+///      d. Wait for the seek to complete (poll time-pos until it
+///         settles near the target — bounded at 4s).
+///      e. screenshot-to-file <tempfile> video.
+///   3. Hand the temp file to set_custom_thumbnail_core which COPIES
+///      it next to every video file under the identity (so the
+///      thumb travels with the media) and updates the identity row's
+///      custom_thumbnail_path to point at the first copy.
+///   4. Delete the original temp grab — set_custom_thumbnail_core
+///      already made its own copies.
 #[tauri::command]
-pub fn library_generate_thumbnail_from_random_frame(
-    _db: State<'_, LibraryDb>,
+pub async fn library_generate_thumbnail_from_random_frame(
+    db: State<'_, LibraryDb>,
+    app: tauri::AppHandle,
     identity_id: i64,
 ) -> Result<(), String> {
+    use tauri::Manager;
+    // Snapshot the first present file under this identity.
+    let media_path: String = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path FROM library_files
+             WHERE identity_id = ?1 AND is_missing = 0
+             ORDER BY id ASC LIMIT 1",
+            params![identity_id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| format!("no present file under identity {identity_id}: {e}"))?
+    };
     crate::log!(
         "library",
-        "generate_thumbnail_from_random_frame: identity {identity_id} — NOT YET IMPLEMENTED (full libmpv pipeline coming next session)"
+        "generate_thumbnail: starting for identity {identity_id}, source {media_path}"
     );
-    Err("Random-frame album-art generation is coming in the next update. The menu item is wired and the pipeline ships next session.".into())
+
+    // Resolve the output directory ahead of the blocking thread (Tauri
+    // can't be called across a thread::spawn cleanly).
+    let cache_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?
+        .join("thumb-grabs");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("mkdir cache: {e}"))?;
+    let ts = chrono::Local::now().format("%Y%m%d%H%M%S%3f").to_string();
+    let temp_path = cache_dir.join(format!("grab-{identity_id}-{ts}.jpg"));
+    let temp_path_str = temp_path.to_string_lossy().to_string();
+
+    // Frame grab runs on a blocking thread so the libmpv handle never
+    // touches the Tauri async runtime. Same pattern fingerprint::compute
+    // and the resolution-probe path use.
+    let media_path_inner = media_path.clone();
+    let temp_path_inner = temp_path_str.clone();
+    let result: Result<f64, String> = tauri::async_runtime::spawn_blocking(move || {
+        use libmpv2::Mpv;
+        let mpv = Mpv::with_initializer(|init| {
+            init.set_option("vo", "null")?;
+            init.set_option("ao", "null")?;
+            init.set_option("pause", true)?;
+            init.set_option("hr-seek", "yes")?;
+            Ok(())
+        })
+        .map_err(|e| format!("libmpv init: {e:?}"))?;
+        let _ = mpv.set_property("msg-level", "all=fatal");
+        let handle = mpv.ctx.as_ptr();
+
+        // loadfile via raw FFI (libmpv2 v4 doesn't expose a high-level
+        // command helper; same approach used by the resolution-probe).
+        fn mpv_run(handle: *mut libmpv2_sys::mpv_handle, args: &[&str]) -> Result<(), String> {
+            let cstrs = args
+                .iter()
+                .map(|s| std::ffi::CString::new(*s))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("CString: {e}"))?;
+            let mut ptrs: Vec<*const std::os::raw::c_char> =
+                cstrs.iter().map(|s| s.as_ptr()).collect();
+            ptrs.push(std::ptr::null());
+            let code = unsafe { libmpv2_sys::mpv_command(handle, ptrs.as_ptr() as *mut _) };
+            if code != 0 {
+                return Err(format!("mpv command {args:?} returned {code}"));
+            }
+            Ok(())
+        }
+
+        mpv_run(handle, &["loadfile", &media_path_inner])?;
+        // Poll for duration. Cap 8s for slow SMB.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut dur: f64 = 0.0;
+        while std::time::Instant::now() < deadline {
+            if dur <= 0.0 {
+                dur = mpv.get_property::<f64>("duration").unwrap_or(0.0);
+            }
+            if dur > 0.0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        if dur <= 0.0 {
+            return Err("probe: could not determine duration within 8s".into());
+        }
+        // Random point in [25%, 75%]. Each invocation uses the
+        // sub-nanosecond clock + Knuth multiplicative mix so consecutive
+        // re-rolls don't land within milliseconds of each other.
+        let frac = 0.25 + (rand_unit() * 0.50);
+        let seek_target = dur * frac;
+        crate::log!(
+            "library",
+            "generate_thumbnail: duration={dur:.1}s, seeking to {seek_target:.1}s ({:.0}%)",
+            frac * 100.0
+        );
+        mpv_run(
+            handle,
+            &["seek", &format!("{seek_target:.3}"), "absolute+exact"],
+        )?;
+        // Wait for the seek to settle. time-pos should land within
+        // ~250ms of the target on a healthy decoder; cap at 4s.
+        let seek_deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while std::time::Instant::now() < seek_deadline {
+            let pos = mpv.get_property::<f64>("time-pos").unwrap_or(-1.0);
+            if pos > 0.0 && (pos - seek_target).abs() < 0.5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+        // screenshot-to-file <path> video. The 3rd arg "video" grabs the
+        // post-filter decoded frame (no OSD, no subs); works with
+        // vo=null because it reads the decoded buffer, not the
+        // rendered output.
+        mpv_run(handle, &["screenshot-to-file", &temp_path_inner, "video"])?;
+        // Give the IO a moment to flush the JPEG to disk.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        Ok(seek_target)
+    })
+    .await
+    .map_err(|e| format!("frame-grab task join: {e}"))?;
+    let seek_target = result?;
+    if !temp_path.exists() {
+        return Err(format!(
+            "screenshot wasn't written to {} — libmpv accepted the command but produced no file",
+            temp_path.display()
+        ));
+    }
+    // Hand off to set_custom_thumbnail_core — copies the grab next to
+    // every video file under the identity (.fvp-thumb.<ext>) AND
+    // updates the identity row's custom_thumbnail_path.
+    set_custom_thumbnail_core(&db, identity_id, Some(temp_path_str.clone()))?;
+    let _ = std::fs::remove_file(&temp_path);
+    crate::log!(
+        "library",
+        "generate_thumbnail: identity {identity_id} set from random frame at {seek_target:.1}s"
+    );
+    Ok(())
+}
+
+fn rand_unit() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let mixed = (now.subsec_nanos() as u64)
+        .wrapping_mul(2654435761)
+        .wrapping_add(now.as_secs())
+        .wrapping_mul(0x9E3779B97F4A7C15);
+    (mixed as f64 / u64::MAX as f64).fract().abs()
 }
 
 /// Store the actual probed pixel dimensions of a file. Called by

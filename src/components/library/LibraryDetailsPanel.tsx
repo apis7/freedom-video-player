@@ -523,14 +523,25 @@ function SingleRowPanel({
   );
 
   async function generateThumbFromRandomFrame() {
+    showToast("Grabbing a random frame from the video…", "info", 1500);
     try {
       await libraryIpc.generateThumbnailFromRandomFrame(id.id);
-      showToast("Album art generated from a random frame.", "info", 3000);
+      // Bump the global epoch so EVERY poster grid cell that points at
+      // this identity picks up the new image — solves the "saved but
+      // still showing the old one" gap.
+      useAppStore.getState().bumpThumbnailRefreshEpoch();
+      setTimeout(
+        () => useAppStore.getState().bumpThumbnailRefreshEpoch(),
+        500,
+      );
+      showToast(
+        "Album art generated from a random frame. Re-select the menu item to roll a new one.",
+        "info",
+        4000,
+      );
       onRefreshList();
     } catch (err) {
-      // V1 stub returns an explanatory error; surface it as info, not
-      // error, so the user knows the feature exists and is coming.
-      showToast(`${err}`, "info", 5000);
+      showToast(`${err}`, "error", 5000);
     }
   }
 }

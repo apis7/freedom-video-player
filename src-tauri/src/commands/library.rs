@@ -395,6 +395,10 @@ pub fn library_set_folder_scan_on_startup(
 #[tauri::command]
 pub fn library_rescan_all() -> Result<(), String> {
     crate::log!("library", "rescan_all queued");
+    // User-driven Rescan counts as activity even if it finds nothing —
+    // the user is paying attention to this folder right now, so the
+    // cadence should snap back to Hot.
+    orchestrator::mark_activity_external("user invoked Rescan all");
     orchestrator::enqueue_scan_all();
     Ok(())
 }
@@ -427,6 +431,7 @@ pub fn library_rescan_folder(
         )
         .map_err(|e| format!("folder lookup: {e}"))?;
     drop(conn);
+    orchestrator::mark_activity_external("user invoked Rescan folder");
     orchestrator::enqueue_scan_folder(folder_id, PathBuf::from(path), recursive != 0);
     Ok(())
 }

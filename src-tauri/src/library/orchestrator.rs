@@ -130,6 +130,89 @@ struct State {
     /// True when a `ScanAll` job is queued OR running. Same idea: a
     /// second ScanAll while one is in flight is a no-op.
     scan_all_in_flight: bool,
+    /// Wall time of the last detected "activity" — i.e., the last
+    /// thing that suggests the library is in flux:
+    ///   - a scan that found any dirty files or dirty dirs
+    ///   - a notify event that passed the self-write filter
+    ///   - a user-driven Rescan / Add folder
+    /// Drives the cadence ladder (see CadenceRung). Initialised to
+    /// "now" on boot so the first 15 minutes after launch stay Hot.
+    /// Surviving across restarts via library_settings would be a nice
+    /// future enhancement; for now we accept the post-boot warmup.
+    last_activity_at: Option<Instant>,
+    /// Wall time of the last periodic ScanAll the cadence heartbeat
+    /// fired. Distinct from `last_scan_completed_at_for_folder` because
+    /// the latter is per-folder and bookkeeps notify cooldowns.
+    last_periodic_scan_fired_at: Option<Instant>,
+    /// Last logged rung label, so the heartbeat only logs transitions
+    /// instead of spamming "still warm" once a minute.
+    last_logged_rung: Option<CadenceRung>,
+}
+
+/// Three-rung cadence ladder. The rung is a pure function of
+/// "elapsed time since the last detected activity" — no scan-count
+/// state machine, no flapping. Empirically the elapsed-time form
+/// matches the user's "3 quiet scans then demote" mental model
+/// because each rung's threshold equals exactly 3× the previous
+/// rung's interval (Hot 5min × 3 = 15min Warm threshold; Warm 1hr × 3 =
+/// 3hr Cold threshold).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CadenceRung {
+    Hot,
+    Warm,
+    Cold,
+}
+
+impl CadenceRung {
+    fn interval(&self) -> Duration {
+        match self {
+            CadenceRung::Hot => Duration::from_secs(5 * 60),
+            CadenceRung::Warm => Duration::from_secs(60 * 60),
+            CadenceRung::Cold => Duration::from_secs(24 * 60 * 60),
+        }
+    }
+    fn label(&self) -> &'static str {
+        match self {
+            CadenceRung::Hot => "hot (5min)",
+            CadenceRung::Warm => "warm (1hr)",
+            CadenceRung::Cold => "cold (24hr)",
+        }
+    }
+}
+
+fn current_rung(elapsed_since_activity: Duration) -> CadenceRung {
+    // Thresholds picked so that "3 quiet ticks" at the current rung
+    // tips into the next one (5min × 3 = 15min → Warm; 1hr × 3 = 3hr →
+    // Cold).
+    if elapsed_since_activity < Duration::from_secs(15 * 60) {
+        CadenceRung::Hot
+    } else if elapsed_since_activity < Duration::from_secs(3 * 60 * 60) {
+        CadenceRung::Warm
+    } else {
+        CadenceRung::Cold
+    }
+}
+
+/// Bump the "last activity" timestamp. Called from every place that
+/// counts as activity (real notify event, scan that found dirty
+/// content, manual Rescan, new folder added). Cheap; no I/O.
+fn mark_activity(reason: &str) {
+    let Some(o) = ORCHESTRATOR.get() else { return };
+    let mut s = o.state.lock();
+    s.last_activity_at = Some(Instant::now());
+    crate::log!(
+        "library:cadence",
+        "activity recorded: {reason} → rung resets to hot (5min)"
+    );
+    // Force the rung-transition log next time the heartbeat ticks.
+    s.last_logged_rung = None;
+}
+
+/// Public wrapper around `mark_activity` for use by Tauri commands
+/// (user actions outside this module). The crate-internal callers
+/// use `mark_activity` directly.
+pub fn mark_activity_external(reason: &str) {
+    mark_activity(reason);
 }
 
 struct Orchestrator {
@@ -170,6 +253,19 @@ pub fn init(app: AppHandle, db: LibraryDb) {
         }
     });
     let _ = ORCHESTRATOR.set(Orchestrator { job_tx: tx, state });
+    // Seed the activity ledger with "now" so the first 15 minutes
+    // after launch sit on the Hot rung — gives the user time to drop
+    // files in / hit Rescan without waiting an hour for the cadence
+    // to notice them.
+    if let Some(o) = ORCHESTRATOR.get() {
+        o.state.lock().last_activity_at = Some(Instant::now());
+    }
+    // Cadence heartbeat — wakes once per minute, computes the current
+    // rung from time-since-activity, and fires a periodic ScanAll
+    // when the rung's interval has elapsed since the last periodic
+    // fire. Decoupled from notify so it can do its safety-net job
+    // even when notify is unreliable (some SMB servers).
+    spawn_cadence_heartbeat();
     // Re-attach watchers for every folder already in the DB.
     reattach_all_watchers(&db, &app);
     // Boot pass — only scans folders flagged scan_on_startup=1. Others
@@ -179,6 +275,70 @@ pub fn init(app: AppHandle, db: LibraryDb) {
         .unwrap()
         .job_tx
         .send(Job::ScanAll { startup_only: true });
+}
+
+fn spawn_cadence_heartbeat() {
+    thread::spawn(|| {
+        // Short initial sleep so the boot ScanAll fires first and we
+        // don't race it.
+        thread::sleep(Duration::from_secs(60));
+        loop {
+            cadence_tick();
+            thread::sleep(Duration::from_secs(60));
+        }
+    });
+}
+
+fn cadence_tick() {
+    let Some(o) = ORCHESTRATOR.get() else { return };
+    let (rung, elapsed_since_activity, elapsed_since_fire, was_logged) = {
+        let s = o.state.lock();
+        let now = Instant::now();
+        let last_activity = s.last_activity_at.unwrap_or(now);
+        let elapsed_activity = now.saturating_duration_since(last_activity);
+        let elapsed_fire = s
+            .last_periodic_scan_fired_at
+            .map(|t| now.saturating_duration_since(t))
+            .unwrap_or(Duration::from_secs(u64::MAX / 2));
+        let rung = current_rung(elapsed_activity);
+        let was_logged = s.last_logged_rung == Some(rung);
+        (rung, elapsed_activity, elapsed_fire, was_logged)
+    };
+
+    if !was_logged {
+        crate::log!(
+            "library:cadence",
+            "rung={} (last activity {} ago)",
+            rung.label(),
+            human_dur(elapsed_since_activity)
+        );
+        o.state.lock().last_logged_rung = Some(rung);
+    }
+
+    if elapsed_since_fire < rung.interval() {
+        return;
+    }
+    crate::log!(
+        "library:cadence",
+        "interval elapsed ({} >= {}) — firing periodic ScanAll",
+        human_dur(elapsed_since_fire),
+        human_dur(rung.interval())
+    );
+    o.state.lock().last_periodic_scan_fired_at = Some(Instant::now());
+    enqueue_scan_all();
+}
+
+fn human_dur(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{:.1}min", s as f64 / 60.0)
+    } else if s < 86400 {
+        format!("{:.1}hr", s as f64 / 3600.0)
+    } else {
+        format!("{:.1}d", s as f64 / 86400.0)
+    }
 }
 
 /// Queue a re-scan of one folder. Coalesces: if a scan for this
@@ -203,6 +363,13 @@ pub fn enqueue_scan_folder(folder_id: i64, path: PathBuf, recursive: bool) {
 /// Queue a re-scan of every watched folder. Manual command path —
 /// always scans every folder regardless of scan_on_startup. Coalesces
 /// the same way: a second ScanAll while one is running is a no-op.
+///
+/// NB this is the path used by BOTH user-driven Rescan AND the cadence
+/// heartbeat. The cadence heartbeat does NOT mark activity — that
+/// would create a self-sustaining loop (heartbeat fires scan → marks
+/// activity → stays Hot → heartbeat fires scan again every 5 min
+/// forever). Only NON-cadence callers (user actions, new folders)
+/// should call mark_activity around this.
 pub fn enqueue_scan_all() {
     let Some(o) = ORCHESTRATOR.get() else { return };
     {
@@ -278,8 +445,24 @@ pub fn watch_folder(folder_id: i64, path: PathBuf, app: AppHandle) -> Result<(),
             // ignoring events on them is safe.
             let any_self_write = ev.paths.iter().any(|p| is_self_write(p));
             if any_self_write {
+                // Defensive observability: when a notify event lands on
+                // one of FVP's own bookkeeping files (sync mirror,
+                // snapshot, etc.) we drop it loudly so we can verify
+                // the filter is actually doing its job in user logs.
+                // Throttled by the notify debounce + the SMB driver,
+                // so this isn't a flood.
+                if let Some(first) = ev.paths.first() {
+                    crate::log!(
+                        "library",
+                        "watcher: ignored self-write event on {} (would have triggered rescan)",
+                        first.display()
+                    );
+                }
                 return;
             }
+            // Real fs change passed the filter — record activity so the
+            // cadence ladder snaps back to Hot.
+            mark_activity("notify event passed filter");
             let now = Instant::now();
             {
                 let mut s = state_for_cb.lock();
@@ -572,6 +755,18 @@ fn run_scan_folder(
     if let Some(o) = ORCHESTRATOR.get() {
         o.state.lock().last_scan_completed_at.insert(folder_id, Instant::now());
     }
+    // Cadence-ladder feedback: if this scan actually found dirty
+    // content (new files or dirs that needed indexing), that's
+    // activity → reset to Hot rung. Quiet scans deliberately do NOT
+    // reset the ledger, so a string of no-op periodic scans naturally
+    // decays through Warm to Cold.
+    let any_dirty = dirty_dir_count > 0 || total > 0;
+    if any_dirty {
+        mark_activity(&format!(
+            "scan folder {folder_id} found {} dirty dir(s) + {} dirty file(s)",
+            dirty_dir_count, total
+        ));
+    }
 }
 
 fn run_scan_all(app: &AppHandle, db: &LibraryDb, startup_only: bool) {
@@ -634,6 +829,7 @@ pub fn on_folder_added(folder_id: i64, path: PathBuf, recursive: bool, app: AppH
     if let Err(e) = watch_folder(folder_id, path.clone(), app) {
         crate::log!("library", "watch new folder failed: {e}");
     }
+    mark_activity("user added a watched folder");
     enqueue_scan_folder(folder_id, path, recursive);
 }
 
@@ -724,6 +920,64 @@ fn bulk_mark_present_in_clean_dirs(
         }
     }
     total
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::{current_rung, human_dur, CadenceRung};
+    use std::time::Duration;
+
+    #[test]
+    fn rung_thresholds() {
+        assert_eq!(current_rung(Duration::from_secs(0)), CadenceRung::Hot);
+        assert_eq!(current_rung(Duration::from_secs(60)), CadenceRung::Hot);
+        // Just under 15 min → still Hot
+        assert_eq!(
+            current_rung(Duration::from_secs(15 * 60 - 1)),
+            CadenceRung::Hot
+        );
+        // 15 min → Warm
+        assert_eq!(current_rung(Duration::from_secs(15 * 60)), CadenceRung::Warm);
+        assert_eq!(current_rung(Duration::from_secs(60 * 60)), CadenceRung::Warm);
+        // Just under 3 hr → still Warm
+        assert_eq!(
+            current_rung(Duration::from_secs(3 * 60 * 60 - 1)),
+            CadenceRung::Warm
+        );
+        // 3 hr → Cold
+        assert_eq!(
+            current_rung(Duration::from_secs(3 * 60 * 60)),
+            CadenceRung::Cold
+        );
+        // a week → still Cold (no further demotion)
+        assert_eq!(
+            current_rung(Duration::from_secs(7 * 24 * 60 * 60)),
+            CadenceRung::Cold
+        );
+    }
+
+    #[test]
+    fn rung_intervals_match_user_pitch() {
+        // 3 quiet scans at each rung's interval should land in the
+        // next rung's threshold band — confirms the "3 quiet scans
+        // then demote" mental model.
+        assert_eq!(
+            CadenceRung::Hot.interval() * 3,
+            Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            CadenceRung::Warm.interval() * 3,
+            Duration::from_secs(3 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn human_dur_formats() {
+        assert_eq!(human_dur(Duration::from_secs(5)), "5s");
+        assert_eq!(human_dur(Duration::from_secs(150)), "2.5min");
+        assert_eq!(human_dur(Duration::from_secs(7200)), "2.0hr");
+        assert_eq!(human_dur(Duration::from_secs(86400 * 3)), "3.0d");
+    }
 }
 
 #[cfg(test)]

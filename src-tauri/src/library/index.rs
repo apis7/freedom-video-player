@@ -290,24 +290,70 @@ pub fn index_file(
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
-            if existing_for_identity > 0 {
-                if missing_for_identity > 0 {
+            // MOVE-AUTO-REBIND: when the identity already has an
+            // is_missing row, that row almost certainly points at the
+            // file's old path. Rebinding in place is the correct move
+            // - it preserves the user's watch_progress / watched /
+            // tags / collection memberships / drift_warning that live
+            // on that row, AND prevents the "ghost broken thumbnail
+            // comes back every launch" loop the user reported. Without
+            // this the indexer kept logging MOVE-LIKELY and inserting
+            // a new sibling row each scan; the broken row only went
+            // away when the user manually right-clicked it and used
+            // 'Search for broken filepath'.
+            if existing_for_identity > 0 && missing_for_identity > 0 {
+                let target_id: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM library_files
+                          WHERE identity_id = ?1 AND is_missing = 1
+                          ORDER BY id ASC LIMIT 1",
+                        params![identity_id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if let Some(target) = target_id {
+                    conn.execute(
+                        "UPDATE library_files SET
+                            path = ?1,
+                            watched_folder_id = ?2,
+                            size_bytes = ?3,
+                            modified_unix = ?4,
+                            is_missing = 0,
+                            missing_since = NULL
+                          WHERE id = ?5",
+                        params![path_str, folder_id, size, modified_unix, target],
+                    )
+                    .map_err(|e| format!("rebind move: {e}"))?;
+                    // Sweep any other is_missing rows for the same
+                    // identity (rare; only happens if a file got moved
+                    // more than once between scans). The one we just
+                    // rebound to the new path stays.
+                    let swept = conn
+                        .execute(
+                            "DELETE FROM library_files
+                              WHERE identity_id = ?1
+                                AND is_missing = 1
+                                AND id != ?2",
+                            params![identity_id, target],
+                        )
+                        .unwrap_or(0);
                     crate::log!(
                         "library:scan",
-                        "MOVE-LIKELY: inserting new file row at \"{}\" for identity {identity_id} \
-                         which has {existing_for_identity} existing row(s) (of which {missing_for_identity} flagged is_missing). \
-                         The is_missing row(s) likely point at the file's previous path.",
+                        "MOVE-AUTO-REBIND: file_id={target} identity={identity_id} \
+                         rebound to \"{}\" (swept {swept} sibling is_missing row(s))",
                         path_str
                     );
-                } else {
-                    crate::log!(
-                        "library:scan",
-                        "DUP-ROW: inserting new file row at \"{}\" for identity {identity_id} \
-                         which already has {existing_for_identity} existing row(s) (all present on disk). \
-                         User has the file at multiple paths.",
-                        path_str
-                    );
+                    return Ok((target, identity_id, was_new_identity));
                 }
+            }
+            if existing_for_identity > 0 && missing_for_identity == 0 {
+                crate::log!(
+                    "library:scan",
+                    "DUP-ROW: inserting new file row at \"{}\" for identity {identity_id} \
+                     which already has {existing_for_identity} existing row(s) (all present on disk). \
+                     User has the file at multiple paths.",
+                    path_str
+                );
             }
             conn.execute(
                 "INSERT INTO library_files (

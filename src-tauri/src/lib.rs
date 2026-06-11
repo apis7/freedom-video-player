@@ -220,6 +220,41 @@ pub fn run() {
                                     }
                                 }
                             });
+                            // Move-duplicate purge: an older indexer (before
+                            // the MOVE-AUTO-REBIND fix) used to leave the
+                            // old is_missing row alongside the new row when
+                            // it detected a moved file. The user then had to
+                            // right-click the broken thumbnail every launch
+                            // to merge it. Those stale rows live inside the
+                            // restored sync DB, so they reappear after each
+                            // pull. Sweep them out unconditionally on open:
+                            // for any identity that has BOTH a present row
+                            // AND an is_missing row, the is_missing row is
+                            // a leftover and the present row already owns
+                            // the user's watch_progress / tags / etc.
+                            library::boot::phase("move_duplicate_purge", || {
+                                let conn = db.lock();
+                                match conn.execute(
+                                    "DELETE FROM library_files
+                                      WHERE is_missing = 1
+                                        AND identity_id IN (
+                                          SELECT identity_id FROM library_files
+                                            WHERE is_missing = 0
+                                            GROUP BY identity_id
+                                        )",
+                                    [],
+                                ) {
+                                    Ok(n) if n > 0 => log!(
+                                        "library",
+                                        "move-duplicate purge: removed {n} stale is_missing row(s) whose identity already has a present row (legacy MOVE-LIKELY leftovers)"
+                                    ),
+                                    Ok(_) => {}
+                                    Err(e) => log!(
+                                        "library",
+                                        "move-duplicate purge: DELETE failed: {e}"
+                                    ),
+                                }
+                            });
                             // Spin up the scan orchestrator. The synchronous
                             // part is just channel + worker-thread + cadence
                             // heartbeat spawn (~<5ms); the SMB-heavy

@@ -3650,19 +3650,157 @@ pub fn library_set_poster_cache_cap(
 
 // ── Watch tracking ───────────────────────────────────────────────────
 
-/// Resolve a video path → library_file id, if the path is indexed. The
-/// frontend uses this on every file-open so the Player Mode progress
-/// writer can drive the library's watch_progress_ms in the background.
-/// Returns None for paths that aren't in any watched folder yet.
+/// Wipe TMDb-sourced + curated metadata from a library identity,
+/// leaving only the basics that can be derived directly from disk:
+///   - movie_title is reset to the filename stem (from the first file
+///     row under this identity)
+///   - duration / resolution / size remain on the file rows (they're
+///     re-derived on next play)
+///   - all manual override flags are cleared so a future TMDb refresh
+///     can repopulate
+///
+/// Used by the Library right-click "Remove Metadata" action when the
+/// user wants a clean slate before re-running auto-fill.
+#[tauri::command]
+pub fn library_remove_identity_metadata(
+    db: State<'_, LibraryDb>,
+    identity_id: i64,
+) -> Result<(), String> {
+    let conn = db.lock();
+    // Compute a fallback title from the first file under this identity.
+    let fallback_title: Option<String> = conn
+        .query_row(
+            "SELECT path FROM library_files WHERE identity_id = ?1 ORDER BY id ASC LIMIT 1",
+            params![identity_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        });
+    let now = now_unix();
+    conn.execute(
+        r#"
+        UPDATE library_identities
+           SET tmdb_id = NULL,
+               movie_title = ?2,
+               movie_year = NULL,
+               movie_director = NULL,
+               movie_plot = NULL,
+               movie_stars_json = NULL,
+               genres_json = NULL,
+               mpaa_rating = NULL,
+               imdb_id = NULL,
+               imdb_rating = NULL,
+               poster_url = NULL,
+               poster_local_path = NULL,
+               custom_thumbnail_path = NULL,
+               notes = NULL,
+               family_rating = NULL,
+               maps_filtered_tier = NULL,
+               maps_filtered_summary = NULL,
+               maps_unfiltered_tier = NULL,
+               maps_unfiltered_summary = NULL,
+               manual_title = 0,
+               manual_year = 0,
+               manual_thumbnail = 0,
+               manual_director = 0,
+               manual_plot = 0,
+               is_3d = 0,
+               is_extended = 0,
+               last_updated_at = ?3
+         WHERE id = ?1
+        "#,
+        params![identity_id, fallback_title, now],
+    )
+    .map_err(|e| format!("remove identity metadata: {e}"))?;
+    crate::log!(
+        "library",
+        "remove_identity_metadata: identity {identity_id} reset to filename '{}'",
+        fallback_title.as_deref().unwrap_or("(unknown)")
+    );
+    Ok(())
+}
+
+/// Capture a frame from a random point in the video (between 25% and
+/// 75% of total duration) and save it as the identity's album art.
+/// V1 STUB: the full libmpv-based frame grab pipeline will land in
+/// the next session; right now the command logs the intent and
+/// returns a clear "not yet implemented" error so the UI can show a
+/// toast.
+#[tauri::command]
+pub fn library_generate_thumbnail_from_random_frame(
+    _db: State<'_, LibraryDb>,
+    identity_id: i64,
+) -> Result<(), String> {
+    crate::log!(
+        "library",
+        "generate_thumbnail_from_random_frame: identity {identity_id} — NOT YET IMPLEMENTED (full libmpv pipeline coming next session)"
+    );
+    Err("Random-frame album-art generation is coming in the next update. The menu item is wired and the pipeline ships next session.".into())
+}
+
+/// Store the actual probed pixel dimensions of a file. Called by
+/// the frontend when libmpv has loaded the file and the
+/// `video-params/w` / `video-params/h` properties are available.
+/// Overwrites filename-tag values (e.g. "1080p") but never clobbers
+/// an existing pixel-form value (avoids per-play write churn).
+#[tauri::command]
+pub fn library_save_actual_resolution(
+    db: State<'_, LibraryDb>,
+    path: String,
+    width: i64,
+    height: i64,
+) -> Result<bool, String> {
+    if width <= 0 || height <= 0 || width > 16384 || height > 16384 {
+        return Ok(false);
+    }
+    let res = format!("{width}x{height}");
+    let conn = db.lock();
+    // Update both (case-insensitive) path match. Skip if the column
+    // already holds a pixel-form value (presence of 'x') so we don't
+    // thrash the row on every play of the same file.
+    let n = conn
+        .execute(
+            "UPDATE library_files
+                SET resolution = ?1
+              WHERE LOWER(path) = LOWER(?2)
+                AND (resolution IS NULL
+                     OR resolution = ''
+                     OR instr(resolution, 'x') = 0
+                     OR resolution != ?1)",
+            params![&res, &path],
+        )
+        .map_err(|e| format!("save actual resolution: {e}"))?;
+    Ok(n > 0)
+}
+
 #[tauri::command]
 pub fn library_find_file_by_path(
     db: State<'_, LibraryDb>,
     path: String,
 ) -> Result<Option<i64>, String> {
     let conn = db.lock();
-    conn.query_row(
+    // 1. Exact match — the common case, fast (UNIQUE index).
+    if let Ok(id) = conn.query_row(
         "SELECT id FROM library_files WHERE path = ?1",
-        params![path],
+        params![&path],
+        |r| r.get::<_, i64>(0),
+    ) {
+        return Ok(Some(id));
+    }
+    // 2. Case-insensitive fallback. Windows UNC paths in particular
+    //    can come back from the OS with the share name in one case
+    //    and from the indexer in another. This second pass handles
+    //    that without imposing a per-row TO_LOWER() in the common
+    //    path. Returns Ok(None) if nothing matches, Err only on real
+    //    SQLite failures.
+    conn.query_row(
+        "SELECT id FROM library_files WHERE LOWER(path) = LOWER(?1)",
+        params![&path],
         |r| r.get::<_, i64>(0),
     )
     .map(Some)

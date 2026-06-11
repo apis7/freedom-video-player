@@ -339,6 +339,12 @@ export const libraryIpc = {
     }),
   setSeriesHasSeasons: (seriesId: number, hasSeasons: boolean) =>
     libInvoke<void>("set_series_has_seasons", { seriesId, hasSeasons }),
+  saveActualResolution: (path: string, width: number, height: number) =>
+    libInvoke<boolean>("save_actual_resolution", { path, width, height }),
+  removeIdentityMetadata: (identityId: number) =>
+    libInvoke<void>("remove_identity_metadata", { identityId }),
+  generateThumbnailFromRandomFrame: (identityId: number) =>
+    libInvoke<void>("generate_thumbnail_from_random_frame", { identityId }),
   analytics: (
     days: number,
     tag: string | null,

@@ -32,8 +32,21 @@ export function useLibraryMetadataPrefill(): void {
       prefilledFor.current = null;
       return;
     }
-    if (mode !== "creator") return;
-    if (prefilledFor.current === currentFile) return;
+    if (mode !== "creator") {
+      console.log(
+        `[fvp:creator] metadata-prefill: skip (mode=${mode}, need creator)`,
+      );
+      return;
+    }
+    if (prefilledFor.current === currentFile) {
+      console.log(
+        "[fvp:creator] metadata-prefill: skip (already prefilled for this file)",
+      );
+      return;
+    }
+    console.log(
+      `[fvp:creator] metadata-prefill: scheduling prefill for ${currentFile}`,
+    );
 
     // Delay slightly so the .free autoload (which runs straight from
     // openVideoPath's profile-resolver) has a chance to fill fields
@@ -43,11 +56,24 @@ export function useLibraryMetadataPrefill(): void {
       void (async () => {
         try {
           const fileId = await libraryIpc.findFileByPath(currentFile);
-          if (fileId == null) return;
+          if (fileId == null) {
+            console.log(
+              `[fvp:creator] metadata-prefill: no library row found for ${currentFile} — abandoning`,
+            );
+            return;
+          }
           if (useAppStore.getState().currentFile !== currentFile) return;
           const row = await libraryIpc.getRow(fileId);
-          if (!row) return;
+          if (!row) {
+            console.log(
+              `[fvp:creator] metadata-prefill: getRow returned null for file_id=${fileId}`,
+            );
+            return;
+          }
           if (useAppStore.getState().currentFile !== currentFile) return;
+          console.log(
+            `[fvp:creator] metadata-prefill: file_id=${fileId} identity has movie_title=${row.identity.movie_title ?? "(null)"}, director=${row.identity.movie_director ?? "(null)"}, plot=${row.identity.movie_plot ? "yes" : "(null)"}`,
+          );
 
           const id = row.identity;
           const s = useAppStore.getState();
@@ -101,7 +127,11 @@ export function useLibraryMetadataPrefill(): void {
           if (Object.keys(patch).length > 0) {
             useAppStore.setState(patch);
             console.log(
-              `[fvp:creator] prefilled Movie Info from library row file_id=${fileId} fields=${Object.keys(patch).join(",")}`,
+              `[fvp:creator] metadata-prefill: APPLIED file_id=${fileId} fields=${Object.keys(patch).join(",")}`,
+            );
+          } else {
+            console.log(
+              `[fvp:creator] metadata-prefill: nothing to apply (library row has no metadata OR Zustand already populated by .free autoload)`,
             );
           }
           prefilledFor.current = currentFile;

@@ -82,6 +82,9 @@ pub struct MpvPlayer {
     mpv: Arc<Mutex<Mpv>>,
     event_thread: Mutex<Option<JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
+    /// Cached AppHandle so per-load probes can emit events back to
+    /// the frontend (e.g. dimensions-probed → library row update).
+    app: AppHandle,
 }
 
 impl Drop for MpvPlayer {
@@ -308,6 +311,7 @@ impl MpvPlayer {
             mpv: Arc::new(Mutex::new(mpv)),
             event_thread: Mutex::new(Some(event_thread)),
             shutdown,
+            app,
         })
     }
 
@@ -350,6 +354,8 @@ impl MpvPlayer {
         // so we can see whether frames are actually being PRESENTED
         // (not just decoded).
         let mpv_arc = self.mpv.clone();
+        let app_for_dims = self.app.clone();
+        let path_for_dims = path.to_string();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             {
@@ -369,6 +375,23 @@ impl MpvPlayer {
                     "playback",
                     "post-load video state @1.5s: {w}x{h} codec={codec:?} hwdec={hwdec_current:?} vo={vo:?}"
                 );
+                // Capture the actual probed dimensions for the
+                // library. The frontend listens to this event and
+                // calls library_save_actual_resolution which
+                // upgrades the row from a filename label (or empty)
+                // to the real WxH. One-shot per file load; the IPC
+                // command is a no-op when the row already has the
+                // same value.
+                if w > 0 && h > 0 {
+                    let _ = app_for_dims.emit(
+                        "playback:dimensions-probed",
+                        serde_json::json!({
+                            "path": &path_for_dims,
+                            "width": w,
+                            "height": h,
+                        }),
+                    );
+                }
                 #[cfg(target_os = "windows")]
                 video_subclass::dump_hwnd_geometry("@1.5s");
             }

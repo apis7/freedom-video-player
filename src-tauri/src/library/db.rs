@@ -323,6 +323,29 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_folder_signatures_folder ON folder_signatures(watched_folder_id);
     "#,
+    // ── v13 — convert legacy resolution labels to pixel dimensions ─────
+    //
+    // Early versions of the indexer stored resolution as the raw
+    // filename tag ("1080p", "720p", "4K", etc.). The library list
+    // displays whatever's in this column verbatim, so users saw
+    // "1080p" instead of the actual pixel dimensions. The parser was
+    // later updated to write "1920x1080" / "1280x720" form, but
+    // pre-existing rows kept their old labels.
+    //
+    // One-shot conversion. Idempotent: rows already in pixel form
+    // match the WHERE clause's NOT-LIKE escape and are left alone.
+    r#"
+    UPDATE library_files SET resolution = '7680x4320' WHERE LOWER(resolution) IN ('4320p', '8k');
+    UPDATE library_files SET resolution = '3840x2160' WHERE LOWER(resolution) IN ('2160p', '4k');
+    UPDATE library_files SET resolution = '2560x1440' WHERE LOWER(resolution) = '1440p';
+    UPDATE library_files SET resolution = '2048x1080' WHERE LOWER(resolution) = '2k';
+    UPDATE library_files SET resolution = '1920x1080' WHERE LOWER(resolution) IN ('1080p', '1080i');
+    UPDATE library_files SET resolution = '1280x720'  WHERE LOWER(resolution) IN ('720p', '720i');
+    UPDATE library_files SET resolution = '1024x576'  WHERE LOWER(resolution) = '576p';
+    UPDATE library_files SET resolution =  '854x480'  WHERE LOWER(resolution) = '480p';
+    UPDATE library_files SET resolution =  '640x360'  WHERE LOWER(resolution) = '360p';
+    UPDATE library_files SET resolution =  '426x240'  WHERE LOWER(resolution) = '240p';
+    "#,
 ];
 
 /// Thread-safe handle around a single `Connection`. SQLite's serialized

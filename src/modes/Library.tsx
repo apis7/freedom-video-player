@@ -164,7 +164,6 @@ export function LibraryMode() {
     y: number;
     items: MenuItem[];
   } | null>(null);
-  const [clock, setClock] = useState(() => new Date());
   const [rouletteOpen, setRouletteOpen] = useState(false);
   // Bumps every time the list changes — child rails use it to refetch.
   const [listRefreshToken, setListRefreshToken] = useState(0);
@@ -311,11 +310,14 @@ export function LibraryMode() {
     savePrefs(prefs);
   }, [prefs]);
 
-  // Clock tick — once a minute is enough at this granularity.
-  useEffect(() => {
-    const t = window.setInterval(() => setClock(new Date()), 30_000);
-    return () => window.clearInterval(t);
-  }, []);
+  // Clock state was previously here, with a 30-second setInterval
+  // bumping it at the top of LibraryMode. That re-rendered the entire
+  // library tree (including the 1140-item ThumbnailView) twice a
+  // minute — visible as a noticeable hitch when the timer fired,
+  // especially right after the window regained focus and React
+  // batched several state updates together. The clock UI lives in a
+  // tiny isolated <ClockReadout/> component near the bottom of this
+  // file so only that component re-renders on tick.
 
   // Backend event subscriptions.
   useEffect(() => {
@@ -1695,9 +1697,7 @@ export function LibraryMode() {
           {scanProgress && (
             <ScanProgressBadge progress={scanProgress} />
           )}
-          <span className="text-[11px] text-fvp-muted tabular-nums" title={clock.toDateString()}>
-            {formatClock(clock, prefs.use24hClock)}
-          </span>
+          <ClockReadout use24h={prefs.use24hClock} />
         </div>
       </header>
 
@@ -2454,6 +2454,30 @@ function LibraryLoadingState() {
         Loading library…
       </div>
     </div>
+  );
+}
+
+/**
+ * Tiny header clock. ISOLATED COMPONENT so its 30-second
+ * setInterval re-render doesn't propagate to the rest of the
+ * library mode (which used to trigger a full re-render of the
+ * thumb-view every 30s — a noticeable hitch on a 1000+ item
+ * library, especially after the window regained focus and React
+ * batched several state updates).
+ */
+function ClockReadout({ use24h }: { use24h: boolean }) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+  return (
+    <span
+      className="text-[11px] text-fvp-muted tabular-nums"
+      title={now.toDateString()}
+    >
+      {formatClock(now, use24h)}
+    </span>
   );
 }
 

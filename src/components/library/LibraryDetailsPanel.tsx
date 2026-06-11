@@ -473,6 +473,34 @@ function SingleRowPanel({
         >
           ↻ Refresh metadata from TMDb
         </button>
+        <button
+          onClick={() => {
+            if (
+              !window.confirm(
+                "Remove all metadata for this movie?\n\n" +
+                  "Title resets to the filename, and TMDb-sourced fields " +
+                  "(director, plot, stars, year, posters, ratings) are " +
+                  "wiped. Runtime, resolution, and filesize are recalculated " +
+                  "from disk. You can re-run 'Refresh metadata from TMDb' " +
+                  "afterwards to repopulate."
+              )
+            )
+              return;
+            void libraryIpc
+              .removeIdentityMetadata(id.id)
+              .then(() => {
+                showToast("Metadata removed — title reset to filename.", "info", 3000);
+                onRefreshList();
+              })
+              .catch((err) => {
+                showToast(`Remove metadata failed: ${err}`, "error", 4000);
+              });
+          }}
+          className="w-full px-2 py-1 bg-fvp-bg border border-fvp-border hover:border-fvp-err/40 rounded text-left text-fvp-text"
+          title="Wipes metadata back to the basics (title=filename, runtime/resolution/filesize recalculated). Use before re-running TMDb auto-fill."
+        >
+          ✕ Remove metadata
+        </button>
         <div className="text-[10px] text-fvp-muted font-mono break-all pt-2">
           {f.path}
         </div>
@@ -486,18 +514,32 @@ function SingleRowPanel({
             id.custom_thumbnail_path != null,
             () => void pickAndApplyCustomThumb(),
             () => void clearCustomThumb(),
+            () => void generateThumbFromRandomFrame(),
           )}
           onClose={() => setPosterMenu(null)}
         />
       )}
     </aside>
   );
+
+  async function generateThumbFromRandomFrame() {
+    try {
+      await libraryIpc.generateThumbnailFromRandomFrame(id.id);
+      showToast("Album art generated from a random frame.", "info", 3000);
+      onRefreshList();
+    } catch (err) {
+      // V1 stub returns an explanatory error; surface it as info, not
+      // error, so the user knows the feature exists and is coming.
+      showToast(`${err}`, "info", 5000);
+    }
+  }
 }
 
 function posterMenuItems(
   hasCustom: boolean,
   onPick: () => void,
   onClear: () => void,
+  onGenerate: () => void,
 ): MenuItem[] {
   const items: MenuItem[] = [
     {
@@ -505,12 +547,19 @@ function posterMenuItems(
       label: hasCustom ? "Change album art…" : "Upload album art…",
       onClick: onPick,
     },
+    {
+      kind: "item",
+      label: "Generate from random frame",
+      title:
+        "Picks a random frame between 25% and 75% of the film and uses it as the album art. Re-selecting this menu item picks a different frame.",
+      onClick: onGenerate,
+    },
   ];
   if (hasCustom) {
     items.push({ kind: "separator" });
     items.push({
       kind: "item",
-      label: "Clear custom album art",
+      label: "Remove album art",
       onClick: onClear,
     });
   }

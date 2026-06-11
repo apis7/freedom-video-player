@@ -291,18 +291,27 @@ fn spawn_cadence_heartbeat() {
 
 fn cadence_tick() {
     let Some(o) = ORCHESTRATOR.get() else { return };
-    let (rung, elapsed_since_activity, elapsed_since_fire, was_logged) = {
+    let (rung, elapsed_since_activity, elapsed_since_fire, was_logged, scan_in_flight) = {
         let s = o.state.lock();
         let now = Instant::now();
         let last_activity = s.last_activity_at.unwrap_or(now);
         let elapsed_activity = now.saturating_duration_since(last_activity);
-        let elapsed_fire = s
+        // None = never fired this session. Don't blast a misleading
+        // `106751991167300.6d` into the terminal — we just treat it as
+        // "due if no scan is in flight" below.
+        let elapsed_fire: Option<Duration> = s
             .last_periodic_scan_fired_at
-            .map(|t| now.saturating_duration_since(t))
-            .unwrap_or(Duration::from_secs(u64::MAX / 2));
+            .map(|t| now.saturating_duration_since(t));
         let rung = current_rung(elapsed_activity);
         let was_logged = s.last_logged_rung == Some(rung);
-        (rung, elapsed_activity, elapsed_fire, was_logged)
+        // A scan that's already running counts as "we just fired" —
+        // no point queueing another behind it. Also dodges the bug
+        // where notify kicked off a ScanFolder for folder_id=1 and
+        // 60 s later the cadence heartbeat fired a ScanAll that just
+        // re-did folder 1 from scratch.
+        let scan_in_flight =
+            s.scan_all_in_flight || !s.queued_folders.is_empty();
+        (rung, elapsed_activity, elapsed_fire, was_logged, scan_in_flight)
     };
 
     if !was_logged {
@@ -315,13 +324,32 @@ fn cadence_tick() {
         o.state.lock().last_logged_rung = Some(rung);
     }
 
-    if elapsed_since_fire < rung.interval() {
+    if scan_in_flight {
+        // A user-triggered or notify-triggered scan is already running
+        // or queued. Don't pile on; the cadence timer resumes from
+        // "now" once that scan completes.
+        return;
+    }
+
+    let elapsed_to_check = match elapsed_since_fire {
+        Some(d) => d,
+        None => {
+            // First fire of the session — let the rung's interval
+            // gate it instead, using the "elapsed since boot" as a
+            // proxy. The orchestrator init seeded last_activity_at,
+            // so elapsed_since_activity is a good "time since the
+            // process started" lower bound.
+            elapsed_since_activity
+        }
+    };
+
+    if elapsed_to_check < rung.interval() {
         return;
     }
     crate::log!(
         "library:cadence",
         "interval elapsed ({} >= {}) — firing periodic ScanAll",
-        human_dur(elapsed_since_fire),
+        human_dur(elapsed_to_check),
         human_dur(rung.interval())
     );
     o.state.lock().last_periodic_scan_fired_at = Some(Instant::now());
@@ -575,9 +603,18 @@ fn run_scan_folder(
         "library:scan-started",
         serde_json::json!({ "folder_id": folder_id }),
     );
-    if let Err(e) = index::mark_folder_files_missing(db, folder_id) {
-        crate::log!("library", "mark missing failed: {e}");
-    }
+    // NOTE: we used to call mark_folder_files_missing here — set
+    // is_missing=1 on every row in the folder, then UNSET as the scan
+    // re-found each one. That worked but produced an ugly UX window
+    // where the user opening Library mid-scan saw EVERY file flagged
+    // as broken until the scan finished (most painful on slow SMB
+    // shares, where enumerate alone can take a minute+).
+    //
+    // New approach: leave is_missing alone at the start. Track which
+    // files we touched during the scan (clean-dir bulk update +
+    // per-file index_file). At the END of the scan, mark missing ONLY
+    // the files we expected to see but didn't. UI never sees a
+    // transient "all broken" state.
     crate::log!("library:scan", "enumerating videos under {}", path.display());
     let enumerate_start = Instant::now();
     // Smart enumeration: walk the tree, but skip per-file work for
@@ -601,13 +638,22 @@ fn run_scan_folder(
     );
     // Bulk-clear is_missing for every file row whose parent dir was
     // matched as clean — we KNOW those files are still present and
-    // unchanged, no per-file stat needed.
+    // unchanged, no per-file stat needed. Also records their ids in
+    // `touched_ids` so the end-of-scan missing-pass doesn't re-flag
+    // them.
+    let mut touched_ids: HashSet<i64> = HashSet::new();
     let bulk_clear_started = Instant::now();
-    let bulk_cleared = bulk_mark_present_in_clean_dirs(db, folder_id, &smart.clean_dirs);
-    if bulk_cleared > 0 {
+    let bulk_cleared = bulk_mark_present_in_clean_dirs(
+        db,
+        folder_id,
+        &smart.clean_dirs,
+        &mut touched_ids,
+    );
+    if bulk_cleared > 0 || !touched_ids.is_empty() {
         crate::log!(
             "library:scan",
-            "bulk-marked {bulk_cleared} file row(s) present (in {clean_dir_count} clean dir(s)) in {:?} — skipped per-file stat",
+            "bulk-marked {bulk_cleared} row(s) present, recorded {} touched id(s) in {clean_dir_count} clean dir(s), took {:?}",
+            touched_ids.len(),
             bulk_clear_started.elapsed()
         );
     }
@@ -653,7 +699,8 @@ fn run_scan_folder(
             last_progress_log = Instant::now();
         }
         match index::index_file(db, folder_id, file_path) {
-            Ok((_, identity_id, was_new)) => {
+            Ok((file_id, identity_id, was_new)) => {
+                touched_ids.insert(file_id);
                 if was_new {
                     new_items += 1;
                     crate::library::enrich::enqueue(identity_id);
@@ -697,6 +744,41 @@ fn run_scan_folder(
         new_items,
         skipped_unchanged
     );
+    // End-of-scan missing-flag pass. Anything we DIDN'T touch (not in
+    // a clean dir we trusted; not found by enumerate; not successfully
+    // index_file'd) is genuinely gone from disk → flag is_missing=1
+    // with missing_since stamped now (preserving an earlier value if
+    // it already had one). This replaces the old "tombstone everything
+    // up-front" pattern that caused the mid-scan "all broken" UX bug
+    // on slow SMB shares.
+    //
+    // Only run when the scan WASN'T cancelled — a cancelled scan has
+    // an incomplete `touched_ids` set and would flag healthy files as
+    // missing if we trusted it.
+    if !SCAN_CANCEL.load(Ordering::Relaxed) {
+        let mark_start = Instant::now();
+        let newly_missing = mark_missing_for_unseen(db, folder_id, &touched_ids);
+        crate::log!(
+            "library:scan",
+            "end-of-scan missing-pass: {newly_missing} row(s) newly flagged is_missing=1 (out of {} touched / {} total in folder) in {:?}",
+            touched_ids.len(),
+            {
+                let conn = db.lock();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM library_files WHERE watched_folder_id = ?1",
+                    params![folder_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+            },
+            mark_start.elapsed()
+        );
+    } else {
+        crate::log!(
+            "library:scan",
+            "end-of-scan missing-pass: SKIPPED (scan was cancelled — touched_ids is incomplete)"
+        );
+    }
     // Persist the freshly-computed directory signatures so the next
     // scan can skip whatever didn't change. Done UNCONDITIONALLY — a
     // partial scan (user cancelled) still produced valid signatures
@@ -840,30 +922,27 @@ pub fn on_folder_removed(folder_id: i64) {
 }
 
 /// Clear `is_missing` (and `missing_since`) for every library_files
-/// row whose path lives directly under one of the given directories.
-/// Used by the smart scanner: a directory's mtime + child count
-/// matched the cached signature, so we already know every file in
-/// it is still there — no need to re-stat each one.
+/// row whose path lives directly under one of the given directories,
+/// AND record every such file_id into `touched` so the end-of-scan
+/// missing-pass knows not to re-flag them.
 ///
-/// Returns the number of rows updated. Uses path-prefix matching in
-/// memory (single SELECT pulls all rows for the folder; we group by
-/// parent and bulk-update by id), which is cheaper than emitting one
-/// UPDATE per clean dir.
+/// Used by the smart scanner: a directory's mtime+name-hash matched
+/// the cached signature, so every file in it is guaranteed to still
+/// be on disk — no per-file stat needed.
 fn bulk_mark_present_in_clean_dirs(
     db: &LibraryDb,
     folder_id: i64,
     clean_dirs: &[PathBuf],
+    touched: &mut HashSet<i64>,
 ) -> u32 {
     if clean_dirs.is_empty() {
         return 0;
     }
-    use std::collections::HashSet;
     let clean_set: HashSet<String> = clean_dirs
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    // Snapshot every file row for this folder, then filter in Rust.
     let rows: Vec<(i64, String)> = {
         let conn = db.lock();
         let mut stmt = match conn
@@ -890,14 +969,13 @@ fn bulk_mark_present_in_clean_dirs(
         };
         if clean_set.contains(&parent) {
             to_clear.push(id);
+            touched.insert(id);
         }
     }
     if to_clear.is_empty() {
         return 0;
     }
 
-    // Chunked UPDATE — SQLite's expression-tree limit means we don't
-    // want to slap thousands of `?N` placeholders in one go.
     let mut total: u32 = 0;
     let conn = db.lock();
     for chunk in to_clear.chunks(500) {
@@ -915,6 +993,69 @@ fn bulk_mark_present_in_clean_dirs(
             Ok(n) => total += n as u32,
             Err(e) => {
                 crate::log!("library", "bulk-mark UPDATE failed: {e}");
+                break;
+            }
+        }
+    }
+    total
+}
+
+/// End-of-scan missing-flag pass. For every library_files row in
+/// `folder_id` whose id is NOT in `touched`, set is_missing=1 and
+/// stamp missing_since=now (preserving an earlier timestamp if one
+/// exists). Returns the count of rows newly-flagged.
+///
+/// Replaces the old "tombstone all up-front then untombstone as we
+/// find them" pattern. Crucially, files that DO exist on disk never
+/// pass through an is_missing=1 state — so a user opening the UI
+/// mid-scan never sees "everything looks broken."
+fn mark_missing_for_unseen(
+    db: &LibraryDb,
+    folder_id: i64,
+    touched: &HashSet<i64>,
+) -> u32 {
+    let rows: Vec<i64> = {
+        let conn = db.lock();
+        let mut stmt = match conn
+            .prepare("SELECT id FROM library_files WHERE watched_folder_id = ?1")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                crate::log!("library", "mark-missing prep: {e}");
+                return 0;
+            }
+        };
+        stmt.query_map(params![folder_id], |r| r.get::<_, i64>(0))
+            .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+            .unwrap_or_default()
+    };
+    let to_flag: Vec<i64> = rows.into_iter().filter(|id| !touched.contains(id)).collect();
+    if to_flag.is_empty() {
+        return 0;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let conn = db.lock();
+    let mut total: u32 = 0;
+    for chunk in to_flag.chunks(500) {
+        let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE library_files
+                SET is_missing = 1,
+                    missing_since = COALESCE(missing_since, ?)
+              WHERE id IN ({placeholders})
+                AND is_missing = 0"
+        );
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&now as &dyn rusqlite::ToSql];
+        for i in chunk {
+            params_vec.push(i as &dyn rusqlite::ToSql);
+        }
+        match conn.execute(&sql, params_vec.as_slice()) {
+            Ok(n) => total += n as u32,
+            Err(e) => {
+                crate::log!("library", "mark-missing UPDATE failed: {e}");
                 break;
             }
         }

@@ -77,6 +77,13 @@ export interface AppState {
   customCategories: string[];
   /** When set, an <img> overlay is rendered over the video area (freeze-frame). */
   freezeFrameSrc: string | null;
+  /** True for ~700 ms after we send an apply/clear lavfi-complex graph
+   *  to libmpv. During that window mpv reloads the file and its child
+   *  HWND can briefly have nothing painted; without a mask the user
+   *  sees a flash of whatever is behind the transparent webview region
+   *  (usually the terminal or the desktop). The Creator's VideoPreviewArea
+   *  drops a black div over the video area while this is true. */
+  mpvFiltergraphReloading: boolean;
   /** When true, clicking a snip auto-seeks playhead to its start. */
   jumpPlayheadOnSnipSelect: boolean;
   /** Current playback rate multiplier (1.0 = normal). */

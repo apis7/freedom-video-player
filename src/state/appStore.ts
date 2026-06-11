@@ -85,6 +85,7 @@ export const useAppStore = create<AppState & AppActions>((set) => ({
   snipLanes: {},
   customCategories: [],
   freezeFrameSrc: null,
+  mpvFiltergraphReloading: false,
   jumpPlayheadOnSnipSelect: false,
   playbackSpeed: 1.0,
   skipThatPendingStartMs: null,

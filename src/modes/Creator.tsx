@@ -2214,6 +2214,24 @@ function Label({ children }: { children: React.ReactNode }) {
 
 /* ───────────────────────── Video preview ───────────────────────── */
 
+/**
+ * Brief opaque-black overlay shown for ~700 ms while libmpv's filter
+ * graph is being swapped. Without it the transparent webview region
+ * over the video shows through the empty mpv HWND during reload
+ * (visible as a white-with-ghost-terminal flash). Pointer events pass
+ * through so the user can keep clicking timeline controls.
+ */
+function FiltergraphReloadMask() {
+  const reloading = useAppStore((s) => s.mpvFiltergraphReloading);
+  if (!reloading) return null;
+  return (
+    <div
+      className="absolute inset-0 bg-black pointer-events-none z-[5]"
+      aria-hidden
+    />
+  );
+}
+
 function VideoPreviewArea({
   hasFile,
   videoRef,
@@ -2242,6 +2260,13 @@ function VideoPreviewArea({
           className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none z-10"
         />
       )}
+      {/* Lavfi-complex reload mask. When applyAudioOverlay /
+          clearAudioOverlay tells libmpv to swap the filter graph,
+          mpv reloads the file; for ~half a second its child HWND
+          can be blank and the user sees through the transparent
+          webview to the terminal / desktop. The mask covers that
+          window with a solid black div until the reload settles. */}
+      {hasFile && <FiltergraphReloadMask />}
       {/* Crop editor overlay — only renders when the primary-selected
           snip is a crop_video. Pointer events pass through outside the
           rect + handles, so the rest of the video area still receives

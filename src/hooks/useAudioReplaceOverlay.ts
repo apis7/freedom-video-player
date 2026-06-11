@@ -86,6 +86,19 @@ export function useAudioReplaceOverlay() {
   }, [currentFile, snips, duration]);
 }
 
+/** Briefly raise `mpvFiltergraphReloading` so the Creator's VideoPreviewArea
+ *  can mask the transparent video region with a black div while libmpv
+ *  reloads the file. Auto-clears after `holdMs`. */
+function withReloadMask<T>(fn: () => Promise<T>, holdMs = 700): Promise<T> {
+  useAppStore.setState({ mpvFiltergraphReloading: true });
+  return fn().finally(() => {
+    window.setTimeout(
+      () => useAppStore.setState({ mpvFiltergraphReloading: false }),
+      holdMs,
+    );
+  });
+}
+
 async function applyOrClear(snips: Snip[], durationSec: number): Promise<void> {
   const hasAudioReplace = snips.some((s) => s.action.type === "audio_replace");
   const hasEffect = snips.some(
@@ -106,7 +119,7 @@ async function applyOrClear(snips: Snip[], durationSec: number): Promise<void> {
   // engine's silence fallback handles the mute/blur snips.
   if (hasAudioReplace) {
     try {
-      await playback.clearAudioOverlay();
+      await withReloadMask(() => playback.clearAudioOverlay());
     } catch {
       /* swallow */
     }
@@ -116,7 +129,7 @@ async function applyOrClear(snips: Snip[], durationSec: number): Promise<void> {
 
   if (!hasEffect) {
     try {
-      await playback.clearAudioOverlay();
+      await withReloadMask(() => playback.clearAudioOverlay());
     } catch {
       /* swallow */
     }
@@ -126,7 +139,9 @@ async function applyOrClear(snips: Snip[], durationSec: number): Promise<void> {
 
   const fileDurationMs = Math.max(1, Math.round(durationSec * 1000));
   try {
-    const applied = await playback.applyAudioOverlay(snips, fileDurationMs);
+    const applied = await withReloadMask(() =>
+      playback.applyAudioOverlay(snips, fileDurationMs),
+    );
     useAppStore.setState({ audioOverlayActive: applied });
     if (applied) {
       console.log(

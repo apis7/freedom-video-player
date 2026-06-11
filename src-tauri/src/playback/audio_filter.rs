@@ -170,44 +170,74 @@ pub fn build(inputs: EffectInputs) -> EffectGraph {
 fn render_graph(snips: &[PlannedEffect], crops: &[PlannedCrop]) -> String {
     let mut out = String::new();
 
-    // Video branch: pass-through unless we have crop snips, in which
-    // case we chain one `crop` filter per snip, each gated by
-    // enable='between(t,A,B)'. ffmpeg's crop filter respects enable
-    // correctly — when enable is false it passes the frame through
-    // UNCHANGED at full size (no clipping), so outside any snip
-    // window the video is the original frame. Inside a snip window
-    // the crop produces a smaller frame; mpv's video output stretches
-    // it to fill the player area, giving the zoom-to-fit behaviour
-    // the user picked.
+    // Video branch — crop snips.
     //
-    // Multiple crops chain — only one can be active at a time because
-    // their windows are sorted + non-overlapping (the planner enforces
-    // sort; overlap is a profile authoring mistake the UI prevents).
+    // First implementation chained
+    //     [vid1] crop=...:enable='between(t,A,B)' [vo]
+    // but ffmpeg refuses that:
+    //     "Timeline ('enable' option) not supported with filter 'crop'"
+    // because crop CHANGES the output dimensions and timeline editing
+    // requires the output size to be constant across the timeline.
+    //
+    // The fix: split the video, run crop+scale-back on the side
+    // branch (producing a "zoomed view" that's the same dimensions as
+    // the main branch), then OVERLAY the zoomed branch on top of main
+    // with enable='between(t,A,B)'. overlay DOES support timeline
+    // editing, so when the snip window is active the user sees the
+    // zoomed view; outside the window they see the original frame.
+    // Output dimensions are constant (= main input dimensions), so
+    // ffmpeg accepts the graph.
+    //
+    // For N crops we split into N+1 branches, build a zoomed view per
+    // crop, then chain N overlays — each gated by its own enable
+    // window. Non-overlapping snips means at most one overlay is
+    // active at any t; an overlap (UI prevents) means the last one in
+    // the chain wins.
     if crops.is_empty() {
         out.push_str("[vid1] null [vo];\n");
     } else {
-        out.push_str("[vid1] ");
-        let mut first = true;
-        for c in crops {
-            if !first {
-                out.push_str(", ");
-            }
-            first = false;
-            let start = ms_to_secs_str(c.start_ms);
-            let end = ms_to_secs_str(c.end_ms);
-            // crop=w=iw*W:h=ih*H:x=iw*X:y=ih*Y — fractional crop
-            // independent of source resolution. exact_pad keeps the
-            // numerical filter from rounding a 1px edge off on odd
-            // dimensions; the filter normalises internally.
+        // 1. split into 1 main + N crop branches.
+        out.push_str(&format!("[vid1] split={}", crops.len() + 1));
+        out.push_str(" [vmain]");
+        for idx in 0..crops.len() {
+            out.push_str(&format!(" [c{}_in]", idx + 1));
+        }
+        out.push_str(";\n");
+        // 2. per crop: crop then scale BACK to original dimensions.
+        // After crop, current iw = orig_iw * w_pct; dividing by w_pct
+        // brings us back to orig_iw. trunc(.../2)*2 keeps dimensions
+        // even — required by many codecs / scalers and harmless on
+        // already-even inputs.
+        for (idx, c) in crops.iter().enumerate() {
             out.push_str(&format!(
-                "crop=w='iw*{w:.4}':h='ih*{h:.4}':x='iw*{x:.4}':y='ih*{y:.4}':enable='between(t,{start},{end})'",
+                "[c{n}_in] crop=w='iw*{w:.4}':h='ih*{h:.4}':x='iw*{x:.4}':y='ih*{y:.4}',\
+                 scale=w='trunc(iw/{w:.4}/2)*2':h='trunc(ih/{h:.4}/2)*2',\
+                 setsar=1 [czoom{n}];\n",
+                n = idx + 1,
                 w = c.w_pct,
                 h = c.h_pct,
                 x = c.x_pct,
                 y = c.y_pct,
             ));
         }
-        out.push_str(" [vo];\n");
+        // 3. overlay chain. Each overlay places its czoom on top of
+        // the running stream, gated by its time window. Output of
+        // the final overlay is [vo].
+        let mut prev = String::from("vmain");
+        for (idx, c) in crops.iter().enumerate() {
+            let start = ms_to_secs_str(c.start_ms);
+            let end = ms_to_secs_str(c.end_ms);
+            let next = if idx + 1 == crops.len() {
+                String::from("vo")
+            } else {
+                format!("ov{}", idx + 1)
+            };
+            out.push_str(&format!(
+                "[{prev}][czoom{n}] overlay=x=0:y=0:enable='between(t,{start},{end})' [{next}];\n",
+                n = idx + 1
+            ));
+            prev = next;
+        }
     }
 
     // If we have ONLY crops and no audio effects, the rest of the

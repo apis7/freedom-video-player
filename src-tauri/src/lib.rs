@@ -269,6 +269,22 @@ pub fn run() {
                             library::boot::phase("enrich_init", || {
                                 library::enrich::init(app.app_handle().clone(), db.clone(), dir);
                             });
+                            // Background refind worker — quietly tries to
+                            // recover any is_missing row by stat-ing its
+                            // path, looking for a sibling at a new
+                            // location, and walking watched folders for
+                            // a same-basename match. So when the user
+                            // moves a folder, by the time they look at
+                            // the broken thumbnails the worker has
+                            // already rebound them in place. Throttled
+                            // so it doesn't fight the foreground scan
+                            // for SMB bandwidth.
+                            library::boot::phase("refind_worker_init", || {
+                                library::refind_worker::init(
+                                    app.app_handle().clone(),
+                                    db.clone(),
+                                );
+                            });
                             // Host supervisor — synchronous part reads
                             // local settings. When mode==host this also
                             // used to call bring_up which binds a TCP

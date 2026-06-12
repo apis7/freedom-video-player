@@ -3720,6 +3720,17 @@ pub fn library_try_refind_file(
     db: State<'_, LibraryDb>,
     file_id: i64,
 ) -> Result<RefindResult, String> {
+    try_refind_core(&db, file_id)
+}
+
+/// Library-internal entry point for the same logic. The background
+/// refind worker uses this so it can call the algorithm without
+/// having to go through Tauri's command surface (which requires
+/// State<LibraryDb>, only available on the command thread).
+pub fn try_refind_core(
+    db: &LibraryDb,
+    file_id: i64,
+) -> Result<RefindResult, String> {
     // 1. Look up the row.
     let (path, identity_id, was_missing): (String, i64, bool) = {
         let conn = db.lock();

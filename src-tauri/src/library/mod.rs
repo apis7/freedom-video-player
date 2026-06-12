@@ -28,6 +28,7 @@ pub mod model;
 pub mod orchestrator;
 pub mod poster_cache;
 pub mod reconcile;
+pub mod refind_worker;
 pub mod snapshot;
 pub mod suggestions;
 pub mod sync;

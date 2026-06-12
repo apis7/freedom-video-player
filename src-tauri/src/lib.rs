@@ -334,6 +334,35 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // Belt-and-suspenders sync push on close. The 1-min sync
+            // tick already pushes every cadence_min minutes, but if
+            // the user creates a series + closes the app inside that
+            // window the cadence push wouldn't have fired yet and the
+            // work would only live in the local DB. Force a push here
+            // so the share is always current up to the moment of
+            // close. Best-effort: if the share isn't reachable (NAS
+            // offline) we log and proceed - blocking the close on a
+            // dead network share would feel worse than the data risk.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
+                let app = window.app_handle();
+                let db = app.state::<library::LibraryDb>();
+                match library::sync::force_push(&db) {
+                    Ok(p) => log!(
+                        "library:sync",
+                        "close-push: wrote {} (force-push on window close)",
+                        p.display()
+                    ),
+                    Err(e) => log!(
+                        "library:sync",
+                        "close-push: SKIPPED ({e}) - local edits stay in local DB only until next launch's cadence tick"
+                    ),
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::diagnostics::get_recent_log_lines,
             commands::diagnostics::submit_report,

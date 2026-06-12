@@ -12,10 +12,11 @@ interface Props {
    *  the top-level "Auto-detect series" toolbar entry that scans the
    *  whole library — in that case fall back to all-on default). */
   sourceIdentityId?: number;
-  /** Names of existing series so we can dedupe proposals — proposing
-   *  to create "Hogan's Heroes" when it already exists wastes the user's
-   *  time. Pass empty list when not loaded yet. */
-  existingSeriesNames: string[];
+  /** Existing series so we can EITHER dedupe proposals OR route them
+   *  to addToSeries on the matching series id. Pass empty list when
+   *  not loaded yet. (Was previously just names; we now need ids to
+   *  support the "add to existing series" merge path.) */
+  existingSeries: { id: number; name: string }[];
   /** Names of existing collections so we can pre-disable the "Also add
    *  as collection" checkbox when a collection of that name exists. */
   existingCollectionNames: string[];
@@ -41,6 +42,13 @@ interface Proposal {
   /** Mark hint pre-populates the seasons-detection method when the user
    *  scopes into the newly created series and runs Auto-detect seasons. */
   recommendedSeasonsMethod: "folder" | "filename" | "none";
+  /** When the cleaned proposal name matches an EXISTING series, route
+   *  the confirm to addToSeries on that series instead of createSeries.
+   *  Without this the modal silently dropped the proposal (the original
+   *  "skip duplicate" behavior), which left the leftover episodes
+   *  scattered in All Movies and forced the user to drag them into the
+   *  existing series one at a time. */
+  existingSeriesId?: number;
 }
 
 /** Clean a folder name into a sensible series title. Strips trailing
@@ -48,13 +56,35 @@ interface Proposal {
  *  that aren't part of the show name ("- series", "- collection",
  *  "- seasons", "edits", "episodes") which often live in user folders. */
 function cleanSeriesName(raw: string): string {
-  return raw
-    .replace(/\s+/g, " ")
-    .replace(/\s*\(\d{4}\)\s*$/, "")
-    // Remove trailing junk separators commonly seen in folder names —
-    // "Show - series", "Show - seasons", "Show - collection", "Show — set".
-    .replace(/\s*[-–—]\s*(series|seasons?|collection|set|edits?|episodes?|tv)\s*$/i, "")
-    .trim();
+  // Run the trailing-junk strip in a loop so chained tags get peeled
+  // one layer at a time. A folder like
+  //   "Arrested Development Season 1-3 S01-S03 1080p BluRay x264-BiA [RiCK]"
+  // needs roughly six passes to land on "Arrested Development".
+  let s = raw.replace(/\s+/g, " ").trim();
+  for (let i = 0; i < 12; i += 1) {
+    const before = s;
+    s = s
+      // [scene-group-or-quality-tag] at the very end
+      .replace(/\s*\[[^\]]+\]\s*$/, "")
+      // (2024) year-in-parens at the end
+      .replace(/\s*\(\d{4}\)\s*$/, "")
+      // Trailing encode/codec tokens — anything one of these and after
+      // gets stripped. Loose enough to catch hyphen-joined fragments
+      // like "x264-BiA" / "WEB-DL" without listing every release group.
+      .replace(/\s*[-–—\s](x26[45]|h\.?26[45]|hevc|av1|aac|ac3|dts|eac3|truehd|opus|mp3|flac)([-_.\s][\w\d-]*)?\s*$/i, "")
+      .replace(/\s*[-–—\s](bluray|bdrip|brrip|webrip|web-?dl|dvdrip|hdtv|hdrip|remux|uhd|hdr)([-_.\s][\w\d-]*)?\s*$/i, "")
+      .replace(/\s*[-–—\s](2160p|1080p|720p|576p|480p|4k|8k)\s*$/i, "")
+      // Trailing season ranges/numbers — "Season 1-3", "Series 2", "S01-S03", "S01"
+      .replace(/\s*[-–—\s](season|series|vol(?:ume)?\.?|disc|book|part)\s*0*\d{1,3}(?:\s*[-–—]\s*0*\d{1,3})?\s*$/i, "")
+      .replace(/\s*[-–—\s]s\.?0*\d{1,3}(?:\s*[-–—]\s*s?\.?0*\d{1,3})?\s*$/i, "")
+      // The original directive token strip — "Show - series", "Show - collection", etc.
+      .replace(/\s*[-–—]\s*(series|seasons?|collection|set|edits?|episodes?|tv)\s*$/i, "")
+      // Dangling separator left behind after a strip
+      .replace(/\s*[-–—:|]\s*$/, "")
+      .trim();
+    if (s === before) break;
+  }
+  return s || raw.trim();
 }
 
 /** Lightweight season parser for the bulk series-creation flow. Catches
@@ -89,17 +119,27 @@ function looksLikeSeasonFolderName(name: string): boolean {
   const cleaned = name.trim();
   if (!cleaned) return false;
   // Standard verbose prefixes — "Season N", "Series N", "Volume N", etc.
-  // Anything after the digit is fine (handles "Season 1 - The Pilot").
-  if (/^(season|series|vol(?:ume)?\.?|disc|book|part)\s*0*\d{1,3}\b/i.test(cleaned))
+  // Match ANYWHERE in the name (not just at the start) so we also catch
+  // rich-name layouts like "Arrested Development Season 1 S01 1080p
+  // BluRay x264-BiA" where the season token sits in the middle of the
+  // folder name. Without the anywhere-match, only the per-season folders
+  // got grouped into their own one-season "series" and parent-level
+  // collections of "Show Name Season N S0N quality-tag" stayed as
+  // siblings instead of one rolled-up series.
+  if (/\b(season|series|vol(?:ume)?\.?|disc|book|part)\s*0*\d{1,3}\b/i.test(cleaned))
     return true;
-  // Compact "S01" / "S1" / "s.01" / "S01 - Pilot". Followed by digits then
-  // a word boundary so we don't eat names like "Shrek".
-  if (/^s\.?0*\d{1,3}\b/i.test(cleaned)) return true;
+  // Compact "S01" / "S1" / "s.01" / "S01 - Pilot" anywhere in the name.
+  // Same justification as the verbose case above. The leading word
+  // boundary keeps us from matching e.g. "Disney's" -> "s" + digits.
+  if (/\bs\.?0*\d{1,3}\b/i.test(cleaned)) return true;
   // Bare numeric folder: "1", "01", "001". Common when users index by
   // number alone. ≤3 digits keeps us from misreading "2023" (a year) as
-  // a season.
+  // a season. Must be the entire name — "1" inside "Inglourious 1"
+  // isn't a season folder.
   if (/^0*\d{1,3}$/.test(cleaned)) return true;
-  // Word-numbered: "Season One", "Series Three". Up to fifteen.
+  // Word-numbered: "Season One", "Series Three". Up to fifteen. Kept
+  // start-anchored — risk of misclassifying movies whose title contains
+  // "Season Two" is higher with the word forms.
   if (
     /^(season|series)\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen)\b/i.test(
       cleaned,
@@ -178,7 +218,7 @@ const MIN_GROUP_SIZE = 3;
 export function AutoDetectSeriesModal({
   rows,
   sourceIdentityId,
-  existingSeriesNames,
+  existingSeries,
   existingCollectionNames,
   onChanged,
   onClose,
@@ -227,17 +267,20 @@ export function AutoDetectSeriesModal({
       if (seasonFolderName) entry.seasons.add(seasonFolderName);
       groups.set(seriesPath, entry);
     }
-    const existingSeriesLower = new Set(
-      existingSeriesNames.map((n) => n.trim().toLowerCase()),
-    );
+    const existingByName = new Map<string, number>();
+    for (const s of existingSeries) {
+      existingByName.set(s.name.trim().toLowerCase(), s.id);
+    }
     const out: Proposal[] = [];
     for (const [seriesPath, { members, seasons }] of groups) {
       if (members.length < MIN_GROUP_SIZE) continue;
       const folderName = seriesPath.split(/[\\/]/).pop() ?? "Untitled series";
       const cleaned = cleanSeriesName(folderName);
-      // Skip proposals whose name already exists as a series — the user
-      // can manually add the new files to that existing series instead.
-      if (existingSeriesLower.has(cleaned.toLowerCase())) continue;
+      // When the cleaned name matches an EXISTING series, the proposal
+      // is a merge: route confirm() to addToSeries on that series id
+      // rather than createSeries. Was previously a silent skip, which
+      // left the leftover episodes scattered in All Movies.
+      const existingSeriesId = existingByName.get(cleaned.toLowerCase());
       const identityIds = Array.from(
         new Set(members.map((m) => m.identity.id)),
       );
@@ -262,11 +305,12 @@ export function AutoDetectSeriesModal({
         seasonFolderCount: seasons.size,
         recommendedSeasonsMethod:
           seasons.size > 0 ? "folder" : "filename",
+        existingSeriesId,
       });
     }
     out.sort((a, b) => a.name.localeCompare(b.name));
     return out;
-  }, [rows, existingSeriesNames]);
+  }, [rows, existingSeries, sourceIdentityId]);
 
   // Reset proposals state when the computed list changes.
   useEffect(() => {
@@ -292,10 +336,12 @@ export function AutoDetectSeriesModal({
         // identity's season based on its file path. Saves the user the
         // extra step of opening Auto-detect seasons afterwards.
         const hasSeasons = p.seasonFolderCount > 1;
-        const seriesId = await libraryIpc.createSeries(
-          p.name.trim(),
-          hasSeasons,
-        );
+        // Merge path: the proposal's cleaned name matched an existing
+        // series. Skip createSeries and just route the new identities
+        // into the existing series_id. Common when the user already
+        // grouped one season and is now backfilling the others.
+        const seriesId = p.existingSeriesId
+          ?? (await libraryIpc.createSeries(p.name.trim(), hasSeasons));
         await libraryIpc.addToSeries(seriesId, p.identityIds);
         if (hasSeasons) {
           const memberRows = rows.filter((r) =>
@@ -473,6 +519,14 @@ export function AutoDetectSeriesModal({
                           title="Nested 'Season N' subfolders detected — episodes will be assigned automatically."
                         >
                           {p.seasonFolderCount} seasons
+                        </span>
+                      )}
+                      {p.existingSeriesId != null && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 bg-fvp-accent/20 text-fvp-accent rounded"
+                          title="A series with this name already exists. Confirming will add the new items to it instead of creating a duplicate."
+                        >
+                          add to existing
                         </span>
                       )}
                     </div>

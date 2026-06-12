@@ -2294,13 +2294,15 @@ export function LibraryMode() {
       {autoSeriesOpen && (
         <AutoDetectSeriesModal
           rows={rows}
-          existingSeriesNames={Array.from(
-            new Set(
-              rows
-                .map((r) => r.series?.series_name)
-                .filter((n): n is string => !!n),
-            ),
-          )}
+          existingSeries={(() => {
+            const seen = new Map<number, string>();
+            for (const r of rows) {
+              if (r.series && !seen.has(r.series.series_id)) {
+                seen.set(r.series.series_id, r.series.series_name);
+              }
+            }
+            return Array.from(seen, ([id, name]) => ({ id, name }));
+          })()}
           existingCollectionNames={Array.from(
             new Set(
               rows.flatMap((r) => r.collections.map((c) => c.collection_name)),
@@ -2341,13 +2343,15 @@ export function LibraryMode() {
               );
             });
           })()}
-          existingSeriesNames={Array.from(
-            new Set(
-              rows
-                .map((r) => r.series?.series_name)
-                .filter((n): n is string => !!n),
-            ),
-          )}
+          existingSeries={(() => {
+            const seen = new Map<number, string>();
+            for (const r of rows) {
+              if (r.series && !seen.has(r.series.series_id)) {
+                seen.set(r.series.series_id, r.series.series_name);
+              }
+            }
+            return Array.from(seen, ([id, name]) => ({ id, name }));
+          })()}
           existingCollectionNames={Array.from(
             new Set(
               rows.flatMap((r) => r.collections.map((c) => c.collection_name)),

@@ -683,26 +683,29 @@ fn run_scan_folder(
             bulk_clear_started.elapsed()
         );
     }
-    // Early move-detection: pre-flag rows whose path's parent IS a
-    // dirty directory but whose path is NOT in the walker's
-    // dirty_files set. Those are files the previous scan recorded but
-    // the current walk didn't find at that path - i.e. moved or
-    // deleted. Flagging them is_missing=1 BEFORE we start indexing
-    // means that when index_file later encounters the SAME identity
-    // at a NEW path (in a different dirty dir), the existing row is
-    // already flagged is_missing and the MOVE-AUTO-REBIND branch
-    // fires - rebinding the old row in place instead of inserting a
-    // DUP-ROW. Without this, a user who moves a series folder ends
-    // up with two file rows for every episode (the broken old path
-    // and the working new path), and has to right-click every single
-    // broken thumbnail to merge them. The end-of-scan missing-pass
-    // catches anything we don't rebind, so worst case is the same as
-    // before.
+    // Early move-detection: pre-flag rows the walker didn't find so
+    // MOVE-AUTO-REBIND in index_file can pick them up when their files
+    // surface at new paths in this scan.
+    //
+    // A row is "missing-NOW" when:
+    //   * its id is NOT in touched_ids (clean-dir bulk-mark left it
+    //     unconfirmed), AND
+    //   * its path is NOT in dirty_files (the walker didn't enumerate
+    //     this exact path - it's either moved, deleted, or its whole
+    //     parent dir vanished).
+    //
+    // Earlier versions also required parent_dir in dirty_dirs, which
+    // missed the case where the user moved an ENTIRE folder out from
+    // under the watched root: the old parent dirs no longer exist on
+    // disk, so the walker never visits them, so they're never in
+    // dirty_dirs. The DB rows under those vanished dirs slipped past
+    // pre-flag, and index_file then took the DUP-ROW branch when the
+    // files appeared at their new home. The result was the user
+    // hitting 'Search for broken filepaths' 53 times to clean up after
+    // dragging a single series folder. The constraint is dropped here.
     {
         use std::collections::HashSet as Set;
         use std::path::Path;
-        let dirty_dirs_set: Set<&Path> =
-            smart.dirty_dirs.iter().map(|p| p.as_path()).collect();
         let dirty_files_set: Set<&Path> =
             smart.dirty_files.iter().map(|p| p.as_path()).collect();
         let rows_in_folder: Vec<(i64, std::path::PathBuf)> = {
@@ -724,10 +727,8 @@ fn run_scan_folder(
         };
         let to_pre_flag: Vec<i64> = rows_in_folder
             .into_iter()
-            .filter(|(_, p)| {
-                p.parent()
-                    .map(|par| dirty_dirs_set.contains(par))
-                    .unwrap_or(false)
+            .filter(|(id, p)| {
+                !touched_ids.contains(id)
                     && !dirty_files_set.contains(p.as_path())
             })
             .map(|(id, _)| id)

@@ -98,9 +98,33 @@ fn maybe_tick(db: &LibraryDb) -> Result<bool, String> {
     let last_push = read_setting_i64(db, SYNC_LAST_PUSH_AT_KEY);
     let next_push_due = last_push + (cadence_min * 60);
     let sync_path = home.join(SYNC_FILE_NAME);
-    // Pull check is sync-mode-only. Host mode is authoritative —
-    // it never pulls from the mirror, so Client-made edits to the
-    // live Host can't be reverted by a stale Sync device's push.
+    let mut did_something = false;
+    // Push FIRST when due. This protects the user's local edits BEFORE
+    // we schedule any pull. Earlier code returned out of this function
+    // as soon as a pull-needed condition was detected, which meant
+    // that once sync_mtime drifted past local_mtime (very easy with
+    // SQLite WAL mode - writes go to .db-wal, leaving the .db mtime
+    // stale), the push branch below was never reached AGAIN. Series
+    // creations, custom thumbnails, and other DB mutations stayed in
+    // the local file and were lost on next launch when the scheduled
+    // pull restored the share's stale state.
+    if now >= next_push_due {
+        // Touch the local DB file BEFORE the VACUUM INTO push so its
+        // mtime advances to "now". Without this, WAL-mode writes keep
+        // the .db file's mtime frozen at whenever the last full
+        // checkpoint was, which trips the pull-needed comparison
+        // below forever. Touch is a no-op if the path doesn't exist.
+        let _ = touch_file(db.path());
+        push_now(db, &sync_path)?;
+        set_setting_i64(db, SYNC_LAST_PUSH_AT_KEY, now);
+        crate::log!(
+            "library:sync",
+            "push: mode={mode} → mirror written (cadence={cadence_min}min)"
+        );
+        did_something = true;
+    }
+    // Pull check is sync-mode-only and runs INDEPENDENT of the push
+    // above. Both can fire in the same tick.
     if mode == "sync" && sync_path.is_file() {
         let local_mtime = mtime_unix(db.path());
         let sync_mtime = mtime_unix(&sync_path);
@@ -112,20 +136,22 @@ fn maybe_tick(db: &LibraryDb) -> Result<bool, String> {
             );
             schedule_pull(db.path(), &sync_path)?;
             set_setting_i64(db, SYNC_LAST_PULL_AT_KEY, now);
-            return Ok(true);
+            did_something = true;
         }
     }
-    // Push if cadence due. Fires in both sync and host modes.
-    if now >= next_push_due {
-        push_now(db, &sync_path)?;
-        set_setting_i64(db, SYNC_LAST_PUSH_AT_KEY, now);
-        crate::log!(
-            "library:sync",
-            "push: mode={mode} → mirror written (cadence={cadence_min}min)"
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(did_something)
+}
+
+/// Set a file's mtime to "now" without modifying its contents. Used
+/// after a sync push to suppress the SQLite-WAL-mode pull-needed loop
+/// (writes go to .db-wal, leaving .db's mtime frozen, so the share
+/// always looks newer than local even though their content is in sync).
+fn touch_file(p: &Path) -> std::io::Result<()> {
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .open(p)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    Ok(())
 }
 
 /// Write a fresh copy of the local DB to the sync file. Uses

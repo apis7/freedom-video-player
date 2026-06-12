@@ -683,6 +683,89 @@ fn run_scan_folder(
             bulk_clear_started.elapsed()
         );
     }
+    // Early move-detection: pre-flag rows whose path's parent IS a
+    // dirty directory but whose path is NOT in the walker's
+    // dirty_files set. Those are files the previous scan recorded but
+    // the current walk didn't find at that path - i.e. moved or
+    // deleted. Flagging them is_missing=1 BEFORE we start indexing
+    // means that when index_file later encounters the SAME identity
+    // at a NEW path (in a different dirty dir), the existing row is
+    // already flagged is_missing and the MOVE-AUTO-REBIND branch
+    // fires - rebinding the old row in place instead of inserting a
+    // DUP-ROW. Without this, a user who moves a series folder ends
+    // up with two file rows for every episode (the broken old path
+    // and the working new path), and has to right-click every single
+    // broken thumbnail to merge them. The end-of-scan missing-pass
+    // catches anything we don't rebind, so worst case is the same as
+    // before.
+    {
+        use std::collections::HashSet as Set;
+        use std::path::Path;
+        let dirty_dirs_set: Set<&Path> =
+            smart.dirty_dirs.iter().map(|p| p.as_path()).collect();
+        let dirty_files_set: Set<&Path> =
+            smart.dirty_files.iter().map(|p| p.as_path()).collect();
+        let rows_in_folder: Vec<(i64, std::path::PathBuf)> = {
+            let conn = db.lock();
+            let mut stmt = match conn.prepare(
+                "SELECT id, path FROM library_files WHERE watched_folder_id = ?1 AND is_missing = 0",
+            ) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let rows = stmt
+                .query_map(params![folder_id], |r| {
+                    Ok((r.get::<_, i64>(0)?, std::path::PathBuf::from(r.get::<_, String>(1)?)))
+                });
+            match rows {
+                Ok(it) => it.flatten().collect(),
+                Err(_) => Vec::new(),
+            }
+        };
+        let to_pre_flag: Vec<i64> = rows_in_folder
+            .into_iter()
+            .filter(|(_, p)| {
+                p.parent()
+                    .map(|par| dirty_dirs_set.contains(par))
+                    .unwrap_or(false)
+                    && !dirty_files_set.contains(p.as_path())
+            })
+            .map(|(id, _)| id)
+            .collect();
+        if !to_pre_flag.is_empty() {
+            let conn = db.lock();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let placeholders = std::iter::repeat("?")
+                .take(to_pre_flag.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE library_files
+                    SET is_missing = 1,
+                        missing_since = COALESCE(missing_since, ?)
+                  WHERE id IN ({placeholders})"
+            );
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> =
+                Vec::with_capacity(to_pre_flag.len() + 1);
+            params_vec.push(&now);
+            for id in &to_pre_flag {
+                params_vec.push(id as &dyn rusqlite::ToSql);
+            }
+            match conn.execute(&sql, params_vec.as_slice()) {
+                Ok(n) => crate::log!(
+                    "library:scan",
+                    "pre-flag missing: marked {n} row(s) is_missing=1 (parent dir was dirty + walker didn't find the file) so MOVE-AUTO-REBIND can pick them up"
+                ),
+                Err(e) => crate::log!(
+                    "library:scan",
+                    "pre-flag missing: UPDATE failed: {e}"
+                ),
+            }
+        }
+    }
     // Fresh scan — clear any stale cancel flag the user may have set.
     SCAN_CANCEL.store(false, Ordering::Relaxed);
     let mut new_items = 0u32;

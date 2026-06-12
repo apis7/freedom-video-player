@@ -1038,15 +1038,44 @@ export function LibraryMode() {
       };
       // When the file is missing on disk, surface the recovery action
       // at the TOP of the menu since it's the most important thing the
-      // user can do with this row right now.
+      // user can do with this row right now. Multi-aware: when the user
+      // has many broken thumbnails selected (e.g. they just moved an
+      // entire series folder and the indexer hasn't caught up yet), run
+      // tryRefindRow against every selected broken row sequentially so
+      // they don't have to right-click each one. Working rows in the
+      // selection are silently skipped.
+      const brokenTargets = targets.filter((t) => t.file.is_missing);
       const brokenLinkItems: MenuItem[] = row.file.is_missing
         ? [
             {
               kind: "item" as const,
-              label: "🔎 Search for broken filepath",
+              label: brokenTargets.length > 1
+                ? `🔎 Search for broken filepaths (${brokenTargets.length} selected)`
+                : "🔎 Search for broken filepath",
               title:
                 "Try to recover this broken link. Stats the original path, looks for an already-indexed copy at a new location (auto-merges), and walks watched folders for a same-named file.",
-              onClick: () => tryRefindRow(row),
+              onClick: () => {
+                if (brokenTargets.length > 1) {
+                  void (async () => {
+                    for (const t of brokenTargets) {
+                      // Sequential, not parallel — try_refind takes the
+                      // DB lock; bursting parallel calls would just
+                      // serialize on the backend anyway and overwhelm
+                      // the toast stack.
+                      // eslint-disable-next-line no-await-in-loop
+                      await new Promise<void>((resolve) => {
+                        tryRefindRow(t);
+                        // tryRefindRow is fire-and-forget; small delay
+                        // gives each one room to toast + refresh before
+                        // the next one fires.
+                        window.setTimeout(resolve, 60);
+                      });
+                    }
+                  })();
+                } else {
+                  tryRefindRow(row);
+                }
+              },
             },
             { kind: "separator" as const },
           ]

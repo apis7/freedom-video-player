@@ -155,6 +155,57 @@ pub fn is_recently_dismissed(dismissed_at: Option<i64>, now_unix: i64) -> bool {
     }
 }
 
+/// Canonical name for the auto-managed "Want to Watch" collection.
+/// Used by the All-Movies tile + button to know which collection to
+/// add to, and by the suggestion engines to apply the boost
+/// multiplier. Case-insensitive at lookup time so a user-renamed
+/// version (e.g. "Watchlist") still works if they manually create one
+/// with that exact name. NOT internationalized today.
+pub const WANT_TO_WATCH_COLLECTION_NAME: &str = "Want to Watch";
+
+/// Multiplier applied to candidates that are members of the Want to
+/// Watch collection. 3× means: a wishlisted title is roughly three
+/// times as likely to win as an equivalent non-wishlisted title with
+/// the same recency band. The user explicitly said "heavily" - 3× is
+/// noticeable without overwhelming the wheel (a 10× would let one
+/// wishlist entry dominate; 3× still leaves room for the rest of the
+/// library to surface).
+pub const WANT_TO_WATCH_WEIGHT_BOOST: f64 = 3.0;
+
+/// Suggestion-decay ramp window. After a title is shown by ANY
+/// engine, the next 10 weeks ramp its multiplier from 0% → 100% in
+/// 10pp/week steps:
+///     week 0  (0-6 days)   → 0%   (don't show again right away)
+///     week 1  (7-13 days)  → 10%
+///     week 2  (14-20 days) → 20%
+///     ...
+///     week 10 (70+ days)   → 100% (full eligibility)
+const SUGGESTION_DECAY_WEEKS: i64 = 10;
+
+/// Compute the decay multiplier for a title's last_suggested_at. NULL
+/// (never shown) returns 1.0 - the title competes at full weight. The
+/// returned multiplier is applied ON TOP of all the existing weight
+/// factors (recency, comeback, series momentum, want-to-watch boost),
+/// so a wishlisted item that was just suggested still gets 0×: the
+/// "don't repeat" rule wins over the "user wants this" boost. That's
+/// intentional - the user is asking for variety, not for the boost
+/// to override the dedup.
+pub fn suggestion_decay_multiplier(
+    last_suggested_at: Option<i64>,
+    now_unix: i64,
+) -> f64 {
+    let Some(t) = last_suggested_at else {
+        return 1.0;
+    };
+    let days = ((now_unix - t).max(0)) / ONE_DAY_SECS;
+    let weeks = days / 7;
+    if weeks >= SUGGESTION_DECAY_WEEKS {
+        1.0
+    } else {
+        (weeks as f64) * 0.1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

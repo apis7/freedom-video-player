@@ -362,6 +362,26 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_library_identities_metadata_user_removed
         ON library_identities(metadata_user_removed);
     "#,
+    // ────────────────────────────────────────────────────────────────
+    // v15: Suggestion-engine memory.
+    //
+    // `last_suggested_at` — when this identity was last surfaced by any
+    // of the three suggestion engines (suggestion rail, roulette,
+    // profile-creator nudge). The engines apply a decay multiplier so
+    // a freshly-suggested identity gets 0× weight for the first week,
+    // 0.1× the next, 0.2× the next, … reaching 1.0× at week 10. NULL
+    // means never-suggested (full weight).
+    //
+    // `suggest_skip_until_at` — explicit user "skip for N months" set
+    // by the new suggestion-rail skip button. The engines filter out
+    // identities whose value is in the future. NULL means no skip.
+    //
+    // Both columns nullable + no index (small table, range scans are
+    // fine; future migration can add indexes if scan times grow).
+    r#"
+    ALTER TABLE library_identities ADD COLUMN last_suggested_at INTEGER;
+    ALTER TABLE library_identities ADD COLUMN suggest_skip_until_at INTEGER;
+    "#,
 ];
 
 /// Thread-safe handle around a single `Connection`. SQLite's serialized

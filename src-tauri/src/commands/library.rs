@@ -5492,11 +5492,53 @@ pub fn roulette_pick_core(
     };
     let now = now_unix();
 
-    // Apply family-view filter at the candidate-collection stage so a
-    // family-mode pick never lands on a blocked title even by random chance.
+    // Pull last_suggested_at + suggest_skip_until_at for decay ramp +
+    // explicit 3-month skip filter (same as the suggestion rail).
+    let (last_suggested, skip_until): (HashMap<i64, i64>, HashMap<i64, i64>) = {
+        let mut last_s: HashMap<i64, i64> = HashMap::new();
+        let mut skip_u: HashMap<i64, i64> = HashMap::new();
+        if let Ok(mut s) = conn.prepare(
+            "SELECT id, last_suggested_at, suggest_skip_until_at FROM library_identities
+              WHERE last_suggested_at IS NOT NULL OR suggest_skip_until_at IS NOT NULL",
+        ) {
+            if let Ok(rows) = s.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            }) {
+                for row in rows.flatten() {
+                    if let Some(t) = row.1 {
+                        last_s.insert(row.0, t);
+                    }
+                    if let Some(t) = row.2 {
+                        skip_u.insert(row.0, t);
+                    }
+                }
+            }
+        }
+        (last_s, skip_u)
+    };
+    let want_to_watch: std::collections::HashSet<i64> =
+        load_want_to_watch_identity_ids(&conn);
+
+    // Apply family-view filter + skip_until at the candidate-collection
+    // stage so a family-mode or explicitly-skipped pick never lands by
+    // random chance.
     let candidates: Vec<&(LibraryFile, LibraryIdentity)> = pool
         .iter()
-        .filter(|(_, i)| !(family_view_on && i.non_family_friendly))
+        .filter(|(_, i)| {
+            if family_view_on && i.non_family_friendly {
+                return false;
+            }
+            if let Some(until) = skip_until.get(&i.id) {
+                if *until > now {
+                    return false;
+                }
+            }
+            true
+        })
         .collect();
     if candidates.is_empty() {
         return Ok(None);
@@ -5519,13 +5561,26 @@ pub fn roulette_pick_core(
     let mut unit_weights: HashMap<String, (SpinUnit, f64)> = HashMap::new();
     for (f, i) in candidates.iter() {
         let recency = suggestions::recency_weight(f.last_watched_at, now);
+        let wtw_mult = if want_to_watch.contains(&i.id) {
+            suggestions::WANT_TO_WATCH_WEIGHT_BOOST
+        } else {
+            1.0
+        };
+        // Suggestion-decay ramp: 0× for the first week after this
+        // title was last suggested anywhere (rail, roulette, profile
+        // nudge), ramping back to 1.0× over 10 weeks.
+        let decay = suggestions::suggestion_decay_multiplier(
+            last_suggested.get(&i.id).copied(),
+            now,
+        );
+        let per_file = recency * wtw_mult * decay;
         let (key, unit) = match series_membership.get(&i.id) {
             Some((series_id, _)) => (format!("series:{series_id}"), SpinUnit::Series(*series_id)),
             None => (format!("file:{}", f.id), SpinUnit::Standalone(f.id)),
         };
         let entry = unit_weights.entry(key).or_insert((unit, 0.0));
-        if recency > entry.1 {
-            entry.1 = recency;
+        if per_file > entry.1 {
+            entry.1 = per_file;
         }
     }
 
@@ -5596,6 +5651,16 @@ pub fn roulette_pick_core(
             }
         }
     };
+    // Record the picked file's identity as just-suggested so the
+    // decay ramp blocks it from re-winning the next spin. Best-effort
+    // - a roulette feel-bad of "I just got the same movie twice in a
+    // row" is the symptom this fixes.
+    if let Some((_, picked_identity)) = candidates.iter().find(|(f, _)| f.id == pick_file_id) {
+        let _ = conn.execute(
+            "UPDATE library_identities SET last_suggested_at = ?1 WHERE id = ?2",
+            params![now, picked_identity.id],
+        );
+    }
     drop(conn);
     get_row_core(db, pick_file_id)
 }
@@ -5652,6 +5717,45 @@ pub fn suggest_next_core(
         .collect();
     drop(stmt);
 
+    // Pull last_suggested_at + suggest_skip_until_at for the decay
+    // ramp and the explicit 3-month skip button. Two HashMaps so the
+    // per-candidate filter/weight loop below stays O(N).
+    let (last_suggested, skip_until): (HashMap<i64, i64>, HashMap<i64, i64>) = {
+        let mut last_s: HashMap<i64, i64> = HashMap::new();
+        let mut skip_u: HashMap<i64, i64> = HashMap::new();
+        let mut s = match conn.prepare(
+            "SELECT id, last_suggested_at, suggest_skip_until_at FROM library_identities
+              WHERE last_suggested_at IS NOT NULL OR suggest_skip_until_at IS NOT NULL",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Err("prepare suggestion-memory: failed".into()),
+        };
+        let it = s.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        });
+        if let Ok(rows) = it {
+            for row in rows.flatten() {
+                let (id, last_s_opt, skip_u_opt) = row;
+                if let Some(t) = last_s_opt {
+                    last_s.insert(id, t);
+                }
+                if let Some(t) = skip_u_opt {
+                    skip_u.insert(id, t);
+                }
+            }
+        }
+        (last_s, skip_u)
+    };
+
+    // Want-to-Watch collection memberships → set of identity_ids that
+    // get the WANT_TO_WATCH_WEIGHT_BOOST multiplier below.
+    let want_to_watch: std::collections::HashSet<i64> =
+        load_want_to_watch_identity_ids(&conn);
+
     let series_membership = load_series_membership(&conn)?;
     // identity_id → series_id for quick lookup during filtering / swap.
     let identity_to_series: HashMap<i64, i64> = series_membership
@@ -5667,6 +5771,12 @@ pub fn suggest_next_core(
             }
             if suggestions::is_recently_dismissed(dismissed.get(&i.id).copied(), now) {
                 return false;
+            }
+            // 'Skip and don't suggest for N months' from the rail button.
+            if let Some(until) = skip_until.get(&i.id) {
+                if *until > now {
+                    return false;
+                }
             }
             // Don't suggest titles the user just watched (within 24h).
             if let Some(t) = f.last_watched_at {
@@ -5702,8 +5812,21 @@ pub fn suggest_next_core(
         .iter()
         .map(|(f, i)| {
             let base = suggestions::recency_weight(f.last_watched_at, now);
-            let boosted = if series_boosts.contains(&i.id) { base * 1.10 } else { base };
-            (f.id, boosted)
+            let after_series = if series_boosts.contains(&i.id) { base * 1.10 } else { base };
+            let after_wtw = if want_to_watch.contains(&i.id) {
+                after_series * suggestions::WANT_TO_WATCH_WEIGHT_BOOST
+            } else {
+                after_series
+            };
+            // Suggestion-decay ramp: 0× for first week after being
+            // suggested, ramping back to 1.0× over the following 10
+            // weeks. Multiplied LAST so it dominates - a freshly
+            // suggested wishlisted comeback-bonus title still hits 0×.
+            let decay = suggestions::suggestion_decay_multiplier(
+                last_suggested.get(&i.id).copied(),
+                now,
+            );
+            (f.id, after_wtw * decay)
         })
         .collect();
 
@@ -5753,8 +5876,48 @@ pub fn suggest_next_core(
             }
         }
     }
+    // Record the chosen identity's last_suggested_at = now. The
+    // decay multiplier kicks in on the next call; this is what
+    // makes the engine not keep surfacing the same handful of
+    // titles every refresh. Best-effort: a failed write here just
+    // means the next refresh might re-suggest it sooner than
+    // intended - not catastrophic.
+    if let Some((_, picked_identity)) =
+        candidates.iter().find(|(f, _)| f.id == pick_file_id)
+    {
+        let _ = conn.execute(
+            "UPDATE library_identities SET last_suggested_at = ?1 WHERE id = ?2",
+            params![now, picked_identity.id],
+        );
+    }
     drop(conn);
     get_row_core(db, pick_file_id)
+}
+
+/// Load identity_ids that are members of the auto-managed "Want to
+/// Watch" collection (case-insensitive name match - so a user who
+/// manually renamed an existing collection to that name still gets
+/// the boost). Returns empty set if no such collection exists.
+fn load_want_to_watch_identity_ids(
+    conn: &rusqlite::Connection,
+) -> std::collections::HashSet<i64> {
+    let mut stmt = match conn.prepare(
+        "SELECT ci.identity_id
+           FROM library_collection_items ci
+           JOIN library_collections c ON c.id = ci.collection_id
+          WHERE LOWER(c.name) = LOWER(?1)",
+    ) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    let rows = stmt.query_map(
+        params![suggestions::WANT_TO_WATCH_COLLECTION_NAME],
+        |r| r.get::<_, i64>(0),
+    );
+    match rows {
+        Ok(it) => it.flatten().collect(),
+        Err(_) => std::collections::HashSet::new(),
+    }
 }
 
 /// "Next" button on the suggestion — record this identity as dismissed
@@ -5774,6 +5937,93 @@ pub fn library_dismiss_suggestion(
     )
     .map_err(|e| format!("dismiss: {e}"))?;
     Ok(())
+}
+
+/// 'Skip and don't suggest for N months' button on the suggestion
+/// rail. Hard-stops the engine from surfacing this identity until
+/// `now + months * 30 days`. After the window expires the normal
+/// decay multiplier resumes (and by then it's already been months
+/// of zero exposure, so the ramp is at 100% - the title returns to
+/// full eligibility immediately).
+#[tauri::command]
+pub fn library_skip_suggestion_for_months(
+    db: State<'_, LibraryDb>,
+    identity_id: i64,
+    months: i64,
+) -> Result<(), String> {
+    let m = months.clamp(1, 60); // sanity bound: 1 month to 5 years
+    let until = now_unix() + m * 30 * 86_400;
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE library_identities SET suggest_skip_until_at = ?1 WHERE id = ?2",
+        params![until, identity_id],
+    )
+    .map_err(|e| format!("skip_for_months: {e}"))?;
+    crate::log!(
+        "library:suggest",
+        "skip-for-{m}-months: identity={identity_id} until_unix={until}"
+    );
+    Ok(())
+}
+
+/// Add an identity to the auto-managed 'Want to Watch' collection.
+/// Idempotent: creates the collection on first use, then INSERT OR
+/// IGNORE so re-clicking the same tile is a no-op. The suggestion
+/// engines pick up the membership via load_want_to_watch_identity_ids
+/// and apply a 3× boost. Returns the collection_id so the frontend
+/// can navigate into it if the user wants.
+#[tauri::command]
+pub fn library_add_to_want_to_watch(
+    db: State<'_, LibraryDb>,
+    identity_id: i64,
+) -> Result<i64, String> {
+    let conn = db.lock();
+    // Look up existing collection by name (case-insensitive).
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM library_collections
+              WHERE LOWER(name) = LOWER(?1)
+              ORDER BY id ASC LIMIT 1",
+            params![suggestions::WANT_TO_WATCH_COLLECTION_NAME],
+            |r| r.get(0),
+        )
+        .ok();
+    let collection_id = if let Some(id) = existing {
+        id
+    } else {
+        let now = now_unix();
+        conn.execute(
+            "INSERT INTO library_collections(name, created_at) VALUES (?1, ?2)",
+            params![suggestions::WANT_TO_WATCH_COLLECTION_NAME, now],
+        )
+        .map_err(|e| format!("create want-to-watch: {e}"))?;
+        let new_id = conn.last_insert_rowid();
+        crate::log!(
+            "library",
+            "auto-created \"{}\" collection (id={new_id}) - first wishlist click",
+            suggestions::WANT_TO_WATCH_COLLECTION_NAME
+        );
+        new_id
+    };
+    // Append at the end. INSERT OR IGNORE handles re-clicks gracefully.
+    let next_position: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM library_collection_items WHERE collection_id = ?1",
+            params![collection_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT OR IGNORE INTO library_collection_items(collection_id, identity_id, position)
+         VALUES (?1, ?2, ?3)",
+        params![collection_id, identity_id, next_position],
+    )
+    .map_err(|e| format!("add to want-to-watch: {e}"))?;
+    crate::log!(
+        "library",
+        "want-to-watch + identity_id={identity_id} → collection {collection_id}"
+    );
+    Ok(collection_id)
 }
 
 /// Profile Creator nudge: pick the most "obvious next candidate" for a

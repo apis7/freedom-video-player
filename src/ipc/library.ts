@@ -213,6 +213,10 @@ export const libraryIpc = {
     libInvoke<LibraryRow | null>("suggest_next", { familyViewOn }),
   dismissSuggestion: (identityId: number) =>
     libInvoke<void>("dismiss_suggestion", { identityId }),
+  skipSuggestionForMonths: (identityId: number, months: number) =>
+    libInvoke<void>("skip_suggestion_for_months", { identityId, months }),
+  addToWantToWatch: (identityId: number) =>
+    libInvoke<number>("add_to_want_to_watch", { identityId }),
   profileCreatorSuggest: (familyViewOn: boolean) =>
     libInvoke<LibraryRow | null>("profile_creator_suggest", { familyViewOn }),
   clearDriftWarning: (fileId: number) =>

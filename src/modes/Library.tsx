@@ -2130,6 +2130,33 @@ export function LibraryMode() {
                   );
                   void refreshManyMetadata([row.identity.id]);
                 }}
+                onAddToWantToWatch={
+                  activeScope.kind === "all"
+                    ? (row) => {
+                        actlog(
+                          "thumb-view",
+                          `want-to-watch badge identity_id=${row.identity.id}`,
+                        );
+                        void libraryIpc
+                          .addToWantToWatch(row.identity.id)
+                          .then(() => {
+                            showToast(
+                              `Added to "Want to Watch".`,
+                              "info",
+                              2500,
+                            );
+                            void refreshItems();
+                          })
+                          .catch((err) => {
+                            showToast(
+                              `Couldn't add to Want to Watch: ${err}`,
+                              "error",
+                              4000,
+                            );
+                          });
+                      }
+                    : undefined
+                }
                 onTryRefind={(row) => tryRefindRow(row)}
               />
             </div>

@@ -448,6 +448,8 @@ pub fn run() {
             commands::library::library_roulette_pick,
             commands::library::library_suggest_next,
             commands::library::library_dismiss_suggestion,
+            commands::library::library_skip_suggestion_for_months,
+            commands::library::library_add_to_want_to_watch,
             commands::library::library_profile_creator_suggest,
             commands::library::library_clear_drift_warning,
             commands::library::library_find_file_by_path,

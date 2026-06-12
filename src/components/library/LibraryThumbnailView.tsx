@@ -66,6 +66,13 @@ interface Props {
    *  badge that appears on the bottom-right of every thumbnail that
    *  has neither a custom thumbnail nor a cached poster. */
   onRefreshMetadata?: (row: LibraryRow) => void;
+  /** Add this row's identity to the auto-managed 'Want to Watch'
+   *  collection. Parent passes undefined when the current scope
+   *  isn't "all" - the button only makes sense at the top level
+   *  where the user is browsing the whole library, not inside a
+   *  series or a collection they already curated. Backend creates
+   *  the collection on first use; subsequent clicks just append. */
+  onAddToWantToWatch?: (row: LibraryRow) => void;
   /** Click on the red ✕ broken-link badge — runs the re-find heuristic
    *  (stat path → check for sibling identity → walk watched folders).
    *  Caller toasts the result and triggers a list refresh. */
@@ -103,6 +110,7 @@ export function LibraryThumbnailView({
   onPlay,
   onContextMenu,
   onRefreshMetadata,
+  onAddToWantToWatch,
   onTryRefind,
 }: Props) {
   // Save + restore scroll offset by scope.
@@ -339,6 +347,7 @@ export function LibraryThumbnailView({
     onPlay,
     onContextMenu,
     onRefreshMetadata,
+    onAddToWantToWatch,
     onTryRefind,
   };
 
@@ -423,6 +432,7 @@ interface CellData {
   onPlay: Props["onPlay"];
   onContextMenu: Props["onContextMenu"];
   onRefreshMetadata?: Props["onRefreshMetadata"];
+  onAddToWantToWatch?: Props["onAddToWantToWatch"];
   onTryRefind?: Props["onTryRefind"];
 }
 
@@ -467,6 +477,7 @@ function Cell({
         onPlay={data.onPlay}
         onContextMenu={data.onContextMenu}
         onRefreshMetadata={data.onRefreshMetadata}
+        onAddToWantToWatch={data.onAddToWantToWatch}
         onTryRefind={data.onTryRefind}
       />
     </div>
@@ -494,6 +505,7 @@ function ThumbCard({
   onPlay,
   onContextMenu,
   onRefreshMetadata,
+  onAddToWantToWatch,
   onTryRefind,
 }: {
   row: LibraryRow;
@@ -520,6 +532,7 @@ function ThumbCard({
   onPlay: Props["onPlay"];
   onContextMenu: Props["onContextMenu"];
   onRefreshMetadata?: Props["onRefreshMetadata"];
+  onAddToWantToWatch?: Props["onAddToWantToWatch"];
   onTryRefind?: Props["onTryRefind"];
 }) {
   const id = row.identity;
@@ -699,6 +712,30 @@ function ThumbCard({
           >
             ⚠
           </div>
+        )}
+        {/* "Want to Watch" wishlist button — bottom-left, only on
+            the All-Movies scope (parent passes onAddToWantToWatch as
+            undefined in series / collection scopes so it stays
+            hidden). Backend auto-creates the collection on first
+            click; subsequent clicks add to it. Suggestion engines
+            apply a 3× weight boost to its members. Standalone tiles
+            only - synthetic series rows aren't single movies and
+            broken-link rows have the recovery flow taking the same
+            visual real estate. */}
+        {synthSeries == null && !row.file.is_missing && onAddToWantToWatch && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onAddToWantToWatch(row);
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="absolute bottom-1 left-1 w-7 h-7 bg-fvp-bg/85 border border-fvp-accent/70 hover:bg-fvp-accent hover:text-white text-fvp-accent rounded-full flex items-center justify-center text-[13px] shadow transition-colors"
+            title="Add to Want to Watch — boosts this movie in roulette + suggestions"
+            aria-label="Add to Want to Watch"
+          >
+            🎬
+          </button>
         )}
         {/* Refresh-metadata shortcut. Shows on the bottom-right when
             the identity has neither a custom thumbnail nor a cached

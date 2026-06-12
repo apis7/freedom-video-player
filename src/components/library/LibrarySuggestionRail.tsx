@@ -32,7 +32,7 @@ export function LibrarySuggestionRail({ refreshToken, familyViewOn }: Props) {
   const showToast = useAppStore((s) => s.showToast);
 
   const fetchNext = useCallback(
-    async (reason: "rotate" | "manual" | "dismiss" | "refresh") => {
+    async (reason: "rotate" | "manual" | "dismiss" | "refresh" | "skip-3mo") => {
       setLoading(true);
       try {
         const next = await libraryIpc.suggestNext(familyViewOn);
@@ -116,6 +116,18 @@ export function LibrarySuggestionRail({ refreshToken, familyViewOn }: Props) {
                 title="Don't suggest for 7 days"
               >
                 Next →
+              </button>
+              <button
+                onClick={() => {
+                  void libraryIpc
+                    .skipSuggestionForMonths(row.identity.id, 3)
+                    .then(() => fetchNext("skip-3mo"));
+                }}
+                className="text-[11px] leading-none px-1.5 py-1 bg-fvp-bg border border-fvp-border text-fvp-muted hover:text-fvp-text rounded"
+                title="Skip and don't suggest this movie for 3 months"
+                aria-label="Skip this suggestion for 3 months"
+              >
+                ⏭
               </button>
               <CountdownRing
                 resetAt={rotateAnchor}

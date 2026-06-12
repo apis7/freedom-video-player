@@ -4041,7 +4041,17 @@ pub async fn library_generate_thumbnail_from_random_frame(
             init.set_option("of", "image2")?;
             init.set_option("ovc", "mjpeg")?;
             // qscale 2..5 are typical for stills; 3 is "very good".
-            init.set_option("ovcopts", "qscale=3")?;
+            // strict=-1 (= FF_COMPLIANCE_UNOFFICIAL) is required for
+            // sources that decode to full-range YUV (yuvj420p etc.) -
+            // many old AVIs and MPEG-4 ASP encodes tag the stream as
+            // PC range, and mjpeg refuses to encode them at default
+            // strict_std_compliance with:
+            //   'Non full-range YUV is non-standard, set
+            //    strict_std_compliance to at most unofficial to use it'
+            // The encoded JPEG is still valid - it's just that mjpeg's
+            // own spec doesn't bless full-range as standard. No
+            // downside for our use case (one-off thumbnail still).
+            init.set_option("ovcopts", "qscale=3,strict=-1")?;
             Ok(())
         })
         .map_err(|e| format!("libmpv init: {e:?}"))?;

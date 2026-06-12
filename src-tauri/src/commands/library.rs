@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use std::time::SystemTime;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ── Host server supervisor ───────────────────────────────────────────
 //
@@ -2417,14 +2417,32 @@ pub fn set_custom_thumbnail_core(
 /// (`\\server\share\path`) need extra-careful quoting — Explorer wants
 /// the path quoted but the /select, prefix NOT quoted.
 #[tauri::command]
-pub fn library_reveal_in_explorer(path: String) -> Result<(), String> {
+pub fn library_reveal_in_explorer(
+    db: State<'_, LibraryDb>,
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<(), String> {
     crate::log!("library", "reveal_in_explorer: {path}");
     let p = std::path::Path::new(&path);
     let Some(parent) = p.parent() else {
         return Err("path has no parent folder".into());
     };
     if !p.exists() {
-        crate::log!("library", "reveal_in_explorer: file missing");
+        // Lazy is_missing: mark the row(s) for this path missing right
+        // now. Saves the user from waiting for the next periodic scan
+        // to discover what they already know. The UI listens for
+        // 'library:items-changed' and refreshes thumbnails so the red
+        // ✕ shows up immediately.
+        let flagged = crate::library::index::mark_path_missing(&db, &path);
+        if flagged > 0 {
+            crate::log!(
+                "library",
+                "reveal_in_explorer: file missing - flagged {flagged} row(s) is_missing=1 on demand"
+            );
+            let _ = app.emit("library:list-changed", ());
+        } else {
+            crate::log!("library", "reveal_in_explorer: file missing");
+        }
         return Err(format!("File not found: {path}"));
     }
     #[cfg(target_os = "windows")]
@@ -3442,12 +3460,13 @@ pub fn library_snapshot_take_now(
 #[tauri::command]
 pub fn library_snapshot_reveal_dir(
     db: State<'_, LibraryDb>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let dir = crate::library::snapshot::effective_snapshot_dir(&db);
     if !dir.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| format!("create: {e}"))?;
     }
-    library_reveal_in_explorer(dir.to_string_lossy().into_owned())
+    library_reveal_in_explorer(db, app, dir.to_string_lossy().into_owned())
 }
 
 /// Schedule a restore-from-snapshot for the NEXT app launch. The user

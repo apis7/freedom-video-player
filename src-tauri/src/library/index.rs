@@ -668,6 +668,32 @@ pub fn refresh_free_siblings_for_path(db: &LibraryDb, video_path: &str) -> Resul
 /// for its temporal-correlation signal. Files that have BEEN missing
 /// keep their original timestamp so the window doesn't reset on every
 /// rescan.
+/// Lazy is_missing detection: any UI action that hits a file path
+/// (reveal-in-explorer, play, etc.) can call this when its on-disk
+/// stat comes back "not found" to flip the matching library_files
+/// row(s) to is_missing=1 right then, without waiting for the next
+/// periodic scan. The user gets the red ✕ on the thumbnail and the
+/// broken-file recovery modal on the next play attempt, instead of
+/// silently failing with a generic error and a stale healthy-looking
+/// thumbnail. Returns the number of rows flagged so callers can log
+/// it. Also touches `missing_since` with the current unix time so the
+/// downstream missing-since temporal-correlation window starts now.
+pub fn mark_path_missing(db: &LibraryDb, path: &str) -> u32 {
+    let conn = db.lock();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "UPDATE library_files
+            SET is_missing = 1,
+                missing_since = COALESCE(missing_since, ?2)
+          WHERE path = ?1 AND is_missing = 0",
+        params![path, now],
+    )
+    .unwrap_or(0) as u32
+}
+
 pub fn mark_folder_files_missing(db: &LibraryDb, folder_id: i64) -> Result<(), String> {
     let conn = db.lock();
     let now = std::time::SystemTime::now()

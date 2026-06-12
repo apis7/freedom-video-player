@@ -2,12 +2,35 @@ use crate::playback::audio_filter::{
     build as build_effect_overlay, EffectGraph, EffectInputs,
 };
 use crate::playback::audio_replace::{build as build_overlay, OverlayGraph, OverlayInputs};
+use crate::library::LibraryDb;
 use crate::playback::{AudioDevice, MpvPlayer, PlayerState, SubtitleTrack};
 use crate::profile::format::{Snip, SnipAction};
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[tauri::command]
-pub fn open_file(player: State<'_, MpvPlayer>, path: String) -> Result<(), String> {
+pub fn open_file(
+    player: State<'_, MpvPlayer>,
+    db: State<'_, LibraryDb>,
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<(), String> {
+    // Lazy is_missing detection — same idea as library_reveal_in_explorer.
+    // If the file is gone, flag the matching DB row(s) is_missing=1 now
+    // and emit a refresh event so the UI lights up the broken thumbnail
+    // (and the recovery modal will fire on the next play attempt
+    // instead of letting the user try again on the same dead path).
+    // load_file does its own existence check and returns a nice error,
+    // but only after we've already updated the DB.
+    if !std::path::Path::new(&path).exists() {
+        let flagged = crate::library::index::mark_path_missing(&db, &path);
+        if flagged > 0 {
+            crate::log!(
+                "playback",
+                "open_file: file missing - flagged {flagged} row(s) is_missing=1 on demand"
+            );
+            let _ = app.emit("library:list-changed", ());
+        }
+    }
     player.load_file(&path)?;
     player.play()
 }

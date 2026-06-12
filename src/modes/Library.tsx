@@ -831,6 +831,60 @@ export function LibraryMode() {
     [refreshItems, showToast],
   );
 
+  /** Run try_refind across a list of rows sequentially, aggregate the
+   *  outcomes, and show ONE summary toast instead of N per-row toasts.
+   *  Use case: the user has a series selected, one row is flagged
+   *  broken, but the others MIGHT also be broken (the periodic scan
+   *  hasn't run since they moved the folder). Right-click on the
+   *  broken one → 'Search for broken filepaths (N selected, re-check
+   *  all)' fires this. The backend stats each path - rows that turn
+   *  out to still be present are no-ops (StillPresent), rows that are
+   *  actually missing get rebound / merged / flagged. The single
+   *  closing toast tells the user how many were healthy and how many
+   *  got fixed. */
+  const tryRefindRowsBatch = useCallback(
+    async (rowsToCheck: LibraryRow[]) => {
+      if (rowsToCheck.length === 0) return;
+      actlog(
+        "thumb-view",
+        `try-refind batch: ${rowsToCheck.length} row(s)`,
+      );
+      let stillPresent = 0;
+      let recovered = 0;
+      let merged = 0;
+      let rebound = 0;
+      let stillMissing = 0;
+      let errored = 0;
+      for (const r of rowsToCheck) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const res = await libraryIpc.tryRefindFile(r.file.id);
+          if (res.kind === "StillPresent") stillPresent += 1;
+          else if (res.kind === "Recovered") recovered += 1;
+          else if (res.kind === "MergedInto") merged += 1;
+          else if (res.kind === "Rebound") rebound += 1;
+          else stillMissing += 1;
+        } catch {
+          errored += 1;
+        }
+      }
+      void refreshItems();
+      const fixed = recovered + merged + rebound;
+      const parts: string[] = [];
+      if (fixed > 0) parts.push(`${fixed} re-linked`);
+      if (stillPresent > 0) parts.push(`${stillPresent} already healthy`);
+      if (stillMissing > 0) parts.push(`${stillMissing} still missing`);
+      if (errored > 0) parts.push(`${errored} errored`);
+      const summary = parts.length === 0
+        ? `Checked ${rowsToCheck.length} item${rowsToCheck.length === 1 ? "" : "s"}.`
+        : `${parts.join(", ")}.`;
+      const variant: "info" | "warn" | "error" =
+        stillMissing > 0 || errored > 0 ? "warn" : "info";
+      showToast(summary, variant, 4500);
+    },
+    [refreshItems, showToast],
+  );
+
   const refreshManyMetadata = useCallback(
     async (
       identityIds: number[],
@@ -1038,40 +1092,30 @@ export function LibraryMode() {
       };
       // When the file is missing on disk, surface the recovery action
       // at the TOP of the menu since it's the most important thing the
-      // user can do with this row right now. Multi-aware: when the user
-      // has many broken thumbnails selected (e.g. they just moved an
-      // entire series folder and the indexer hasn't caught up yet), run
-      // tryRefindRow against every selected broken row sequentially so
-      // they don't have to right-click each one. Working rows in the
-      // selection are silently skipped.
-      const brokenTargets = targets.filter((t) => t.file.is_missing);
+      // user can do with this row right now. Multi-aware: when the
+      // user has a selection (e.g. an entire series tile after they
+      // moved its folder), the action re-checks EVERY selected row's
+      // on-disk state - not just the ones currently flagged
+      // is_missing. The DB's is_missing flag is set by the periodic
+      // scan, which lags reality; the user knows the move happened
+      // NOW and wants every related row re-stat'd RIGHT NOW. The
+      // backend stats each path: still-present rows are no-ops,
+      // actually-missing rows get rebound / merged / flagged. One
+      // summary toast at the end reports the aggregate outcome.
+      const isMultiSelection = targets.length > 1;
       const brokenLinkItems: MenuItem[] = row.file.is_missing
         ? [
             {
               kind: "item" as const,
-              label: brokenTargets.length > 1
-                ? `🔎 Search for broken filepaths (${brokenTargets.length} selected)`
+              label: isMultiSelection
+                ? `🔎 Search for broken filepaths (re-check all ${targets.length} selected)`
                 : "🔎 Search for broken filepath",
-              title:
-                "Try to recover this broken link. Stats the original path, looks for an already-indexed copy at a new location (auto-merges), and walks watched folders for a same-named file.",
+              title: isMultiSelection
+                ? "Re-stat every selected item, marks anything that's actually gone as broken, and rebinds whatever can be found at a new location. Items that are still healthy are left alone."
+                : "Try to recover this broken link. Stats the original path, looks for an already-indexed copy at a new location (auto-merges), and walks watched folders for a same-named file.",
               onClick: () => {
-                if (brokenTargets.length > 1) {
-                  void (async () => {
-                    for (const t of brokenTargets) {
-                      // Sequential, not parallel — try_refind takes the
-                      // DB lock; bursting parallel calls would just
-                      // serialize on the backend anyway and overwhelm
-                      // the toast stack.
-                      // eslint-disable-next-line no-await-in-loop
-                      await new Promise<void>((resolve) => {
-                        tryRefindRow(t);
-                        // tryRefindRow is fire-and-forget; small delay
-                        // gives each one room to toast + refresh before
-                        // the next one fires.
-                        window.setTimeout(resolve, 60);
-                      });
-                    }
-                  })();
+                if (isMultiSelection) {
+                  void tryRefindRowsBatch(targets);
                 } else {
                   tryRefindRow(row);
                 }

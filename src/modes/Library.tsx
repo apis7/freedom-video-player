@@ -1390,6 +1390,89 @@ export function LibraryMode() {
           },
         },
         { kind: "separator" },
+        // "Remove from Series 'X'" — visible only when EVERY selected
+        // target is a member of the same series. Multi-select with
+        // mixed memberships (some in Series A, some in Series B) hides
+        // the item; the user has to do them in batches by selecting one
+        // series at a time. Single-target case is the common one and
+        // works naturally.
+        ...(() => {
+          const firstSeries = targets[0]?.series;
+          if (!firstSeries) return [];
+          const allShareSeries = targets.every(
+            (t) => t.series?.series_id === firstSeries.series_id,
+          );
+          if (!allShareSeries) return [];
+          return [
+            {
+              kind: "item" as const,
+              label: isMulti
+                ? `Remove ${N} from Series "${firstSeries.series_name}"`
+                : `Remove from Series "${firstSeries.series_name}"`,
+              title:
+                "Removes this movie from the series. The movie itself stays in your library; only the series membership is dropped.",
+              onClick: () => {
+                actlog(
+                  "menu",
+                  `remove from series series_id=${firstSeries.series_id} count=${targetIdentityIds.length}`,
+                );
+                void libraryIpc
+                  .removeFromSeries(firstSeries.series_id, targetIdentityIds)
+                  .then(() => {
+                    showToast(
+                      `Removed ${targetIdentityIds.length} from "${firstSeries.series_name}".`,
+                      "info",
+                      2500,
+                    );
+                    void refreshItems();
+                  })
+                  .catch((err) =>
+                    showToast(`Remove failed: ${err}`, "error", 4000),
+                  );
+              },
+            },
+          ];
+        })(),
+        // "Remove from Collection 'X'" — one item per collection that
+        // EVERY selected target shares. A multi-select where the targets
+        // share two collections produces two menu items, one per
+        // collection. Targets with disjoint collection sets see neither.
+        ...(() => {
+          const first = targets[0];
+          if (!first || first.collections.length === 0) return [];
+          const shared = first.collections.filter((c) =>
+            targets.every((t) =>
+              t.collections.some((tc) => tc.collection_id === c.collection_id),
+            ),
+          );
+          return shared.map((c) => ({
+            kind: "item" as const,
+            label: isMulti
+              ? `Remove ${N} from Collection "${c.collection_name}"`
+              : `Remove from Collection "${c.collection_name}"`,
+            title:
+              "Removes this movie from the collection. The movie itself stays in your library; only the collection membership is dropped.",
+            onClick: () => {
+              actlog(
+                "menu",
+                `remove from collection collection_id=${c.collection_id} count=${targetIdentityIds.length}`,
+              );
+              void libraryIpc
+                .removeFromCollection(c.collection_id, targetIdentityIds)
+                .then(() => {
+                  showToast(
+                    `Removed ${targetIdentityIds.length} from "${c.collection_name}".`,
+                    "info",
+                    2500,
+                  );
+                  void refreshItems();
+                })
+                .catch((err) =>
+                  showToast(`Remove failed: ${err}`, "error", 4000),
+                );
+            },
+          }));
+        })(),
         {
           kind: "item",
           label: isMulti ? `Delete ${N} selected…` : "Delete…",

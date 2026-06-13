@@ -36,7 +36,22 @@ export function DeleteConfirmModal({
   const inc = useAppStore((s) => s.incrementOpenModalCount);
   const dec = useAppStore((s) => s.decrementOpenModalCount);
   const showToast = useAppStore((s) => s.showToast);
-  const [choice, setChoice] = useState<"remove" | "recycle">(defaultChoice);
+  // Detect a shared-series situation among the rows about to be
+  // "deleted" so we can offer a third, much-softer option: just drop
+  // the series membership and leave the movies in the library.
+  // Visible only when EVERY selected row is in the same series -
+  // mixed-series selections see the two original options (the user
+  // would have to do them per-series via the right-click menu).
+  const commonSeries = (() => {
+    const first = rows[0]?.series;
+    if (!first) return null;
+    return rows.every((r) => r.series?.series_id === first.series_id)
+      ? { id: first.series_id, name: first.series_name }
+      : null;
+  })();
+  const [choice, setChoice] = useState<
+    "remove" | "recycle" | "remove_from_series"
+  >(defaultChoice);
   const [rememberDefault, setRememberDefault] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -85,8 +100,35 @@ export function DeleteConfirmModal({
     if (busy) return;
     setBusy(true);
     try {
-      if (rememberDefault) {
+      // 'remove_from_series' is a non-destructive membership change.
+      // We don't persist it as a "delete default" - the persisted
+      // default only covers the actual delete branches.
+      if (rememberDefault && choice !== "remove_from_series") {
         await libraryIpc.setDeleteDefault(choice);
+      }
+      if (choice === "remove_from_series") {
+        if (!commonSeries) {
+          // Shouldn't be reachable - the radio is hidden in this case -
+          // but guard rather than blow up.
+          showToast(
+            "Mixed-series selection — pick the series-removal action from the right-click menu instead.",
+            "warn",
+            4000,
+          );
+          setBusy(false);
+          return;
+        }
+        const identityIds = Array.from(
+          new Set(rows.map((r) => r.identity.id)),
+        );
+        await libraryIpc.removeFromSeries(commonSeries.id, identityIds);
+        showToast(
+          `Removed ${identityIds.length} movie${identityIds.length === 1 ? "" : "s"} from "${commonSeries.name}". Movies stay in your library.`,
+          "info",
+          3500,
+        );
+        onResolved();
+        return;
       }
       const result =
         choice === "recycle"
@@ -150,6 +192,32 @@ export function DeleteConfirmModal({
         </div>
 
         <div className="px-5 py-3 border-t border-fvp-border space-y-2">
+          {/* Softest option, shown first when applicable: just drop
+              the series membership. The movies STAY in the library,
+              their files stay on disk - only the series link goes
+              away. Visible only when EVERY selected movie shares the
+              same series. */}
+          {commonSeries && (
+            <label className="flex items-start gap-3 cursor-pointer p-2 rounded hover:bg-fvp-surface2/40">
+              <input
+                type="radio"
+                checked={choice === "remove_from_series"}
+                onChange={() => setChoice("remove_from_series")}
+                className="accent-fvp-accent mt-0.5"
+              />
+              <div className="flex-1">
+                <div className="text-fvp-text text-xs font-semibold">
+                  Remove from Series "{commonSeries.name}" — keep in
+                  Library
+                </div>
+                <div className="text-[11px] text-fvp-muted">
+                  Drops only the series membership. The movies stay in
+                  your library and stay on disk. They go back to showing
+                  individually in All Movies.
+                </div>
+              </div>
+            </label>
+          )}
           <label className="flex items-start gap-3 cursor-pointer p-2 rounded hover:bg-fvp-surface2/40">
             <input
               type="radio"
@@ -205,10 +273,21 @@ export function DeleteConfirmModal({
         </div>
 
         <footer className="px-5 py-3 border-t border-fvp-border flex items-center justify-between text-xs">
-          <label className="flex items-center gap-1.5 cursor-pointer text-fvp-muted text-[10px]">
+          {/* "Remember default" is meaningless for the soft series-
+              removal option (that's an explicit, context-dependent
+              action - the user wouldn't want every future Delete to
+              default to it). Disable the checkbox while that option
+              is selected. */}
+          <label
+            className={
+              "flex items-center gap-1.5 cursor-pointer text-fvp-muted text-[10px] " +
+              (choice === "remove_from_series" ? "opacity-40 cursor-not-allowed" : "")
+            }
+          >
             <input
               type="checkbox"
               checked={rememberDefault}
+              disabled={choice === "remove_from_series"}
               onChange={(e) => setRememberDefault(e.target.checked)}
               className="accent-fvp-accent"
             />
@@ -238,7 +317,9 @@ export function DeleteConfirmModal({
                   ? allNetworkFiles
                     ? "Delete permanently"
                     : "Send to Recycle Bin"
-                  : "Remove from library"}
+                  : choice === "remove_from_series"
+                    ? "Remove from Series"
+                    : "Remove from library"}
             </button>
           </div>
         </footer>

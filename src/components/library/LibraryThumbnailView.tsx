@@ -713,7 +713,7 @@ function ThumbCard({
             ⚠
           </div>
         )}
-        {/* "Want to Watch" wishlist button — bottom-left, only on
+        {/* "Want to Watch" wishlist button — bottom-RIGHT, only on
             the All-Movies scope (parent passes onAddToWantToWatch as
             undefined in series / collection scopes so it stays
             hidden). Backend auto-creates the collection on first
@@ -730,7 +730,7 @@ function ThumbCard({
               onAddToWantToWatch(row);
             }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="absolute bottom-1 left-1 w-7 h-7 bg-fvp-bg/85 border border-fvp-accent/70 hover:bg-fvp-accent hover:text-white text-fvp-accent rounded-full flex items-center justify-center text-[13px] shadow transition-colors"
+            className="absolute bottom-1 right-1 w-7 h-7 bg-fvp-bg/85 border border-fvp-accent/70 hover:bg-fvp-accent hover:text-white text-fvp-accent rounded-full flex items-center justify-center text-[13px] shadow transition-colors"
             title="Add to Want to Watch — boosts this movie in roulette + suggestions"
             aria-label="Add to Want to Watch"
           >
@@ -740,7 +740,10 @@ function ThumbCard({
         {/* Refresh-metadata shortcut. Shows on the bottom-right when
             the identity has neither a custom thumbnail nor a cached
             TMDb poster — these are the rows where the user most likely
-            wants to nudge a fresh search. Hidden once a poster lands. */}
+            wants to nudge a fresh search. Hidden once a poster lands.
+            When the Want-to-Watch button is also visible (All Movies
+            scope), this badge shifts one button-width to the LEFT so
+            both fit on the same row without overlapping. */}
         {synthSeries == null &&
           !id.custom_thumbnail_path &&
           !id.poster_local_path &&
@@ -753,7 +756,10 @@ function ThumbCard({
                 onRefreshMetadata(row);
               }}
               onDoubleClick={(e) => e.stopPropagation()}
-              className="absolute bottom-1 right-1 w-7 h-7 bg-fvp-bg/85 border border-fvp-accent/70 hover:bg-fvp-accent hover:text-white text-fvp-accent rounded-full flex items-center justify-center text-[14px] shadow transition-colors"
+              className={
+                "absolute bottom-1 w-7 h-7 bg-fvp-bg/85 border border-fvp-accent/70 hover:bg-fvp-accent hover:text-white text-fvp-accent rounded-full flex items-center justify-center text-[14px] shadow transition-colors " +
+                (onAddToWantToWatch ? "right-9" : "right-1")
+              }
               title="No poster — try a TMDb metadata refresh"
               aria-label="Refresh metadata from TMDb"
             >

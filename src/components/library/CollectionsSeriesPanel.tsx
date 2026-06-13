@@ -1029,24 +1029,37 @@ function ScopeRow({
       onDragOver={
         onDropIdentities || canReorder
           ? (e) => {
-              // Only accept the drop if the drag carries our payload
-              // type. dataTransfer.types is the only thing readable
-              // during dragover (the data itself is locked).
+              // dataTransfer.types during dragover is supposed to
+              // include every format set with setData, but in WebView2
+              // / Chromium 'application/x-fvp-...' custom MIME types
+              // sometimes don't surface in the types list during the
+              // dragover phase (only on drop). Without an unconditional
+              // preventDefault here the drop event never fires - the
+              // browser treats the row as not a valid drop target -
+              // and the user sees no hover effect AND can't drop.
+              //
+              // Safety against external drags (Explorer file drops,
+              // browser URL drags, etc.): if the drag carries 'Files'
+              // we explicitly REJECT (return without preventDefault)
+              // so file drops bubble up to the app's native handler.
+              // Otherwise we accept - the actual payload check at drop
+              // time gates whether anything happens. A drag that
+              // carries neither our payload nor a Files entry will
+              // just fall through to a no-op at drop time.
               const types = Array.from(e.dataTransfer.types);
-              if (
-                onDropIdentities &&
-                types.includes("application/x-fvp-identities")
-              ) {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "copy";
-                setHovering(true);
-              } else if (
-                canReorder &&
-                types.includes("application/x-fvp-sidebar-reorder")
-              ) {
+              if (types.includes("Files")) {
+                return;
+              }
+              const looksLikeReorder =
+                canReorder && types.includes("application/x-fvp-sidebar-reorder");
+              if (looksLikeReorder) {
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 setReorderHover(true);
+              } else if (onDropIdentities) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                setHovering(true);
               }
             }
           : undefined

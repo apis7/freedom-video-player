@@ -13,6 +13,7 @@ import {
   setSidebarReorderData,
   getSidebarReorderData,
 } from "./dragKinds";
+import { diag } from "../../utils/uiErrorReporter";
 import { SmartTmdbReviewModal } from "./SmartTmdbReviewModal";
 
 export interface ActiveScope {
@@ -1011,9 +1012,24 @@ function ScopeRow({
   const [hovering, setHovering] = useState(false);
   const [reorderHover, setReorderHover] = useState(false);
   const canReorder = reorderKind != null && reorderId != null && onReorderDrop != null;
+  // Native HTML <button> elements in WebView2 / Chromium have
+  // quirks with HTML5 drag-and-drop receive: dragover sometimes
+  // doesn't fire reliably on the button itself, only on its
+  // children. dragLeave can also stutter as the cursor moves
+  // between the button and its inner <span>. Using a div with
+  // role='button' sidesteps both issues - it's a clean block
+  // element with the same accessibility semantics.
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
       onContextMenu={onContextMenu}
       draggable={canReorder}
       onDragStart={
@@ -1026,80 +1042,83 @@ function ScopeRow({
             }
           : undefined
       }
-      onDragOver={
-        onDropIdentities || canReorder
-          ? (e) => {
-              // dataTransfer.types during dragover is supposed to
-              // include every format set with setData, but in WebView2
-              // / Chromium 'application/x-fvp-...' custom MIME types
-              // sometimes don't surface in the types list during the
-              // dragover phase (only on drop). Without an unconditional
-              // preventDefault here the drop event never fires - the
-              // browser treats the row as not a valid drop target -
-              // and the user sees no hover effect AND can't drop.
-              //
-              // Safety against external drags (Explorer file drops,
-              // browser URL drags, etc.): if the drag carries 'Files'
-              // we explicitly REJECT (return without preventDefault)
-              // so file drops bubble up to the app's native handler.
-              // Otherwise we accept - the actual payload check at drop
-              // time gates whether anything happens. A drag that
-              // carries neither our payload nor a Files entry will
-              // just fall through to a no-op at drop time.
-              const types = Array.from(e.dataTransfer.types);
-              if (types.includes("Files")) {
-                return;
-              }
-              const looksLikeReorder =
-                canReorder && types.includes("application/x-fvp-sidebar-reorder");
-              if (looksLikeReorder) {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                setReorderHover(true);
-              } else if (onDropIdentities) {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "copy";
-                setHovering(true);
-              }
-            }
-          : undefined
-      }
-      onDragLeave={
-        onDropIdentities || canReorder
-          ? () => {
-              setHovering(false);
-              setReorderHover(false);
-            }
-          : undefined
-      }
-      onDrop={
-        onDropIdentities || canReorder
-          ? (e) => {
-              setHovering(false);
-              setReorderHover(false);
-              const reorderPayload = getSidebarReorderData(e.dataTransfer);
-              if (
-                canReorder &&
-                reorderPayload &&
-                reorderPayload.kind === reorderKind &&
-                reorderPayload.id !== reorderId
-              ) {
-                e.preventDefault();
-                onReorderDrop!(reorderPayload.id);
-                return;
-              }
-              const ids = onDropIdentities
-                ? getIdentityDragData(e.dataTransfer)
-                : null;
-              if (onDropIdentities && ids && ids.length > 0) {
-                e.preventDefault();
-                onDropIdentities(ids);
-              }
-            }
-          : undefined
-      }
+      onDragEnter={(e) => {
+        // Also call preventDefault on dragEnter - some browsers
+        // require it on BOTH dragenter and dragover to register the
+        // element as a valid drop target. Cheap, doesn't break
+        // anything when there's no drag in progress.
+        const types = Array.from(e.dataTransfer.types);
+        if (types.includes("Files")) return;
+        e.preventDefault();
+      }}
+      onDragOver={(e) => {
+        // dataTransfer.types during dragover is supposed to include
+        // every format set with setData, but in WebView2 / Chromium
+        // 'application/x-fvp-...' custom MIME types sometimes don't
+        // surface in the types list during the dragover phase (only
+        // on drop). Without an unconditional preventDefault here the
+        // drop event never fires - the browser treats the row as not
+        // a valid drop target and the user sees the 'No' cursor.
+        //
+        // Safety against external drags (Explorer file drops, browser
+        // URL drags, etc.): if the drag carries 'Files' we explicitly
+        // REJECT (return without preventDefault) so file drops bubble
+        // up to the app's native handler. Otherwise we accept - the
+        // actual payload check at drop time gates whether anything
+        // happens. A drag carrying neither our payload nor a Files
+        // entry just falls through to a no-op at drop time.
+        const types = Array.from(e.dataTransfer.types);
+        if (types.includes("Files")) {
+          return;
+        }
+        const looksLikeReorder =
+          canReorder && types.includes("application/x-fvp-sidebar-reorder");
+        if (looksLikeReorder) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          setReorderHover(true);
+        } else if (onDropIdentities) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          setHovering(true);
+        }
+      }}
+      onDragLeave={() => {
+        setHovering(false);
+        setReorderHover(false);
+      }}
+      onDrop={(e) => {
+        diag(
+          "sidebar-drop",
+          `drop fired label="${label}" types=[${Array.from(e.dataTransfer.types).join(",")}]`,
+        );
+        setHovering(false);
+        setReorderHover(false);
+        const reorderPayload = getSidebarReorderData(e.dataTransfer);
+        if (
+          canReorder &&
+          reorderPayload &&
+          reorderPayload.kind === reorderKind &&
+          reorderPayload.id !== reorderId
+        ) {
+          e.preventDefault();
+          onReorderDrop!(reorderPayload.id);
+          return;
+        }
+        const ids = onDropIdentities
+          ? getIdentityDragData(e.dataTransfer)
+          : null;
+        diag(
+          "sidebar-drop",
+          `parsed ids=${ids ? `[${ids.join(",")}]` : "null"} hasOnDropIdentities=${!!onDropIdentities}`,
+        );
+        if (onDropIdentities && ids && ids.length > 0) {
+          e.preventDefault();
+          onDropIdentities(ids);
+        }
+      }}
       className={
-        "flex items-center w-full px-1.5 py-0.5 rounded text-[11px] text-left transition-colors " +
+        "flex items-center w-full px-1.5 py-0.5 rounded text-[11px] text-left transition-colors cursor-pointer select-none outline-none focus:ring-1 focus:ring-fvp-accent " +
         (active
           ? "bg-fvp-accent/30 text-fvp-text"
           : hovering
@@ -1109,13 +1128,15 @@ function ScopeRow({
               : "text-fvp-text hover:bg-fvp-surface2/60")
       }
     >
-      <span className="flex-1 truncate" title={label}>
+      <span className="flex-1 truncate pointer-events-none" title={label}>
         {label}
       </span>
       {countBadge !== undefined && (
-        <span className="text-[9px] text-fvp-muted ml-1">{countBadge}</span>
+        <span className="text-[9px] text-fvp-muted ml-1 pointer-events-none">
+          {countBadge}
+        </span>
       )}
-    </button>
+    </div>
   );
 }
 

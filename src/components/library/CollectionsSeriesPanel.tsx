@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../../state/appStore";
 import {
@@ -81,6 +81,57 @@ export function CollectionsSeriesPanel({
   onRefreshScopeMetadata,
 }: Props) {
   const showToast = useAppStore((s) => s.showToast);
+  // Window-level diagnostic listener for HTML5 drag events. Tells us
+  // definitively whether the WebView is even firing dragenter/over/leave
+  // when the user drags a thumbnail toward the sidebar. If these never
+  // fire, Tauri's native drag-drop hook (dragDropEnabled: true in
+  // tauri.conf.json) is intercepting at the OS level - the fix is to
+  // switch to a JS-only intra-app drag system. If they DO fire but the
+  // sidebar's onDrop never runs, the issue is in our handler chain.
+  // Throttled to once per 250ms per event type so dragover (which fires
+  // dozens of times per second) doesn't flood the log.
+  const lastDragLogRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    const log = (kind: string, e: DragEvent) => {
+      const now = performance.now();
+      const last = lastDragLogRef.current[kind] ?? 0;
+      if (now - last < 250) return;
+      lastDragLogRef.current[kind] = now;
+      const target = e.target as HTMLElement | null;
+      const targetTag = target ? `<${target.tagName.toLowerCase()}>` : "?";
+      const targetCls = target?.className ?? "";
+      const types = e.dataTransfer
+        ? Array.from(e.dataTransfer.types).join(",")
+        : "no-dt";
+      void import("../../utils/uiErrorReporter").then(({ diag }) =>
+        diag(
+          "drag-diag",
+          `${kind} target=${targetTag} cls="${typeof targetCls === "string" ? targetCls.slice(0, 60) : "?"}" types=[${types}]`,
+        ),
+      );
+    };
+    const onDragStart = (e: DragEvent) => log("dragstart", e);
+    const onDragEnter = (e: DragEvent) => log("dragenter", e);
+    const onDragOver = (e: DragEvent) => log("dragover", e);
+    const onDragLeave = (e: DragEvent) => log("dragleave", e);
+    const onDragEnd = (e: DragEvent) => log("dragend", e);
+    const onDrop = (e: DragEvent) => log("drop", e);
+    window.addEventListener("dragstart", onDragStart, true);
+    window.addEventListener("dragenter", onDragEnter, true);
+    window.addEventListener("dragover", onDragOver, true);
+    window.addEventListener("dragleave", onDragLeave, true);
+    window.addEventListener("dragend", onDragEnd, true);
+    window.addEventListener("drop", onDrop, true);
+    return () => {
+      window.removeEventListener("dragstart", onDragStart, true);
+      window.removeEventListener("dragenter", onDragEnter, true);
+      window.removeEventListener("dragover", onDragOver, true);
+      window.removeEventListener("dragleave", onDragLeave, true);
+      window.removeEventListener("dragend", onDragEnd, true);
+      window.removeEventListener("drop", onDrop, true);
+    };
+  }, []);
+
   const [collections, setCollections] = useState<CollectionRow[]>([]);
   const [series, setSeries] = useState<SeriesRow[]>([]);
   const [creating, setCreating] = useState<null | "collection" | "series">(
@@ -1043,6 +1094,10 @@ function ScopeRow({
           : undefined
       }
       onDragEnter={(e) => {
+        diag(
+          "scope-row-drag",
+          `dragenter label="${label}" types=[${Array.from(e.dataTransfer.types).join(",")}]`,
+        );
         // Also call preventDefault on dragEnter - some browsers
         // require it on BOTH dragenter and dragover to register the
         // element as a valid drop target. Cheap, doesn't break

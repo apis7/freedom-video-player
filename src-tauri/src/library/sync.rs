@@ -99,6 +99,46 @@ fn maybe_tick(db: &LibraryDb) -> Result<bool, String> {
     let next_push_due = last_push + (cadence_min * 60);
     let sync_path = home.join(SYNC_FILE_NAME);
     let mut did_something = false;
+
+    // FRESH-DEVICE GUARD. On Device #2 joining an existing library
+    // (picked the share's home folder for the first time), the
+    // local DB is empty and the share has Device #1's data. Without
+    // this guard the push branch below fires (last_push_at == 0 →
+    // due immediately) and VACUUM INTOs the empty local DB right
+    // over the share's library-sync.db — annihilating Device #1's
+    // series, collections, watch history, etc.
+    //
+    // Trigger condition is intentionally broad: "local DB has zero
+    // library_files rows AND a sync file exists." Catches both the
+    // first-tick case AND the recovery case (where Device #2
+    // already pushed empty and we want to back out the moment Device
+    // #1 pushes real data again). We schedule a pull and return
+    // WITHOUT pushing.
+    //
+    // Edge case: if Device #1's library is also empty, this just
+    // schedules a no-op pull each tick — harmless. The first real
+    // push only comes after the user has scanned at least one file.
+    if mode == "sync"
+        && sync_path.is_file()
+        && local_db_is_empty(db)
+    {
+        let sync_size = std::fs::metadata(&sync_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        // Don't bother pulling a sync file that's obviously empty too —
+        // it's just a baseline scaffold from another fresh device.
+        // (~30KB is roughly the minimum SQLite file with FVP's schema.)
+        if sync_size > 64 * 1024 {
+            crate::log!(
+                "library:sync",
+                "fresh-device guard: local DB empty + sync file present ({sync_size} bytes) → pull only, push suppressed"
+            );
+            schedule_pull(db.path(), &sync_path)?;
+            set_setting_i64(db, SYNC_LAST_PULL_AT_KEY, now);
+            return Ok(true);
+        }
+    }
+
     // Push FIRST when due. This protects the user's local edits BEFORE
     // we schedule any pull. Earlier code returned out of this function
     // as soon as a pull-needed condition was detected, which meant
@@ -189,6 +229,43 @@ pub fn push_now(db: &LibraryDb, sync_path: &Path) -> Result<(), String> {
         std::fs::metadata(sync_path).map(|m| m.len()).unwrap_or(0)
     );
     Ok(())
+}
+
+/// "Local DB has no library_files rows" — drives the fresh-device
+/// pull-only guard. Cheap: indexed COUNT(*) on a single table.
+fn local_db_is_empty(db: &LibraryDb) -> bool {
+    let conn = db.lock();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM library_files", [], |r| r.get(0))
+        .unwrap_or(0);
+    n == 0
+}
+
+/// Force a sync PULL regardless of cadence or mtime comparison.
+/// UI-triggered recovery for Device #2-clobbered-share scenarios
+/// where the user wants to forcibly drop local state and re-pull
+/// from the share. Schedules a restore marker; the change takes
+/// effect on next launch.
+pub fn force_pull(db: &LibraryDb) -> Result<PathBuf, String> {
+    let home = home_folder(db).ok_or_else(|| {
+        "No home folder set. Pick one in Settings → Library before pulling.".to_string()
+    })?;
+    if !home.is_dir() {
+        return Err(format!(
+            "Home folder not reachable right now: {}",
+            home.display()
+        ));
+    }
+    let sync_path = home.join(SYNC_FILE_NAME);
+    if !sync_path.is_file() {
+        return Err(format!(
+            "No sync file at {} — nothing to pull. The Host or other Sync device hasn't written one yet.",
+            sync_path.display()
+        ));
+    }
+    schedule_pull(db.path(), &sync_path)?;
+    set_setting_i64(db, SYNC_LAST_PULL_AT_KEY, now_unix());
+    Ok(sync_path)
 }
 
 /// Force a sync push regardless of cadence. UI-triggered.

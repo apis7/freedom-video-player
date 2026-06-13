@@ -982,6 +982,30 @@ function SyncModeSection() {
     }
   };
 
+  const pullNow = async () => {
+    if (
+      !window.confirm(
+        "Pull from share now? This will replace your LOCAL library state with what's on the share on next launch. " +
+          "Any local edits since your last push will be lost. (Use this when a fresh device accidentally pushed an empty DB and you need to re-pull the real library.)",
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      const p = await libraryIpc.syncPullNow();
+      showToast(
+        `Pull scheduled from ${p} — restart FVP to apply.`,
+        "info",
+        5000,
+      );
+      await refresh();
+    } catch (err) {
+      showToast(`${err}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!status) return null;
 
   const ago = (ts: number) =>
@@ -1022,6 +1046,14 @@ function SyncModeSection() {
           className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90 disabled:opacity-50"
         >
           {busy ? "Pushing…" : "Push to share now"}
+        </button>
+        <button
+          onClick={() => void pullNow()}
+          disabled={busy}
+          className="px-3 py-1.5 bg-fvp-bg border border-fvp-border text-fvp-text text-xs rounded hover:bg-fvp-bg-alt disabled:opacity-50"
+          title="Replace local library with what's on the share (on next launch). Use this to recover if a fresh device pushed an empty DB."
+        >
+          Pull from share now
         </button>
         <label className="text-[11px] text-fvp-muted flex items-center gap-1.5">
           Change cadence:

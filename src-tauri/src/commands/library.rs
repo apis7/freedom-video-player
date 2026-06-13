@@ -3597,6 +3597,18 @@ pub fn library_sync_push_now(
     Ok(p.to_string_lossy().into_owned())
 }
 
+/// Force a pull from the share. Used for recovery when a fresh device
+/// accidentally pushed its empty DB over a populated share (pre-guard
+/// bug) — gives the user a button to re-pull on next launch instead
+/// of waiting for the share to drift newer organically.
+#[tauri::command]
+pub fn library_sync_pull_now(
+    db: State<'_, LibraryDb>,
+) -> Result<String, String> {
+    let p = crate::library::sync::force_pull(&db)?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub fn library_sync_set_cadence(
     db: State<'_, LibraryDb>,

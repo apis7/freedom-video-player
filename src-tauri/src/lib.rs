@@ -489,6 +489,7 @@ pub fn run() {
             commands::library::library_first_run_complete,
             commands::library::library_sync_status,
             commands::library::library_sync_push_now,
+            commands::library::library_sync_pull_now,
             commands::library::library_sync_set_cadence,
             commands::library::library_set_poster_cache_cap,
             commands::library::library_find_probable_pairs,

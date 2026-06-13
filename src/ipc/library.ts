@@ -273,6 +273,7 @@ export const libraryIpc = {
     invoke<HomeFolderDiagnosis>("library_diagnose_home_folder"),
   syncStatus: () => invoke<SyncStatus>("library_sync_status"),
   syncPushNow: () => invoke<string>("library_sync_push_now"),
+  syncPullNow: () => invoke<string>("library_sync_pull_now"),
   syncSetCadence: (minutes: number) =>
     invoke<void>("library_sync_set_cadence", { minutes }),
   snapshotStatus: () => invoke<SnapshotStatus>("library_snapshot_status"),

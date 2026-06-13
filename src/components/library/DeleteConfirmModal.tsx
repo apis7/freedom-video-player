@@ -36,12 +36,13 @@ export function DeleteConfirmModal({
   const inc = useAppStore((s) => s.incrementOpenModalCount);
   const dec = useAppStore((s) => s.decrementOpenModalCount);
   const showToast = useAppStore((s) => s.showToast);
-  // Detect a shared-series situation among the rows about to be
-  // "deleted" so we can offer a third, much-softer option: just drop
-  // the series membership and leave the movies in the library.
-  // Visible only when EVERY selected row is in the same series -
-  // mixed-series selections see the two original options (the user
-  // would have to do them per-series via the right-click menu).
+  // Detect shared-membership situations among the rows about to be
+  // "deleted" so we can offer softer options: just drop the
+  // series / collection membership and leave the movies in the
+  // library. Visible only when EVERY selected row is in that same
+  // membership - mixed-membership selections see only the two
+  // original options (the user would have to do them per-membership
+  // via the right-click menu).
   const commonSeries = (() => {
     const first = rows[0]?.series;
     if (!first) return null;
@@ -49,9 +50,29 @@ export function DeleteConfirmModal({
       ? { id: first.series_id, name: first.series_name }
       : null;
   })();
-  const [choice, setChoice] = useState<
-    "remove" | "recycle" | "remove_from_series"
-  >(defaultChoice);
+  // Collections the user is a member of in EVERY selected row.
+  // Multiple shared collections produce multiple soft options.
+  const commonCollections = (() => {
+    const first = rows[0];
+    if (!first || first.collections.length === 0) return [];
+    return first.collections.filter((c) =>
+      rows.every((r) =>
+        r.collections.some((rc) => rc.collection_id === c.collection_id),
+      ),
+    );
+  })();
+  // Soft choices are encoded as composite strings so the radio
+  // group is exhaustive without needing a separate sub-state for
+  // "which collection?". 'remove_from_collection:<id>' picks the
+  // exact collection from commonCollections.
+  type Choice =
+    | "remove"
+    | "recycle"
+    | "remove_from_series"
+    | `remove_from_collection:${number}`;
+  const isSoftChoice = (c: Choice): boolean =>
+    c === "remove_from_series" || c.startsWith("remove_from_collection:");
+  const [choice, setChoice] = useState<Choice>(defaultChoice);
   const [rememberDefault, setRememberDefault] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -100,16 +121,16 @@ export function DeleteConfirmModal({
     if (busy) return;
     setBusy(true);
     try {
-      // 'remove_from_series' is a non-destructive membership change.
-      // We don't persist it as a "delete default" - the persisted
-      // default only covers the actual delete branches.
-      if (rememberDefault && choice !== "remove_from_series") {
-        await libraryIpc.setDeleteDefault(choice);
+      // Soft membership-removal options ('remove_from_series',
+      // 'remove_from_collection:<id>') are non-destructive and
+      // context-dependent. We don't persist them as a "delete
+      // default" - the persisted default only covers the actual
+      // delete branches ('remove', 'recycle').
+      if (rememberDefault && !isSoftChoice(choice)) {
+        await libraryIpc.setDeleteDefault(choice as "remove" | "recycle");
       }
       if (choice === "remove_from_series") {
         if (!commonSeries) {
-          // Shouldn't be reachable - the radio is hidden in this case -
-          // but guard rather than blow up.
           showToast(
             "Mixed-series selection — pick the series-removal action from the right-click menu instead.",
             "warn",
@@ -124,6 +145,32 @@ export function DeleteConfirmModal({
         await libraryIpc.removeFromSeries(commonSeries.id, identityIds);
         showToast(
           `Removed ${identityIds.length} movie${identityIds.length === 1 ? "" : "s"} from "${commonSeries.name}". Movies stay in your library.`,
+          "info",
+          3500,
+        );
+        onResolved();
+        return;
+      }
+      if (choice.startsWith("remove_from_collection:")) {
+        const cid = Number(choice.slice("remove_from_collection:".length));
+        const targetCollection = commonCollections.find(
+          (c) => c.collection_id === cid,
+        );
+        if (!targetCollection) {
+          showToast(
+            "Selection no longer matches that collection — refresh and try again.",
+            "warn",
+            4000,
+          );
+          setBusy(false);
+          return;
+        }
+        const identityIds = Array.from(
+          new Set(rows.map((r) => r.identity.id)),
+        );
+        await libraryIpc.removeFromCollection(cid, identityIds);
+        showToast(
+          `Removed ${identityIds.length} movie${identityIds.length === 1 ? "" : "s"} from "${targetCollection.collection_name}". Movies stay in your library.`,
           "info",
           3500,
         );
@@ -192,11 +239,13 @@ export function DeleteConfirmModal({
         </div>
 
         <div className="px-5 py-3 border-t border-fvp-border space-y-2">
-          {/* Softest option, shown first when applicable: just drop
-              the series membership. The movies STAY in the library,
-              their files stay on disk - only the series link goes
-              away. Visible only when EVERY selected movie shares the
-              same series. */}
+          {/* Softest options, shown first when applicable: just drop
+              the series / collection membership. The movies STAY in
+              the library, their files stay on disk - only the
+              membership link goes away. Visible only when EVERY
+              selected movie shares that same membership. Multiple
+              shared collections produce multiple options - the user
+              picks the one they want to leave. */}
           {commonSeries && (
             <label className="flex items-start gap-3 cursor-pointer p-2 rounded hover:bg-fvp-surface2/40">
               <input
@@ -218,6 +267,32 @@ export function DeleteConfirmModal({
               </div>
             </label>
           )}
+          {commonCollections.map((c) => {
+            const value: Choice = `remove_from_collection:${c.collection_id}`;
+            return (
+              <label
+                key={c.collection_id}
+                className="flex items-start gap-3 cursor-pointer p-2 rounded hover:bg-fvp-surface2/40"
+              >
+                <input
+                  type="radio"
+                  checked={choice === value}
+                  onChange={() => setChoice(value)}
+                  className="accent-fvp-accent mt-0.5"
+                />
+                <div className="flex-1">
+                  <div className="text-fvp-text text-xs font-semibold">
+                    Remove from Collection "{c.collection_name}" — keep in
+                    Library
+                  </div>
+                  <div className="text-[11px] text-fvp-muted">
+                    Drops only the collection membership. The movies stay
+                    in your library and on disk.
+                  </div>
+                </div>
+              </label>
+            );
+          })}
           <label className="flex items-start gap-3 cursor-pointer p-2 rounded hover:bg-fvp-surface2/40">
             <input
               type="radio"
@@ -273,21 +348,21 @@ export function DeleteConfirmModal({
         </div>
 
         <footer className="px-5 py-3 border-t border-fvp-border flex items-center justify-between text-xs">
-          {/* "Remember default" is meaningless for the soft series-
-              removal option (that's an explicit, context-dependent
-              action - the user wouldn't want every future Delete to
-              default to it). Disable the checkbox while that option
-              is selected. */}
+          {/* "Remember default" is meaningless for the soft
+              membership-removal options (those are explicit,
+              context-dependent actions - the user wouldn't want every
+              future Delete to default to "remove from Shaun the
+              Sheep"). Disable while any soft option is selected. */}
           <label
             className={
               "flex items-center gap-1.5 cursor-pointer text-fvp-muted text-[10px] " +
-              (choice === "remove_from_series" ? "opacity-40 cursor-not-allowed" : "")
+              (isSoftChoice(choice) ? "opacity-40 cursor-not-allowed" : "")
             }
           >
             <input
               type="checkbox"
               checked={rememberDefault}
-              disabled={choice === "remove_from_series"}
+              disabled={isSoftChoice(choice)}
               onChange={(e) => setRememberDefault(e.target.checked)}
               className="accent-fvp-accent"
             />
@@ -319,7 +394,9 @@ export function DeleteConfirmModal({
                     : "Send to Recycle Bin"
                   : choice === "remove_from_series"
                     ? "Remove from Series"
-                    : "Remove from library"}
+                    : choice.startsWith("remove_from_collection:")
+                      ? "Remove from Collection"
+                      : "Remove from library"}
             </button>
           </div>
         </footer>

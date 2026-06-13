@@ -2958,6 +2958,195 @@ pub fn library_set_home_folder_from_marker(
     Ok(parent_str)
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct ShareCandidate {
+    pub path: String,
+    /// True if a quick probe found at least one video file within
+    /// `dir` or its first level of subdirs. Frontend pre-selects these.
+    pub looks_like_media: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ShareScanResult {
+    /// Echoed back so the frontend can render "Watch the home folder?".
+    pub home_path: String,
+    /// `\\server\share` if `home_path` lives on a UNC share, else null.
+    /// We don't probe local drive letters because C:\ on Device #1 is
+    /// not the same C:\ on Device #2 — auto-suggesting them would create
+    /// dead watched_folders.
+    pub share_root: Option<String>,
+    /// Sibling dirs at `share_root` that aren't already watched.
+    /// Empty if `share_root` is null or read_dir failed.
+    pub candidates: Vec<ShareCandidate>,
+    /// True if `home_path` is itself already in watched_folders. UI uses
+    /// this to hide the "watch home folder" checkbox when redundant.
+    pub home_already_watched: bool,
+}
+
+/// Pair to the home-folder pick UX: when the user designates a home
+/// folder (whether via directory picker or marker file), the frontend
+/// calls this to learn (a) whether the home folder is on a UNC share
+/// (b) which sibling dirs at that share root are NOT already watched
+/// and look like they hold videos. Result drives a confirm modal that
+/// offers to add the home folder + selected siblings to watched_folders.
+///
+/// Pure read-only — does NOT mutate watched_folders. The frontend calls
+/// `library_add_folder` for each user-confirmed path.
+#[tauri::command]
+pub fn library_scan_share_for_watchable_dirs(
+    db: State<'_, LibraryDb>,
+    home: String,
+) -> Result<ShareScanResult, String> {
+    let home_pb = std::path::PathBuf::from(&home);
+    let share_root = detect_unc_share_root(&home_pb);
+
+    let existing_norm: Vec<String> = {
+        let conn = db.lock();
+        conn.prepare("SELECT path FROM watched_folders")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| r.get::<_, String>(0))
+                    .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| normalize_path_for_compare(&p))
+            .collect()
+    };
+
+    let home_norm = normalize_path_for_compare(&home);
+    let home_already_watched = existing_norm.iter().any(|e| e == &home_norm);
+
+    let mut candidates: Vec<ShareCandidate> = Vec::new();
+    if let Some(root) = share_root.as_ref() {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_dir() {
+                    continue;
+                }
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.starts_with('.')
+                    || name.starts_with('$')
+                    || name.eq_ignore_ascii_case("System Volume Information")
+                    || name.eq_ignore_ascii_case("RECYCLE.BIN")
+                    || name.eq_ignore_ascii_case("$RECYCLE.BIN")
+                {
+                    continue;
+                }
+                let p_norm = normalize_path_for_compare(&p.to_string_lossy());
+                if p_norm == home_norm {
+                    continue;
+                }
+                if existing_norm.iter().any(|e| {
+                    e == &p_norm
+                        || p_norm.starts_with(&format!("{e}/"))
+                        || e.starts_with(&format!("{p_norm}/"))
+                }) {
+                    continue;
+                }
+                let looks = looks_like_media_dir(&p);
+                candidates.push(ShareCandidate {
+                    path: p.to_string_lossy().into_owned(),
+                    looks_like_media: looks,
+                });
+            }
+        }
+    }
+
+    // Stable order: media-looking dirs first, then alpha.
+    candidates.sort_by(|a, b| {
+        b.looks_like_media
+            .cmp(&a.looks_like_media)
+            .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
+
+    crate::log!(
+        "library",
+        "scan_share_for_watchable_dirs: home=\"{home}\" share_root={:?} candidates={} (media={})",
+        share_root,
+        candidates.len(),
+        candidates.iter().filter(|c| c.looks_like_media).count(),
+    );
+
+    Ok(ShareScanResult {
+        home_path: home,
+        share_root: share_root.map(|p| p.to_string_lossy().into_owned()),
+        candidates,
+        home_already_watched,
+    })
+}
+
+fn normalize_path_for_compare(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// Extract `\\server\share` from a UNC path. Returns None for local
+/// drive paths (C:\, D:\) and any non-UNC input — drive letters mean
+/// different things on different devices, so we never auto-suggest
+/// siblings on local drives.
+fn detect_unc_share_root(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let s = p.to_string_lossy().replace('/', "\\");
+    if !s.starts_with("\\\\") {
+        return None;
+    }
+    let trimmed = &s[2..];
+    let mut parts = trimmed.splitn(3, '\\');
+    let server = parts.next()?;
+    let share = parts.next()?;
+    if server.is_empty() || share.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(format!("\\\\{server}\\{share}")))
+}
+
+/// Cheap heuristic — does this dir contain at least one video file
+/// within 1 level? Probes at most 64 immediate entries and, for each
+/// subdir, the first 16 entries inside. Bails on first hit. Designed
+/// to be fast on SMB shares; will MISS deeply nested media trees, but
+/// the frontend lets the user check additional dirs anyway.
+fn looks_like_media_dir(dir: &std::path::Path) -> bool {
+    const VIDEO_EXTS: &[&str] = &[
+        "mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v", "ts", "flv", "mpg",
+        "mpeg", "m2ts", "vob", "ogv", "3gp",
+    ];
+    fn is_video(p: &std::path::Path) -> bool {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| VIDEO_EXTS.contains(&e.to_lowercase().as_str()))
+            .unwrap_or(false)
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut probes = 0usize;
+    for entry in entries.flatten() {
+        probes += 1;
+        if probes > 64 {
+            break;
+        }
+        let p = entry.path();
+        if is_video(&p) {
+            return true;
+        }
+        if entry.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+            if let Ok(sub_entries) = std::fs::read_dir(&p) {
+                for (i, sub) in sub_entries.flatten().enumerate() {
+                    if i >= 16 {
+                        break;
+                    }
+                    if is_video(&sub.path()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Client mode only: address of the Host to talk to (Phase 2 wiring).
 /// Phase 1 stores it; no networking happens yet.
 #[tauri::command]

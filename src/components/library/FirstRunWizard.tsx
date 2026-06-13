@@ -7,6 +7,7 @@ import {
   setHostEndpoint,
   setLibraryMode,
 } from "../../ipc/library";
+import { WatchHomeFolderPrompt } from "./WatchHomeFolderPrompt";
 
 type Step =
   | "welcome"
@@ -42,6 +43,10 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
     string | null
   >(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Set right before we'd otherwise finish() — opens the
+  // WatchHomeFolderPrompt modal. Its onClose calls finish(), so the
+  // wizard only dismisses after the user has answered the prompt.
+  const [promptForHome, setPromptForHome] = useState<string | null>(null);
 
   const finish = async () => {
     try {
@@ -77,7 +82,7 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
       setLibraryMode("host");
       setHomeFolderPicked(picked);
       showToast(`Host configured: ${picked}`, "info", 3000);
-      await finish();
+      setPromptForHome(picked);
     } catch (err) {
       setErrorMsg(`${err}`);
     } finally {
@@ -100,7 +105,7 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
         "info",
         4000,
       );
-      await finish();
+      setPromptForHome(picked);
     } catch (err) {
       setErrorMsg(`${err}`);
     } finally {
@@ -133,7 +138,7 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
         "info",
         4000,
       );
-      await finish();
+      setPromptForHome(resolved);
     } catch (err) {
       setErrorMsg(`${err}`);
     } finally {
@@ -188,7 +193,7 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
       setLibraryMode("client");
       setHostEndpoint({ url: d.host_url, token: d.token });
       showToast(`Client connected to ${d.host_url}`, "info", 3500);
-      await finish();
+      setPromptForHome(resolved);
     } catch (err) {
       setErrorMsg(`${err}`);
     } finally {
@@ -240,7 +245,7 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
       setLibraryMode("client");
       setHostEndpoint({ url: d.host_url, token: d.token });
       showToast(`Client connected to ${d.host_url}`, "info", 3500);
-      await finish();
+      setPromptForHome(picked);
     } catch (err) {
       setErrorMsg(`${err}`);
     } finally {
@@ -340,6 +345,16 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
           Settings → Library.
         </div>
       </div>
+
+      {promptForHome && (
+        <WatchHomeFolderPrompt
+          homePath={promptForHome}
+          onClose={() => {
+            setPromptForHome(null);
+            void finish();
+          }}
+        />
+      )}
     </div>
   );
 }

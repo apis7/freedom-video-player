@@ -12,6 +12,7 @@ import {
   type SnapshotStatus,
   type WatchedFolder,
 } from "../../ipc/library";
+import { WatchHomeFolderPrompt } from "./WatchHomeFolderPrompt";
 // PinPromptModal usage moved to FamilyViewPinSection.
 
 /**
@@ -621,6 +622,9 @@ function LibraryNetworkingSection({
   const [serverStatus, setServerStatus] = useState<HostServerStatus | null>(
     null,
   );
+  // Set to the newly-resolved home folder path right after a successful
+  // pick so the WatchHomeFolderPrompt modal opens with that path.
+  const [promptForHome, setPromptForHome] = useState<string | null>(null);
 
   // Re-poll host server status whenever the snap reloads (mode change,
   // token rotate, etc.) so the visible "running / not running" badge
@@ -647,6 +651,7 @@ function LibraryNetworkingSection({
       await libraryIpc.setHomeFolder(picked);
       showToast(`Home folder set: ${picked}`, "info", 3000);
       await reload();
+      setPromptForHome(picked);
     } catch (err) {
       showToast(`Set home folder failed: ${err}`, "error");
     }
@@ -675,6 +680,7 @@ function LibraryNetworkingSection({
       const resolved = await libraryIpc.setHomeFolderFromMarker(picked);
       showToast(`Home folder set: ${resolved}`, "info", 3500);
       await reload();
+      setPromptForHome(resolved);
     } catch (err) {
       showToast(`${err}`, "error", 6000);
     }
@@ -926,6 +932,16 @@ function LibraryNetworkingSection({
       )}
 
       {snap.library_mode === "sync" && <SyncModeSection />}
+
+      {promptForHome && (
+        <WatchHomeFolderPrompt
+          homePath={promptForHome}
+          onClose={() => {
+            setPromptForHome(null);
+            void reload();
+          }}
+        />
+      )}
     </>
   );
 }

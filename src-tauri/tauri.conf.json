@@ -23,7 +23,7 @@
         "transparent": true,
         "shadow": true,
         "fullscreen": false,
-        "dragDropEnabled": true
+        "dragDropEnabled": false
       }
     ],
     "security": {

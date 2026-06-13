@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useAppStore } from "../state/appStore";
 import { libraryIpc, profileIpc } from "../ipc";
 import { openVideoPath } from "../utils/openFileFlow";
@@ -12,26 +11,72 @@ const VIDEO_EXTENSIONS = [
 const AUDIO_EXTENSIONS = ["mp3", "flac", "wav", "ogg", "opus", "m4a", "aac"];
 const SUPPORTED = new Set([...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]);
 
-/** Drag-and-drop target. Handles folders, multi-file drops, .free rejects,
- *  and unsaved-work confirmation before opening. */
+/**
+ * Drag-and-drop target for files dropped FROM EXPLORER INTO the FVP
+ * window. Uses HTML5 drop events on the window rather than Tauri's
+ * onDragDropEvent because tauri.conf.json now has dragDropEnabled=false
+ * (Tauri's native drag-drop hook on Windows was swallowing the entire
+ * OS-level drop chain, which killed HTML5 drag-receive INSIDE the
+ * WebView - including the user's drag of library tiles into sidebar
+ * collections / series. Disabling it re-enables HTML5; we just have to
+ * hand-roll the Explorer-file-drop branch ourselves here).
+ *
+ * WebView2 specifically exposes the underlying filesystem path on
+ * dropped File objects via a non-standard `.path` property. That's how
+ * we recover the real path the user dragged from Explorer. The .path
+ * property is not part of the W3C File spec - it's a WebView2 / Tauri
+ * convenience - which is why we cast through (file as any).path.
+ *
+ * The window-level dragover handler is required: without preventDefault
+ * the browser refuses to fire drop, and the file silently bounces.
+ * We're careful to ONLY preventDefault when the drag carries the
+ * 'Files' MIME type - otherwise we'd accidentally swallow all the
+ * intra-app HTML5 drags (library tile to sidebar) that this whole
+ * exercise was about enabling in the first place.
+ */
 export function useFileDropTarget() {
   useEffect(() => {
-    const win = getCurrentWebviewWindow();
-    let unlisten: (() => void) | null = null;
-
-    win
-      .onDragDropEvent((e) => {
-        if (e.payload.type !== "drop") return;
-        const paths = e.payload.paths;
-        if (!paths || paths.length === 0) return;
-        void handleDrop(paths);
-      })
-      .then((fn) => {
-        unlisten = fn;
-      });
-
+    const onDragOver = (e: DragEvent) => {
+      const types = e.dataTransfer ? Array.from(e.dataTransfer.types) : [];
+      if (types.includes("Files")) {
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      }
+    };
+    const onDrop = (e: DragEvent) => {
+      const types = e.dataTransfer ? Array.from(e.dataTransfer.types) : [];
+      if (!types.includes("Files")) return;
+      e.preventDefault();
+      const files = e.dataTransfer?.files;
+      if (!files || files.length === 0) return;
+      const paths: string[] = [];
+      for (let i = 0; i < files.length; i += 1) {
+        const f = files.item(i);
+        if (!f) continue;
+        // WebView2 / Tauri populate .path with the real filesystem path
+        // for files dropped from Explorer. Standard browsers wouldn't.
+        const p = (f as unknown as { path?: string }).path;
+        if (typeof p === "string" && p.length > 0) {
+          paths.push(p);
+        }
+      }
+      if (paths.length === 0) {
+        useAppStore
+          .getState()
+          .showToast(
+            "Couldn't read dropped file paths. Try opening via the file picker.",
+            "warn",
+            4000,
+          );
+        return;
+      }
+      void handleDrop(paths);
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
     return () => {
-      if (unlisten) unlisten();
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
     };
   }, []);
 }

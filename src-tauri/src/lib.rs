@@ -470,6 +470,7 @@ pub fn run() {
             commands::library::library_set_delete_default,
             commands::library::library_set_mode,
             commands::library::library_set_home_folder,
+            commands::library::library_set_home_folder_from_marker,
             commands::library::library_set_host_address,
             commands::library::library_rotate_auth_token,
             commands::library::library_host_server_status,

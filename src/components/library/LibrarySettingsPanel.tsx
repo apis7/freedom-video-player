@@ -651,6 +651,34 @@ function LibraryNetworkingSection({
       showToast(`Set home folder failed: ${err}`, "error");
     }
   };
+  // 'Pick library marker file...' flow: the user navigates a file
+  // picker (rather than a directory picker) to the .fvplibrary marker
+  // that another device wrote into the home folder. Useful on Device #2
+  // when you can SEE the marker file by name in Explorer but don't
+  // remember which subdir of your NAS it lives in. Backend resolves
+  // file → parent dir and validates that the parent has FVP-managed
+  // markers (library.fvplibrary / library-sync.db / host-discovery.json).
+  // Accepts library-sync.db too so legacy home folders created before
+  // the marker existed are still pickable this way.
+  const pickHomeFromMarker = async () => {
+    const picked = await openDialog({
+      multiple: false,
+      filters: [
+        {
+          name: "FVP library marker",
+          extensions: ["fvplibrary", "db"],
+        },
+      ],
+    });
+    if (typeof picked !== "string") return;
+    try {
+      const resolved = await libraryIpc.setHomeFolderFromMarker(picked);
+      showToast(`Home folder set: ${resolved}`, "info", 3500);
+      await reload();
+    } catch (err) {
+      showToast(`${err}`, "error", 6000);
+    }
+  };
   const clearHomeFolder = async () => {
     if (
       !window.confirm(
@@ -768,8 +796,16 @@ function LibraryNetworkingSection({
             <button
               onClick={() => void pickHomeFolder()}
               className="px-2 py-1 text-[11px] bg-fvp-bg border border-fvp-border rounded hover:border-fvp-muted shrink-0"
+              title="Open a folder picker"
             >
               Change…
+            </button>
+            <button
+              onClick={() => void pickHomeFromMarker()}
+              className="px-2 py-1 text-[11px] bg-fvp-bg border border-fvp-border rounded hover:border-fvp-muted shrink-0"
+              title="Open a FILE picker and select the library.fvplibrary marker that another device wrote into the home folder"
+            >
+              From marker…
             </button>
             <button
               onClick={() => void clearHomeFolder()}
@@ -779,17 +815,32 @@ function LibraryNetworkingSection({
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => void pickHomeFolder()}
-              className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90"
-            >
-              Browse for home folder…
-            </button>
-            <span className="text-[11px] text-fvp-muted italic">
-              Not set — Standalone is fine; pick a network folder if you want
-              shared library later.
-            </span>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => void pickHomeFolder()}
+                className="px-3 py-1.5 bg-fvp-accent text-white text-xs rounded hover:opacity-90"
+              >
+                Browse for home folder…
+              </button>
+              <button
+                onClick={() => void pickHomeFromMarker()}
+                className="px-3 py-1.5 bg-fvp-bg border border-fvp-border text-xs rounded hover:border-fvp-muted"
+                title="Already set up on another device? Pick its library.fvplibrary marker file directly — FVP will use that file's parent folder as the home."
+              >
+                Pick library marker file…
+              </button>
+              <span className="text-[11px] text-fvp-muted italic">
+                Standalone works without a home folder.
+              </span>
+            </div>
+            <div className="text-[10px] text-fvp-muted">
+              Setting up a 2nd device? Use{" "}
+              <strong>Pick library marker file…</strong> to grab the{" "}
+              <code>library.fvplibrary</code> file the first device wrote
+              into the shared home folder — FVP will join the library from
+              there. No path-typing required.
+            </div>
           </div>
         )}
         {snap.home_folder_path && (

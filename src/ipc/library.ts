@@ -248,6 +248,8 @@ export const libraryIpc = {
     invoke<void>("library_set_mode", { mode }),
   setHomeFolder: (path: string | null) =>
     invoke<void>("library_set_home_folder", { path }),
+  setHomeFolderFromMarker: (filePath: string) =>
+    invoke<string>("library_set_home_folder_from_marker", { filePath }),
   setHostAddress: (address: string | null) =>
     invoke<void>("library_set_host_address", { address }),
   rotateAuthToken: () => invoke<string>("library_rotate_auth_token"),

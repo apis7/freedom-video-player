@@ -108,6 +108,94 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
     }
   };
 
+  // Alternative entry point for Sync setup on Device #2: instead of
+  // navigating to the right folder by name, the user picks the
+  // library.fvplibrary marker file the first device wrote. Backend
+  // resolves marker → parent dir and validates that the parent looks
+  // like an FVP home.
+  const pickMarkerForSync = async () => {
+    setErrorMsg(null);
+    const picked = await openDialog({
+      multiple: false,
+      filters: [
+        { name: "FVP library marker", extensions: ["fvplibrary", "db"] },
+      ],
+    });
+    if (typeof picked !== "string") return;
+    setBusy(true);
+    try {
+      const resolved = await libraryIpc.setHomeFolderFromMarker(picked);
+      await libraryIpc.setMode("sync");
+      setLibraryMode("sync");
+      setHomeFolderPicked(resolved);
+      showToast(
+        `Sync set up — DB will mirror to ${resolved} every 5 minutes.`,
+        "info",
+        4000,
+      );
+      await finish();
+    } catch (err) {
+      setErrorMsg(`${err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Alternative entry for Client setup: pick library marker file
+  // instead of folder. Same parent-resolution + validation path on
+  // the backend; then we run the same auto-discovery flow.
+  const pickMarkerForClient = async () => {
+    setErrorMsg(null);
+    const picked = await openDialog({
+      multiple: false,
+      filters: [
+        { name: "FVP library marker", extensions: ["fvplibrary", "db"] },
+      ],
+    });
+    if (typeof picked !== "string") return;
+    setBusy(true);
+    try {
+      const resolved = await libraryIpc.setHomeFolderFromMarker(picked);
+      setHomeFolderPicked(resolved);
+      const d = await readHomeDiscovery();
+      if (!d) {
+        setErrorMsg(
+          "Found the home folder, but the Host hasn't written its discovery info there yet. " +
+            "Make sure the Host is configured first, then try again.",
+        );
+        setBusy(false);
+        return;
+      }
+      setHostUrlFromDiscovery(d.host_url);
+      const test = await libraryIpc.testHostConnection(d.host_url, d.token);
+      if (!test.reachable) {
+        setErrorMsg(
+          `Found Host discovery info (${d.host_url}) but couldn't reach it. ` +
+            `${test.error ?? ""}`,
+        );
+        setBusy(false);
+        return;
+      }
+      if (test.authenticated === false) {
+        setErrorMsg(
+          `Host reachable at ${d.host_url} but auth failed — token may have rotated.`,
+        );
+        setBusy(false);
+        return;
+      }
+      await libraryIpc.setHostAddress(d.host_url);
+      await libraryIpc.setMode("client");
+      setLibraryMode("client");
+      setHostEndpoint({ url: d.host_url, token: d.token });
+      showToast(`Client connected to ${d.host_url}`, "info", 3500);
+      await finish();
+    } catch (err) {
+      setErrorMsg(`${err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const pickHomeFolderForClient = async () => {
     setErrorMsg(null);
     const picked = await openDialog({ directory: true, multiple: false });
@@ -230,6 +318,7 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
               homeFolderPicked={homeFolderPicked}
               hostUrl={hostUrlFromDiscovery}
               onPickFolder={pickHomeFolderForClient}
+              onPickMarker={pickMarkerForClient}
               onBack={() => setStep("pick-role")}
             />
           )}
@@ -239,6 +328,7 @@ export function FirstRunWizard({ onDismiss }: { onDismiss: () => void }) {
               busy={busy}
               homeFolderPicked={homeFolderPicked}
               onPickFolder={pickHomeFolderForSync}
+              onPickMarker={pickMarkerForSync}
               onBack={() => setStep("pick-role")}
             />
           )}
@@ -602,11 +692,13 @@ function SyncSetupStep({
   busy,
   homeFolderPicked,
   onPickFolder,
+  onPickMarker,
   onBack,
 }: {
   busy: boolean;
   homeFolderPicked: string | null;
   onPickFolder: () => void;
+  onPickMarker: () => void;
   onBack: () => void;
 }) {
   return (
@@ -643,7 +735,7 @@ function SyncSetupStep({
           ✓ {homeFolderPicked}
         </div>
       )}
-      <div className="flex items-center justify-between pt-2">
+      <div className="flex items-center justify-between pt-2 gap-2 flex-wrap">
         <button
           onClick={onBack}
           disabled={busy}
@@ -651,13 +743,23 @@ function SyncSetupStep({
         >
           ← Back
         </button>
-        <button
-          onClick={onPickFolder}
-          disabled={busy}
-          className="px-4 py-2 bg-fvp-ok text-white text-sm rounded hover:opacity-90 disabled:opacity-50"
-        >
-          {busy ? "Setting up…" : "Browse for sync folder…"}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={onPickMarker}
+            disabled={busy}
+            className="px-3 py-2 bg-fvp-bg border border-fvp-border text-xs rounded hover:border-fvp-muted disabled:opacity-50"
+            title="Already set up on another device? Pick the library.fvplibrary marker file inside the shared sync folder."
+          >
+            Pick library marker file…
+          </button>
+          <button
+            onClick={onPickFolder}
+            disabled={busy}
+            className="px-4 py-2 bg-fvp-ok text-white text-sm rounded hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? "Setting up…" : "Browse for sync folder…"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -668,12 +770,14 @@ function ClientSetupStep({
   homeFolderPicked,
   hostUrl,
   onPickFolder,
+  onPickMarker,
   onBack,
 }: {
   busy: boolean;
   homeFolderPicked: string | null;
   hostUrl: string | null;
   onPickFolder: () => void;
+  onPickMarker: () => void;
   onBack: () => void;
 }) {
   return (
@@ -704,7 +808,7 @@ function ClientSetupStep({
           🔎 Found Host at <code>{hostUrl}</code>
         </div>
       )}
-      <div className="flex items-center justify-between pt-2">
+      <div className="flex items-center justify-between pt-2 gap-2 flex-wrap">
         <button
           onClick={onBack}
           disabled={busy}
@@ -712,13 +816,23 @@ function ClientSetupStep({
         >
           ← Back
         </button>
-        <button
-          onClick={onPickFolder}
-          disabled={busy}
-          className="px-4 py-2 bg-fvp-accent text-white text-sm rounded hover:opacity-90 disabled:opacity-50"
-        >
-          {busy ? "Connecting…" : "Browse for home folder…"}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={onPickMarker}
+            disabled={busy}
+            className="px-3 py-2 bg-fvp-bg border border-fvp-border text-xs rounded hover:border-fvp-muted disabled:opacity-50"
+            title="Already set up on another device? Pick the library.fvplibrary marker file in the shared home folder."
+          >
+            Pick library marker file…
+          </button>
+          <button
+            onClick={onPickFolder}
+            disabled={busy}
+            className="px-4 py-2 bg-fvp-accent text-white text-sm rounded hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? "Connecting…" : "Browse for home folder…"}
+          </button>
+        </div>
       </div>
     </div>
   );

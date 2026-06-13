@@ -2908,6 +2908,56 @@ pub fn library_set_home_folder(
     }
 }
 
+/// Companion to library_set_home_folder for the 'Pick library marker
+/// file...' flow on a second device. The user navigates a file picker
+/// to the .fvplibrary (or library-sync.db, or really any file living
+/// inside an FVP home folder), and we resolve the parent directory
+/// + validate that it looks like an FVP home + set it. Saves the
+/// user from having to know the exact subdirectory name on a NAS
+/// with many siblings.
+///
+/// Validation: the parent dir must contain AT LEAST one of:
+///   - library.fvplibrary (the marker file we wrote for them)
+///   - library-sync.db (sync-mode mirror, written by the Host or
+///     by this device once it pushes)
+///   - host-discovery.json (written by bootstrap_home_folder, so
+///     any FVP-initialized folder will have it)
+/// Any of those three is enough proof that the picked file is inside
+/// an FVP-managed folder. If none are present we return an error so
+/// the user doesn't accidentally set their entire Movies tree as the
+/// home folder.
+#[tauri::command]
+pub fn library_set_home_folder_from_marker(
+    db: State<'_, LibraryDb>,
+    supervisor: State<'_, HostSupervisor>,
+    file_path: String,
+) -> Result<String, String> {
+    let file = std::path::Path::new(&file_path);
+    let parent = file
+        .parent()
+        .ok_or_else(|| {
+            "That file has no parent directory — pick a marker file that lives in the library home folder.".to_string()
+        })?;
+    let marker_present = parent.join("library.fvplibrary").exists()
+        || parent.join("library-sync.db").exists()
+        || parent.join("host-discovery.json").exists();
+    if !marker_present {
+        return Err(format!(
+            "\"{}\" doesn't look like an FVP library home folder (no library.fvplibrary / library-sync.db / host-discovery.json found alongside the file you picked). Make sure you're picking a file INSIDE the home folder, not the home folder itself.",
+            parent.display()
+        ));
+    }
+    let parent_str = parent.to_string_lossy().to_string();
+    library_set_home_folder(db, supervisor, Some(parent_str.clone()))?;
+    crate::log!(
+        "library",
+        "set_home_folder_from_marker: resolved \"{}\" → home=\"{}\"",
+        file_path,
+        parent_str
+    );
+    Ok(parent_str)
+}
+
 /// Client mode only: address of the Host to talk to (Phase 2 wiring).
 /// Phase 1 stores it; no networking happens yet.
 #[tauri::command]
@@ -3623,6 +3673,18 @@ fn bootstrap_home_folder(
     if !disc.exists() {
         fs::write(disc, placeholder)?;
     }
+    // Library-home marker file. Lets a second device's "Pick library
+    // marker file..." flow point at THIS file directly instead of
+    // having to find the right subdirectory by name. The file's
+    // content is just a small JSON beacon - we don't read anything
+    // off it; the existence + filename + parent-dir is the signal.
+    // Idempotent: we always overwrite so the `updated_at` reflects
+    // the most recent bootstrap.
+    let now = now_unix();
+    let marker = format!(
+        "{{\"marker\":\"freedom-video-player-library\",\"version\":1,\"updated_at\":{now},\"note\":\"Pick this file from another device's FVP Library Settings (Browse > Pick library marker file...) to join this library.\"}}"
+    );
+    let _ = fs::write(home.join("library.fvplibrary"), marker);
     if let Some(tok) = token {
         write_auth_token_file(home, tok)?;
     }
